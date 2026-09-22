@@ -1,0 +1,40 @@
+name: Publish UI package
+
+# ADR 0030: booth-design consumes @projectbooth/pipeline-ui as an ordinary npm dependency (its
+# src/lib/nativeModules.ts registry), so this package has to actually exist somewhere installable.
+# Published to GitHub Packages, matching booth-catalog and booth-module-store.
+on:
+  push:
+    tags:
+      - "pipeline-ui-v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@projectbooth"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Typecheck, lint, test (do not publish something CI has not verified)
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test -- --run
+      - run: npm run build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

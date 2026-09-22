@@ -1,0 +1,123 @@
+{{- if .Values.runner.enabled }}
+{{- if gt (int .Values.runner.replicaCount) 1 }}
+{{- fail "runner.replicaCount must be 1 in v0: a task's platform token is refreshed by pushing it to the runner pod that hosts the task, which a load-balanced Service cannot guarantee (docs/decisions/0007). Scale with runner.maxConcurrent and resources instead." }}
+{{- end }}
+# The runner (ADR 0057): the ONLY place workspace members' code executes. It is deliberately a
+# different pod from the API/scheduler so that nothing task code can read is a standing credential:
+#   - no database Secret, no booth-workload-minting-credentials Secret, no other module config;
+#   - automountServiceAccountToken: false, and its ServiceAccount has no RBAC;
+#   - a NetworkPolicy (runner-networkpolicy.yaml) that lets only the API/scheduler pod call it and
+#     gives it no route to the database.
+# The one secret it holds is the shared bearer that lets the API pod call it, which grants nothing
+# beyond "run a task here" — something task code inside the runner can already do.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  replicas: {{ .Values.runner.replicaCount }}
+  # Recreate, not a rolling update: two runner pods at once would split a task from its token refresh.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "booth-pipeline.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runner
+  template:
+    metadata:
+      labels:
+        {{- include "booth-pipeline.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: runner
+    spec:
+      serviceAccountName: {{ include "booth-pipeline.fullname" . }}-runner
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: runner
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["booth-pipeline-runner"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BOOTH_RUNNER_AUTH_TOKEN_FILE
+              value: /etc/booth/runner-auth/token
+            - name: BOOTH_RUNNER_MAX_CONCURRENT
+              value: {{ .Values.runner.maxConcurrent | quote }}
+            {{- if .Values.execution.runnerEnvPassthrough }}
+            - name: BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH
+              value: {{ join "," .Values.execution.runnerEnvPassthrough | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.runner.resources | nindent 12 }}
+          volumeMounts:
+            - name: runner-auth
+              mountPath: /etc/booth/runner-auth
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: runner-auth
+          secret:
+            secretName: {{ .Values.runner.authSecret.name | default (printf "%s-runner-auth" (include "booth-pipeline.fullname" .)) }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.execution.scratchSize | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "booth-pipeline.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- if not .Values.runner.authSecret.name }}
+---
+{{- $name := printf "%s-runner-auth" (include "booth-pipeline.fullname" .) }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+# The bearer secret the API/scheduler pod uses to call the runner. Generated once and kept across
+# upgrades (the lookup re-uses it), never rotated by a helm upgrade. Supply runner.authSecret.name
+# to use a Secret you manage yourself (key: token).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  token: {{ if $existing }}{{ index $existing.data "token" }}{{ else }}{{ randAlphaNum 48 | b64enc }}{{ end }}
+{{- end }}
+{{- end }}

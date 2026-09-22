@@ -1,0 +1,116 @@
+name: Integration
+
+# Layer 3 (contracts/testing-strategy.md, ADR 0024): real-cluster integration. Runs on merge to main
+# and nightly, not on every push/PR. See tests/integration/README.md for what it covers and what it
+# does not.
+#
+# NOTE: this workflow has NEVER BEEN EXECUTED. No kind/k3d was available where it was written; it
+# was linted and its steps reasoned through by hand. Expect first-run issues. In particular it
+# deploys against a stand-in for booth-core's BoothModule CRD and Postgres Secret rather than a
+# real, pinned booth-core, so it proves the chart deploys and the module serves, not that core
+# reconciles it — that is booth-e2e's job.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 8 * * *" # nightly
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kind-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: booth-pipeline-ci
+      - uses: azure/setup-helm@v4
+
+      - name: Build and load the image
+        run: |
+          docker build -t booth-pipeline:ci .
+          kind load docker-image booth-pipeline:ci --name booth-pipeline-ci
+
+      - name: Install the BoothModule CRD (vendored stand-in for booth-core's)
+        run: kubectl apply -f tests/integration/fixtures/boothmodule-crd.yaml
+
+      - name: PostgreSQL and the credentials Secret booth-core would provision (ADR 0053)
+        run: |
+          kubectl create namespace booth-pipeline
+          kubectl apply -n booth-pipeline -f tests/integration/fixtures/postgres.yaml
+          kubectl -n booth-pipeline rollout status deployment/postgres --timeout=180s
+          kubectl -n booth-pipeline create secret generic booth-database-credentials \
+            --from-literal=dsn=postgresql://booth:booth-test@postgres:5432/booth_pipeline
+
+      - name: The Secret booth-core would provision for workload identity (ADR 0056), as a stand-in
+        # The API pod mounts booth-workload-minting-credentials and waits for it. No core here, so
+        # a dummy: enough to prove the wiring and that the runner does NOT get it (checked below).
+        run: |
+          kubectl -n booth-pipeline create secret generic booth-workload-minting-credentials \
+            --from-literal=credential=bwmc.pipeline.ci-standin \
+            --from-literal=url=http://booth-core.booth-system.svc:8080/api/internal/workload-tokens \
+            --from-literal=issuer=http://booth-core.booth-system.svc:8080
+
+      - name: Install the chart
+        run: |
+          helm install booth-pipeline charts/booth-pipeline \
+            --namespace booth-pipeline \
+            --set image.repository=booth-pipeline --set image.tag=ci --set image.pullPolicy=Never \
+            --set oidc.issuerUrl=https://accounts.google.com --set oidc.clientId=booth-pipeline-ci \
+            --set oidc.requireAudience=false --set core.url= \
+            --wait --timeout 5m
+
+      - name: The BoothModule registered, with the fields core reads (ADR 0019/0053)
+        run: |
+          m() { kubectl -n booth-pipeline get boothmodules.booth.projectbooth.io pipeline -o jsonpath="$1"; }
+          test "$(m '{.spec.navPath}')" = "/pipeline"
+          test "$(m '{.spec.navGroup}')" = "build"
+          # checked on the LIVE resource: a CRD that does not know a field prunes it silently
+          test "$(m '{.spec.database.enabled}')" = "true"
+          test "$(m '{.spec.workloadIdentity.mint}')" = "true"
+
+      - name: /healthz is 200 (migrations ran, the database is reachable)
+        run: |
+          out="$(kubectl -n booth-pipeline run curl-health --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -sf http://booth-pipeline.booth-pipeline.svc.cluster.local:8080/healthz)"
+          echo "$out"; echo "$out" | grep -q '"status":"ok"'
+
+      - name: The API refuses unauthenticated requests in-cluster
+        run: |
+          for path in /api/pipelines /api/jobs /api/runs /api/runners; do
+            kubectl -n booth-pipeline run curl-authz --rm -i --restart=Never --image=curlimages/curl -- \
+              curl -s -o /dev/null -w 'status=%{http_code}' "http://booth-pipeline.booth-pipeline.svc.cluster.local:8080$path" \
+              | grep -q 'status=401' || { echo "$path was not refused"; exit 1; }
+          done
+
+      - name: The pod has no Kubernetes API access (user code runs here)
+        run: |
+          sa="system:serviceaccount:booth-pipeline:booth-pipeline"
+          for args in "get secrets -n booth-pipeline" "list pods -n booth-pipeline" "get secrets -n kube-system"; do
+            test "$(kubectl auth can-i $args --as="$sa")" = "no" || { echo "unexpectedly ALLOWED: $args"; exit 1; }
+          done
+          test "$(kubectl -n booth-pipeline get pod -l app.kubernetes.io/name=booth-pipeline -o jsonpath='{.items[0].spec.automountServiceAccountToken}')" = "false"
+
+      - name: The runner pod (where user code executes) holds no module credential (ADR 0057)
+        run: |
+          r() { kubectl -n booth-pipeline get deployment booth-pipeline-runner -o jsonpath="$1"; }
+          secrets="$(r '{.spec.template.spec.volumes[*].secret.secretName}')"
+          echo "runner secrets: $secrets"
+          echo "$secrets" | grep -q 'booth-workload-minting-credentials' && { echo "the runner mounts the minting credential"; exit 1; }
+          echo "$secrets" | grep -q 'booth-database-credentials' && { echo "the runner mounts the database credential"; exit 1; }
+          test "$(r '{.spec.template.spec.automountServiceAccountToken}')" = "false"
+          kubectl -n booth-pipeline rollout status deployment/booth-pipeline-runner --timeout=120s
+          # and it authenticates: no bearer, no service
+          kubectl -n booth-pipeline run curl-runner --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -s -o /dev/null -w 'status=%{http_code}' -X POST \
+            http://booth-pipeline-runner.booth-pipeline.svc.cluster.local:8080/v1/run \
+            | grep -q 'status=401'
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          kubectl -n booth-pipeline get all
+          kubectl -n booth-pipeline logs deployment/booth-pipeline --tail=200 || true

@@ -1,0 +1,60 @@
+{{- if and .Values.runner.enabled .Values.runner.networkPolicy.enabled }}
+# The runner's network boundary (ADR 0057). Task code runs here, so this is where "no route to the
+# module's database, and only the API/scheduler pod may call in" is actually enforced. (Requires a
+# CNI that implements NetworkPolicy; on one that does not, this object is silently inert.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "booth-pipeline.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runner
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only the API/scheduler pod of this release.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "booth-pipeline.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.dns.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.dns.podSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- if .Values.core.url }}
+    # booth-core's gateway, where ctx.storage / ctx.catalog go (the module's database is not listed
+    # here, so there is no route to it).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.core.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.core.podSelector | nindent 14 }}
+    {{- end }}
+    {{- with .Values.runner.networkPolicy.egress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.runner.networkPolicy.egress.allowInternet }}
+    # Opt-in: tasks may reach the public internet (never the private ranges, so still not the database).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+    {{- end }}
+{{- end }}

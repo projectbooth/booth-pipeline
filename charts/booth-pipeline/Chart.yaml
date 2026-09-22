@@ -1,0 +1,9 @@
+apiVersion: v2
+name: booth-pipeline
+description: >
+  Project Booth's pipeline module: a graphical DAG builder (Pipeline -> Task -> Job) backed by
+  Dagster, with a base runner that needs no other module installed.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/projectbooth/booth-pipeline

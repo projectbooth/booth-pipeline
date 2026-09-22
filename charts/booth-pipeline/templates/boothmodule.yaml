@@ -1,0 +1,48 @@
+# Registers booth-pipeline with booth-core's module registry (ADR 0019): the BoothModule CRD is
+# the only thing core reads to know this module exists (contracts/module-manifest.md). Uses
+# booth-core's own CRD type (booth.projectbooth.io/v1alpha1), which that chart installs — not
+# redefined here.
+#
+# A native-mode module (ADR 0005/0030) in the Build nav group (ADR 0017): the builder is our own
+# React UI, published as @projectbooth/pipeline-ui and mounted by booth-design. No adminNavPath:
+# there is one view for every role; write controls are gated by role inside it.
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata:
+  name: pipeline
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+spec:
+  id: pipeline
+  displayName: Pipelines
+  icon: workflow
+  version: {{ .Chart.AppVersion | quote }}
+  contractVersion: "0.1.0"
+  hasOwnUi: true
+  uiIntegrationMode: native
+  navGroup: build
+  navPath: /pipeline
+  healthCheckPath: /healthz
+  requiredScopes:
+    - pipeline.read
+    - pipeline.write
+  # Pipelines, versions, jobs, run history and run logs are all persisted: core provisions an
+  # unprivileged database and role and delivers them as the `booth-database-credentials` Secret
+  # (ADR 0053), which the Deployment reads. Omitting this would provision nothing.
+  database:
+    enabled: true
+  {{- if .Values.workloadIdentity.enabled }}
+  # ADR 0056: this module runs unattended work (scheduled jobs) whose tasks call booth-storage and
+  # booth-catalog, so core provisions a minting credential (the Secret
+  # booth-workload-minting-credentials). It is mounted ONLY into the API/scheduler pod, never the
+  # runner pod that executes task code (ADR 0057). Omitting this field means no credential at all.
+  workloadIdentity:
+    mint: true
+  {{- end }}
+  # No `events` on purpose (ADR 0050). v0 neither publishes nor subscribes to anything, and a
+  # module that declares no events is granted no bus credential at all — least privilege by
+  # default. (Run-lifecycle events for other modules to react to are a natural follow-up, and
+  # would be declared here then.)
+  serviceRef:
+    name: {{ include "booth-pipeline.fullname" . }}
+    port: {{ .Values.service.port }}

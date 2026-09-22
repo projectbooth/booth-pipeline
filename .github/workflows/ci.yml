@@ -1,0 +1,93 @@
+name: CI
+
+# Layers 1-2 (contracts/testing-strategy.md, ADR 0024): unit + contract tests, on every push and PR.
+# Branch protection on main requires every job here to pass before merge. No coverage threshold:
+# tests must exist and pass, not hit a number.
+#
+# The store tests run against a REAL PostgreSQL container (hack/docker-compose.test.yml, the same
+# file used locally) because the Postgres paths — row locks, SKIP LOCKED claiming, the exclusive-run
+# lock — are only meaningfully exercised against the real thing. Everything else is cluster-free.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: azure/setup-helm@v4 # tests/contract renders the chart with `helm template`
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Start PostgreSQL
+        run: docker compose -f hack/docker-compose.test.yml up -d --wait
+
+      - name: Unit + contract tests
+        env:
+          # A missing database or helm must FAIL the build, never silently skip its tests green.
+          BOOTH_TEST_REQUIRE_EMULATORS: "1"
+        run: |
+          eval "$(sh hack/test-env.sh)"
+          pytest tests/unit tests/contract
+
+      - name: Database logs on failure
+        if: failure()
+        run: docker compose -f hack/docker-compose.test.yml logs --tail=100
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --run
+
+      - name: Build
+        run: npm run build
+
+  image:
+    # Catches a broken Dockerfile on the PR that breaks it, and proves tasks execute inside the
+    # chart's lockdown (non-root, read-only root filesystem) — the part /healthz cannot show.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest
+      - run: docker build -t booth-pipeline:dev .
+      - name: Tasks run inside the hardened container
+        run: pytest tests/integration/test_image.py

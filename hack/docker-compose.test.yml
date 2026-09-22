@@ -1,0 +1,28 @@
+# The one external service the store tests talk to. CI runs this same image (see
+# .github/workflows/ci.yml), so a green local run means what a green CI run means. Test tooling
+# only — not used at runtime.
+#
+#   docker compose -f hack/docker-compose.test.yml up -d --wait
+#   eval "$(sh hack/test-env.sh)"        # BOOTH_TEST_POSTGRES_DSN
+#   pytest
+#   docker compose -f hack/docker-compose.test.yml down -v
+#
+# Port 15434: catalog uses 15433 and storage 15432, so all three can run side by side. The
+# explicit project name matters for the same reason it does in booth-catalog: every repo keeps
+# its compose file in a directory called "hack", and Compose would otherwise merge them into one
+# project, where one repo's `down` removes another's containers.
+name: booth-pipeline-test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: booth
+      POSTGRES_PASSWORD: booth-test
+      POSTGRES_DB: booth_pipeline_test
+    ports: ["15434:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booth -d booth_pipeline_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

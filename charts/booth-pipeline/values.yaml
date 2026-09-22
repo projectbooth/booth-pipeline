@@ -1,0 +1,102 @@
+# Default values for booth-pipeline.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/projectbooth/booth-pipeline
+  tag: "" # defaults to Chart.appVersion; overridden by CI to the published tag (contracts/testing-strategy.md)
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8080
+
+oidc:
+  # Required: the same OIDC issuer/client every module verifies against independently
+  # (core-platform-api.md's defense-in-depth requirement). Left empty by default.
+  issuerUrl: ""
+  clientId: ""
+  requireAudience: true
+  # The token claim carrying workspace memberships (ADR 0025). Must match booth-core's
+  # BOOTH_OIDC_GROUPS_CLAIM, or every request is refused.
+  groupsClaim: groups
+
+# Pipelines, versions, jobs, runs and logs live in this module's own database on the shared
+# PostgreSQL cluster (ADR 0014). booth-core provisions the database and role because the
+# BoothModule declares `database: {enabled: true}` (ADR 0053), and writes the connection string
+# into this Secret in our namespace. Override name/key only for an operator-managed database.
+database:
+  credentialsSecret:
+    name: booth-database-credentials
+    key: dsn
+
+core:
+  # booth-core's in-cluster gateway, through which booth-catalog is reached to resolve cataloged
+  # code at save time. Leave empty to run with no catalog at all (inline code only).
+  url: http://booth-core.booth-system.svc:8080
+
+# Where workspace members' code runs (ADR 0057): a separate Deployment holding NO module credentials.
+# Disabling it runs tasks inside the API/scheduler pod instead, which is only acceptable for a
+# single-tenant/dev install and is REFUSED together with workloadIdentity (the minting credential
+# must never share a pod with task code).
+runner:
+  enabled: true
+  # Must be 1 in v0: a task's short-lived platform token is refreshed by pushing it to the runner
+  # pod hosting that task (docs/decisions/0007). Scale with maxConcurrent and resources.
+  replicaCount: 1
+  maxConcurrent: 16
+  resources: {}
+  authSecret:
+    # Empty = the chart generates and keeps one. Or name a Secret you manage (key: token).
+    name: ""
+  networkPolicy:
+    enabled: true
+    egress:
+      dns:
+        namespaceSelector: {kubernetes.io/metadata.name: kube-system}
+        podSelector: {k8s-app: kube-dns}
+      # booth-core's gateway, for ctx.storage / ctx.catalog. Match your install's namespace/labels.
+      core:
+        namespaceSelector: {kubernetes.io/metadata.name: booth-system}
+        podSelector: {app.kubernetes.io/name: booth-core}
+      # Raw NetworkPolicy egress rules. Empty by default: tasks reach storage and the catalog through
+      # booth-core's gateway (the rule above, ADR 0059). Only needed if you point the runner at modules
+      # directly with BOOTH_PIPELINE_STORAGE_URL / _CATALOG_URL.
+      extra: []
+      # Tasks may reach the public internet (never private ranges). Off unless you need it.
+      allowInternet: false
+
+# ADR 0056/0058: let tasks that opt in call booth-storage / booth-catalog as their run. Core mints
+# short-lived tokens for the run; requires booth-core with workload identity enabled.
+workloadIdentity:
+  enabled: true
+
+execution:
+  # Runs execute in worker threads inside this pod; this bounds how many run at once. Further
+  # runs wait in `queued`. Scale out with replicas rather than raising this without bound: every
+  # running task is a subprocess in this pod's memory budget.
+  maxWorkers: 4
+  schedulerIntervalSeconds: 15
+  maxLogLinesPerRun: 50000
+  # Environment variable NAMES a task's subprocess may inherit from this pod (e.g. HTTPS_PROXY).
+  # By default it inherits none: a task never sees the database DSN or any other module setting.
+  runnerEnvPassthrough: []
+  scratchSize: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}
+
+serviceAccount:
+  create: true
+  name: ""

@@ -1,0 +1,135 @@
+{{- if and .Values.workloadIdentity.enabled (not .Values.runner.enabled) }}
+{{- fail "workloadIdentity.enabled requires runner.enabled: the workload-minting credential is mounted into this pod, so task code must not run here or it could read it (ADR 0057). Enable the runner, or disable workloadIdentity." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Rolling updates are fine: a run belongs to whichever replica accepted it, and a replica that
+  # is stopped cancels its own runs on the way down (they are then reported as canceled). Runs are
+  # not migrated between replicas.
+  selector:
+    matchLabels:
+      {{- include "booth-pipeline.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "booth-pipeline.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: {{ include "booth-pipeline.serviceAccountName" . }}
+      # No service-account token: the module never calls the Kubernetes API, so one would be pure
+      # attack surface. What this pod DOES hold that must never reach user code — the database DSN
+      # and the workload-minting credential — is exactly why workspace members' tasks run in the
+      # separate runner pod (runner.yaml, ADR 0057), not here. (With runner.enabled=false, tasks run
+      # here as subprocesses; that is refused together with workloadIdentity.)
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: booth-pipeline
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BOOTH_PIPELINE_PORT
+              value: "8080"
+            - name: BOOTH_OIDC_ISSUER_URL
+              value: {{ required "oidc.issuerUrl is required: every module verifies tokens itself (core-platform-api.md)" .Values.oidc.issuerUrl | quote }}
+            - name: BOOTH_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: BOOTH_OIDC_REQUIRE_AUDIENCE
+              value: {{ .Values.oidc.requireAudience | quote }}
+            # The claim carrying workspace memberships (ADR 0025). The role is re-derived from it
+            # rather than trusted from X-Booth-Role (ADR 0041), so it MUST match booth-core's.
+            - name: BOOTH_OIDC_GROUPS_CLAIM
+              value: {{ .Values.oidc.groupsClaim | quote }}
+            - name: BOOTH_PIPELINE_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.credentialsSecret.name }}
+                  key: {{ .Values.database.credentialsSecret.key }}
+            {{- if .Values.core.url }}
+            # Where booth-catalog is reached (through core's gateway, ADR 0007) to resolve a
+            # cataloged-code reference at save time. Empty = catalog code is refused, inline code
+            # still works: the base runner needs no other module.
+            - name: BOOTH_CORE_URL
+              value: {{ .Values.core.url | quote }}
+            {{- end }}
+            {{- if .Values.runner.enabled }}
+            # User code runs in the separate, credential-less runner pod (ADR 0057), never here.
+            - name: BOOTH_PIPELINE_RUNNER_URL
+              value: "http://{{ include "booth-pipeline.fullname" . }}-runner:8080"
+            - name: BOOTH_RUNNER_AUTH_TOKEN_FILE
+              value: /etc/booth/runner-auth/token
+            {{- end }}
+            {{- if .Values.workloadIdentity.enabled }}
+            - name: BOOTH_WORKLOAD_MINT_DIR
+              value: /etc/booth/workload
+            {{- end }}
+            - name: BOOTH_PIPELINE_MAX_WORKERS
+              value: {{ .Values.execution.maxWorkers | quote }}
+            - name: BOOTH_PIPELINE_SCHEDULER_INTERVAL_SECONDS
+              value: {{ .Values.execution.schedulerIntervalSeconds | quote }}
+            - name: BOOTH_PIPELINE_MAX_LOG_LINES_PER_RUN
+              value: {{ .Values.execution.maxLogLinesPerRun | quote }}
+            {{- if .Values.execution.runnerEnvPassthrough }}
+            - name: BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH
+              value: {{ join "," .Values.execution.runnerEnvPassthrough | quote }}
+            {{- end }}
+          # /livez does not look at the database on purpose: restarting the pod cannot fix a
+          # Postgres outage. /healthz (readiness, and what core polls) does.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # The root filesystem is read-only; task working directories and Dagster's scratch
+            # space need somewhere writable. An emptyDir: nothing here survives the pod, by design.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.runner.enabled }}
+            - name: runner-auth
+              mountPath: /etc/booth/runner-auth
+              readOnly: true
+            {{- end }}
+            {{- if .Values.workloadIdentity.enabled }}
+            # The credential core minted for this module (ADR 0056/0058). Mounted here and nowhere
+            # else: not in the runner pod. The module refuses to start if it is present while tasks
+            # would run in this same pod (config.py).
+            - name: workload-minting
+              mountPath: /etc/booth/workload
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.execution.scratchSize | quote }}
+        {{- if .Values.runner.enabled }}
+        - name: runner-auth
+          secret:
+            secretName: {{ .Values.runner.authSecret.name | default (printf "%s-runner-auth" (include "booth-pipeline.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.workloadIdentity.enabled }}
+        - name: workload-minting
+          secret:
+            # Not `optional`: if booth-core has not written it yet the pod waits, loudly, rather than
+            # starting without an identity for its tasks.
+            secretName: booth-workload-minting-credentials
+        {{- end }}
