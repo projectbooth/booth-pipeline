@@ -271,6 +271,82 @@ def test_a_language_the_base_runner_has_no_strategy_for_is_still_refused(env):
     assert r.status_code == 422 and "the base runner supports" in r.json()["error"] and "python" in r.json()["error"] and "sql" in r.json()["error"]
 
 
+# ---- storage code references (ADR 0063) -----------------------------------------------------
+
+
+def storage_task(key="a", backend="b1", path="tasks/a.py", kind="source", deps=None, **kw):
+    return {"key": key, "kind": kind, "code": {"type": "storage", "backendId": backend, "path": path}, "dependsOn": deps or [], **kw}
+
+
+def test_storage_code_is_resolved_and_snapshotted_at_save(env):
+    env.storage.add("b1", "tasks/a.py", "def run(ctx):\n    return 'from storage'\n")
+    p = new_pipeline(env, spec={"tasks": [storage_task()]})
+    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    import hashlib
+
+    assert code["backendId"] == "b1" and code["path"] == "tasks/a.py"
+    assert code["name"] == "a.py" and code["language"] == "python"  # inferred from the extension
+    assert code["source"] == "def run(ctx):\n    return 'from storage'\n"
+    assert code["sha256"] == hashlib.sha256(code["source"].encode()).hexdigest()
+
+
+def test_runs_use_the_storage_snapshot_and_never_call_storage_again(env):
+    env.storage.add("b1", "tasks/a.py", "print('from storage v1')\n")
+    p = new_pipeline(env, spec={"tasks": [storage_task()]})
+    job = new_job(env, p["id"])
+    env.storage.requests.clear()
+    env.storage.down = True  # storage disappears entirely after save
+    env.storage.objects["b1"]["tasks/a.py"] = "print('TAMPERED')\n"  # and even if the file changed
+    run = env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    assert run["status"] == "succeeded"
+    logs = env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"]
+    assert [ln["message"] for ln in logs if ln["stream"] == "stdout"] == ["from storage v1"]
+    assert env.storage.requests == []  # a run never touches storage for its own code
+
+
+def test_storage_call_carries_the_callers_own_token_and_workspace(env):
+    env.storage.add("b1", "tasks/a.py", "pass\n")
+    new_pipeline(env, spec={"tasks": [storage_task()]})
+    assert env.storage.requests
+    for req in env.storage.requests:
+        assert req.headers["authorization"] == "Bearer tok-editor" and req.headers["x-workspace"] == "acme"
+        assert req.url.path.startswith("/modules/storage/api/backends/b1/objects/")
+
+
+def test_a_client_supplied_storage_snapshot_is_never_trusted(env):
+    env.storage.add("b1", "tasks/a.py", "print('real')\n")
+    forged = storage_task()
+    forged["code"].update({"source": "print('FORGED')\n", "sha256": "0" * 64, "name": "trust me"})
+    p = new_pipeline(env, spec={"tasks": [forged]})
+    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    assert code["source"] == "print('real')\n" and code["name"] == "a.py"
+
+
+def test_an_unrelated_edit_can_be_saved_while_storage_is_down(env):
+    env.storage.add("b1", "tasks/a.py", "pass\n")
+    p = new_pipeline(env, spec={"tasks": [storage_task()]})
+    env.storage.down = True
+    spec = env.call("GET", f"/pipelines/{p['id']}/versions/latest").json()["spec"]
+    spec["tasks"].append(task("extra", "sink", ["a"]))  # only the previously-resolved ref is re-sent
+    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})
+    assert r.status_code == 201, r.text  # reused OUR stored snapshot; needed no storage call
+    # but a *new* storage reference cannot be resolved while it is down:
+    spec["tasks"].append(storage_task("b", path="tasks/b.py", kind="source"))
+    assert env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec}).status_code == 503
+
+
+def test_storage_failure_modes_map_to_useful_statuses(env):
+    p = new_pipeline(env, "host")
+    save = lambda spec: env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})  # noqa: E731
+    r = save({"tasks": [storage_task(path="nope.py")]})
+    assert r.status_code == 422 and r.json()["field"] == "tasks[0].code" and "no object" in r.json()["error"]
+    env.storage.not_installed = True  # the gateway's plain-text 404 is NOT "object not found"
+    r = save({"tasks": [storage_task(path="also-nope.py")]})
+    assert r.status_code == 503 and "not installed" in r.json()["error"] and "Inline code needs no storage" in r.json()["error"]
+    env.storage.not_installed, env.storage.down = False, True
+    assert save({"tasks": [storage_task(path="still-nope.py")]}).status_code == 503
+
+
 def test_inline_code_works_with_the_catalog_entirely_absent(env):
     """The brief's hard requirement: the base runner needs zero other modules."""
     env.catalog.not_installed = True

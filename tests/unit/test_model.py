@@ -151,6 +151,34 @@ def test_code_language_defaults_to_python_for_inline_and_unset_catalog_language(
     assert code_language(CatalogCode(entry_id="e", version="1", language="sql")) == "sql"
 
 
+def test_storage_reference_shape_is_just_backend_and_path():
+    """ADR 0063: structurally parallel to CatalogCode, but no version to pin — the {backendId,
+    path} pair IS the reference."""
+    from booth_pipeline.model import code_language
+
+    s = spec({"key": "a", "kind": "source", "code": {"type": "storage", "backendId": "b1", "path": "tasks/a.py"}})
+    code = s.tasks[0].code
+    assert (code.backend_id, code.path) == ("b1", "tasks/a.py")
+    assert not code.resolved  # nothing has been snapshotted yet
+    assert code_language(code) == "python"  # unset language defaults the same way CatalogCode's does
+
+
+def test_storage_code_is_resolved_once_source_and_sha256_are_both_present():
+    from booth_pipeline.model import StorageCode
+
+    assert not StorageCode(backend_id="b1", path="a.py").resolved
+    assert not StorageCode(backend_id="b1", path="a.py", source="x").resolved  # sha256 still missing
+    assert StorageCode(backend_id="b1", path="a.py", source="x", sha256="deadbeef").resolved
+
+
+def test_an_old_pipeline_with_inline_code_still_loads_and_validates():
+    """ADR 0063 removes the builder's path to CREATE new inline code, but does not delete the
+    type: a pipeline saved before this ADR must keep loading and running exactly as it did."""
+    s = spec(task("a", "source", source="def run(ctx):\n    return 1\n"))
+    validate_structure(s)
+    assert s.tasks[0].code.type == "inline"
+
+
 def test_sha256_is_over_utf8_bytes():
     # the same bytes booth-catalog stores, so a digest is comparable across the two modules
     assert sha256_text("héllo") == hashlib.sha256("héllo".encode()).hexdigest()

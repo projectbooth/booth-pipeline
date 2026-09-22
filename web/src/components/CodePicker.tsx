@@ -62,9 +62,7 @@ export function CodePicker({ api: ctx, value, onChange, disabled }: { api: ApiCo
   return (
     <div className="flex flex-col gap-2">
       {error && (
-        <Banner tone="warn">
-          The code catalog could not be reached ({error}). Inline code needs no catalog — switch to "Write code here" to keep working.
-        </Banner>
+        <Banner tone="warn">The code catalog could not be reached ({error}). Pick a storage reference instead, or try again shortly.</Banner>
       )}
       {value && (
         <div className="rounded-md border border-slate-200 p-2 text-sm dark:border-slate-700">

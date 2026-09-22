@@ -73,31 +73,6 @@ export function autoLayout(tasks: Task[]): Task[] {
   });
 }
 
-// Starter templates. `kind` is purely decorative now (ADR 0062) — these are just friendlier
-// example content for whichever label an author happens to pick; nothing about the shape of a
-// task depends on them, and a task with no kind gets the generic one.
-const GENERIC_TEMPLATE = `def run(ctx):
-    # ctx.inputs maps each upstream task's key to what it returned; ctx.params are this task's
-    # configured parameters. The return value (anything JSON-serialisable) becomes this task's
-    # output, available to anything that depends on it.
-    return None
-`;
-const KIND_TEMPLATES: Partial<Record<TaskKind, string>> = {
-  source: `def run(ctx):
-    print("reading source data")
-    return [{"id": 1}, {"id": 2}, {"id": 3}]
-`,
-  transform: `def run(ctx):
-    rows = [row for upstream in ctx.inputs.values() for row in upstream]
-    print(f"transforming {len(rows)} rows")
-    return rows
-`,
-  sink: `def run(ctx):
-    rows = [row for upstream in ctx.inputs.values() for row in upstream]
-    print(f"writing {len(rows)} rows")
-`,
-};
-
 export function uniqueKey(prefix: string, existing: Iterable<string>): string {
   const taken = new Set(existing);
   for (let i = 1; ; i++) {
@@ -107,14 +82,16 @@ export function uniqueKey(prefix: string, existing: Iterable<string>): string {
 }
 
 /** A new task. `kind` is an optional hint (ADR 0062: purely decorative, never required) used only
- *  to pick a nicer starter key/template — omit it for the generic "+ Add task" action. */
+ *  to pick a nicer starter key — omit it for the generic "+ Add task" action. Its code starts as
+ *  an unresolved catalog reference (ADR 0063: the builder has no path to author new inline code
+ *  any more), ready for the task panel's picker to fill in. */
 export function newTask(existing: Task[], kind: TaskKind | null = null, position?: { x: number; y: number }): Task {
   const key = uniqueKey(kind ?? "task", existing.map((t) => t.key));
   return {
     key,
     name: "",
     kind,
-    code: { type: "inline", source: (kind && KIND_TEMPLATES[kind]) || GENERIC_TEMPLATE },
+    code: { type: "catalog", entryId: "", version: "latest" },
     runner: "base",
     retry: null,
     dependsOn: [],

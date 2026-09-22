@@ -30,6 +30,7 @@ from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
 from .service import JobBusy, NotFound, PipelineService, Unavailable
+from .storage_client import StorageClient
 from .store.base import Conflict, InUse, Store
 from .workload import WorkloadMinter
 
@@ -67,6 +68,7 @@ def create_app(
     store: Store | None = None,
     verifier: TokenVerifier | None = None,
     catalog: CatalogClient | None = None,
+    storage: StorageClient | None = None,
     start_scheduler: bool = True,
     minter: WorkloadMinter | None = None,
     runner_transport: httpx.BaseTransport | None = None,
@@ -80,10 +82,11 @@ def create_app(
         runner = SubprocessRunner(python=cfg.runner_python or None, env_passthrough=cfg.runner_env_passthrough)
     registry = RunnerRegistry([runner])
     catalog = catalog or CatalogClient(cfg.core_url)
+    storage = storage or StorageClient(cfg.core_url)
     minter = minter if minter is not None else WorkloadMinter.from_dir(cfg.workload_mint_dir)
     worker_id = f"{platform.node()}-{uuid4().hex[:8]}"
     manager = RunManager(store, registry, cfg, worker_id, minter)
-    service = PipelineService(store, registry, catalog, manager)
+    service = PipelineService(store, registry, catalog, manager, storage)
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
 
     @asynccontextmanager
@@ -94,6 +97,7 @@ def create_app(
         scheduler.stop()
         manager.shutdown()
         catalog.close()
+        storage.close()
         for c in (minter, runner):
             close = getattr(c, "close", None)
             if close:

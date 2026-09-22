@@ -37,8 +37,11 @@ type TaskNodeData = FlowNode["data"] & Record<string, unknown>;
 
 function codeLabel(task: Task): string {
   if (task.code.type === "inline") return "inline code";
-  const name = task.code.name ?? task.code.entryId;
-  return `${name} @ ${task.code.version}`;
+  if (task.code.type === "catalog") {
+    if (!task.code.entryId) return "no code picked";
+    return `${task.code.name ?? task.code.entryId} @ ${task.code.version}`;
+  }
+  return task.code.path ? (task.code.name ?? task.code.path) : "no code picked";
 }
 
 function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {

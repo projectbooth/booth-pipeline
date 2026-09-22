@@ -81,6 +81,15 @@ describe("endpoints", () => {
     expect(lastCall().init.method).toBeUndefined();
   });
 
+  it("calls storage through ITS gateway prefix, browse-only, recursively (ADR 0063)", async () => {
+    await api.storageObjects(ctx(), "b1", "tasks/");
+    const u = new URL(lastCall().url, "http://x");
+    expect(u.pathname).toBe("/modules/storage/api/backends/b1/objects");
+    expect(u.searchParams.get("prefix")).toBe("tasks/");
+    expect(u.searchParams.get("recursive")).toBe("true");
+    expect(lastCall().init.method).toBeUndefined();
+  });
+
   it("unwraps runners", async () => {
     fetchMock.mockResolvedValueOnce(json({ items: [{ id: "base", displayName: "Base", available: true, reason: null }] }));
     expect((await api.runners(ctx()))[0].id).toBe("base");

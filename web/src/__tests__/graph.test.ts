@@ -140,15 +140,17 @@ describe("new tasks", () => {
     const task = newTask([]);
     expect(task.kind).toBeNull();
     expect(task.runner).toBe("base"); // ADR 0006: the base runner is the default, never Spark
-    expect(task.code.type === "inline" && task.code.source.includes("def run(ctx)")).toBe(true);
+    // ADR 0063: no free-text authoring path, so a new task starts as an unresolved catalog
+    // reference, ready for the task panel's picker to fill in — never inline source.
+    expect(task.code).toEqual({ type: "catalog", entryId: "", version: "latest" });
     expect(task.dependsOn).toEqual([]);
     expect(task.key).toMatch(/^task_\d+$/);
   });
 
-  it.each<TaskKind>(["source", "transform", "sink"])("a %s hint still produces a runnable, base-runner task, tagged accordingly", (kind) => {
+  it.each<TaskKind>(["source", "transform", "sink"])("a %s hint still produces an unresolved, base-runner task, tagged accordingly", (kind) => {
     const task = newTask([], kind);
     expect(task.kind).toBe(kind);
-    expect(task.code.type === "inline" && task.code.source.includes("def run(ctx)")).toBe(true);
+    expect(task.code).toEqual({ type: "catalog", entryId: "", version: "latest" });
     expect(task.key).toMatch(new RegExp(`^${kind}_\\d+$`));
   });
 

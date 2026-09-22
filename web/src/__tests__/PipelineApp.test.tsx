@@ -235,13 +235,15 @@ describe("task settings", () => {
     return { user, form: screen.getByRole("form", { name: /Configure task clean/ }) };
   }
 
-  it("edits the inline code of the selected task", async () => {
+  it("shows an old task's inline code read-only, with no path to edit it, and lets it be replaced via a picker (ADR 0063)", async () => {
     const { user } = await open();
-    const box = screen.getByLabelText("Python source");
-    await user.clear(box);
-    await user.type(box, "print(1)");
-    expect(screen.getByLabelText("Python source")).toHaveValue("print(1)");
-    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByText(/written directly in the builder/)).toBeInTheDocument();
+    const box = screen.getByLabelText("Saved source");
+    expect(box).toHaveValue("def run(ctx):\n    return 1\n");
+    expect(box).toHaveAttribute("readonly");
+    await user.click(screen.getByLabelText("From the code catalog"));
+    expect(screen.queryByLabelText("Saved source")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Search the code catalog")).toBeInTheDocument();
   });
 
   it("lists Spark as unavailable, with why, and cannot select it — base is the default", async () => {
@@ -357,15 +359,51 @@ describe("code catalog picker", () => {
     expect(sel).toHaveValue("1.0.0");
   });
 
-  it("a missing catalog is a warning beside the picker, never a broken builder — inline code still works", async () => {
+  it("a missing catalog is a warning beside the picker, never a broken builder — storage still works", async () => {
     be.catalogDown = true;
-    await pickCatalog();
+    const user = await pickCatalog();
     expect(await screen.findByText(/The code catalog could not be reached/)).toBeInTheDocument();
-    expect(screen.getByText(/Inline code needs no catalog/)).toBeInTheDocument();
+    expect(screen.getByText(/Pick a storage reference instead/)).toBeInTheDocument();
     // the rest of the builder is untouched
     expect(screen.getByRole("button", { name: "+ Add task" })).toBeEnabled();
-    await userEvent.setup().click(screen.getByLabelText("Write code here"));
-    expect(screen.getByLabelText("Python source")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("From storage"));
+    expect(await screen.findByRole("button", { name: /Use tasks\/a\.py/ })).toBeInTheDocument();
+  });
+});
+
+describe("storage code picker (ADR 0063)", () => {
+  async function pickStorage() {
+    const user = userEvent.setup();
+    be.addPipeline("etl", ETL());
+    mount("editor", "/pipeline/pipelines/p1");
+    await user.click(await screen.findByTestId("node-clean"));
+    await user.click(screen.getByLabelText("From storage"));
+    return user;
+  }
+
+  it("references a storage object as {backendId, path} — the narrow shape of ADR 0063", async () => {
+    const user = await pickStorage();
+    await user.click(await screen.findByRole("button", { name: "Use tasks/a.py" }));
+    await user.click(screen.getByRole("button", { name: "Save as new version" }));
+    await waitFor(() => expect(be.called("POST", "/pipelines/p1/versions")).toHaveLength(1));
+    const sent = be.called("POST", "/pipelines/p1/versions")[0].body as { spec: { tasks: { key: string; code: Record<string, unknown> }[] } };
+    const code = sent.spec.tasks.find((t) => t.key === "clean")!.code;
+    expect(code).toEqual({ type: "storage", backendId: "b1", path: "tasks/a.py" });
+  });
+
+  it("filters objects by a typed path prefix", async () => {
+    const user = await pickStorage();
+    await screen.findByRole("button", { name: "Use tasks/a.py" });
+    await user.type(screen.getByLabelText("Filter by path prefix"), "tasks/b");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Use tasks/a.py" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Use tasks/b.sql" })).toBeInTheDocument();
+  });
+
+  it("a missing storage backend list is a warning beside the picker, never a broken builder", async () => {
+    be.storageDown = true;
+    await pickStorage();
+    expect(await screen.findByText(/Storage backends could not be listed/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "+ Add task" })).toBeEnabled();
   });
 });
 

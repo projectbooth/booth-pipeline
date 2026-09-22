@@ -21,6 +21,7 @@ from .model import (
     InlineCode,
     ModelError,
     PipelineSpec,
+    StorageCode,
     code_language,
     sha256_text,
     validate_structure,
@@ -43,6 +44,7 @@ from .runners.registry import RunnerRegistry
 from .runs import RunManager
 from .schedule import next_fire_trigger
 from .schemas import JobInput
+from .storage_client import StorageClient, StorageDenied, StorageNotFound, StorageUnavailable
 from .store.base import Busy, Store
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class PipelineService:
     registry: RunnerRegistry
     catalog: CatalogClient
     manager: RunManager
+    storage: StorageClient
 
     # ---- pipelines ----
     def create_pipeline(self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str) -> tuple[Pipeline, PipelineVersion | None]:
@@ -128,16 +131,18 @@ class PipelineService:
 
     def _resolve_code(self, ident: Identity, spec: PipelineSpec, previous: PipelineSpec | None) -> PipelineSpec:
         # Snapshots we already stored ourselves are trusted; anything a client *sends* claiming to
-        # be a resolved snapshot is not (it would let a caller label arbitrary source as
-        # "catalog entry X @ v1"). So a catalog reference is re-fetched unless it matches
-        # something in our own previous version — which also lets an unrelated edit be saved
-        # while the catalog is down.
-        known: dict[tuple[str, str], CatalogCode] = {}
+        # be a resolved snapshot is not (it would let a caller label arbitrary source as "catalog
+        # entry X @ v1", or an arbitrary storage object as already fetched). So a reference is
+        # re-fetched unless it matches something in our own previous version — which also lets an
+        # unrelated edit be saved while the catalog or storage is down (see StorageCode's own
+        # docstring in model.py for why that reuse rule is correct for storage too, despite a
+        # storage object having no immutable version the way a catalog entry does).
+        known: dict[tuple[str, str, str], CatalogCode | StorageCode] = {}
         if previous:
             for t in previous.tasks:
-                if isinstance(t.code, CatalogCode) and t.code.resolved:
-                    known[(t.code.entry_id, t.code.version)] = t.code
-        fetched: dict[tuple[str, str], CatalogCode] = {}
+                if isinstance(t.code, CatalogCode | StorageCode) and t.code.resolved:
+                    known[_ref_key(t.code)] = t.code
+        fetched: dict[tuple[str, str, str], CatalogCode | StorageCode] = {}
         out = []
         for i, t in enumerate(spec.tasks):
             code = t.code
@@ -145,23 +150,22 @@ class PipelineService:
             if isinstance(code, InlineCode):
                 code = InlineCode(source=code.source, sha256=sha256_text(code.source))
             else:
-                key = (code.entry_id, code.version)
+                key = _ref_key(code)
                 snap = known.get(key) or fetched.get(key)
                 if snap is None:
-                    snap = self._fetch(ident, code, field)
+                    snap = self._fetch_catalog(ident, code, field) if isinstance(code, CatalogCode) else self._fetch_storage(ident, code, field)
                     fetched[key] = snap
-                    fetched[(snap.entry_id, snap.version)] = snap  # the concrete label, if "latest" was asked
+                    fetched[_ref_key(snap)] = snap  # the concrete label, if "latest" was asked (catalog only)
                 code = snap
                 if t.runner == BASE_RUNNER and code_language(code) not in languages.available():
                     raise ModelError(
-                        f"catalog entry {code.name!r} is {code_language(code)!r} code; "
-                        f"the base runner supports: {', '.join(languages.available())}",
+                        f"the code at {field} is {code_language(code)!r}; the base runner supports: {', '.join(languages.available())}",
                         field,
                     )
             out.append(t.model_copy(update={"code": code}))
         return PipelineSpec(tasks=out)
 
-    def _fetch(self, ident: Identity, ref: CatalogCode, field: str) -> CatalogCode:
+    def _fetch_catalog(self, ident: Identity, ref: CatalogCode, field: str) -> CatalogCode:
         try:
             got = self.catalog.fetch(ident.token, ident.workspace, ref.entry_id, ref.version)
         except CatalogNotFound:
@@ -175,6 +179,24 @@ class PipelineService:
             version=got.version,
             name=got.entry_name,
             language=got.language,
+            sha256=sha256_text(got.source),
+            source=got.source,
+        )
+
+    def _fetch_storage(self, ident: Identity, ref: StorageCode, field: str) -> StorageCode:
+        try:
+            got = self.storage.fetch(ident.token, ident.workspace, ref.backend_id, ref.path)
+        except StorageNotFound:
+            raise ModelError(f"no object at {ref.path!r} in storage backend {ref.backend_id!r}", field) from None
+        except StorageDenied:
+            raise ModelError("you are not permitted to read that storage object", field) from None
+        except StorageUnavailable as e:
+            raise Unavailable(f"cannot resolve storage code at {field}: {e}. Inline code needs no storage; otherwise retry shortly.") from e
+        return StorageCode(
+            backend_id=got.backend_id,
+            path=got.path,
+            name=got.path.rsplit("/", 1)[-1],
+            language=got.language or None,
             sha256=sha256_text(got.source),
             source=got.source,
         )
@@ -306,3 +328,12 @@ class PipelineService:
 def _next(body: JobInput, now: datetime) -> datetime | None:
     s = body.schedule
     return next_fire_trigger(s, now) if s and s.enabled else None
+
+
+def _ref_key(code: CatalogCode | StorageCode) -> tuple[str, str, str]:
+    """What makes two code references "the same" for reuse-without-refetching (ADR 0063): a
+    catalog reference by ``(entryId, version)``, a storage reference by ``(backendId, path)`` —
+    each tagged with its own type so the two families can never collide."""
+    if isinstance(code, CatalogCode):
+        return ("catalog", code.entry_id, code.version)
+    return ("storage", code.backend_id, code.path)

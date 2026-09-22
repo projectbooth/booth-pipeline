@@ -119,8 +119,39 @@ class CatalogCode(Wire):
         return self.source is not None and self.sha256 is not None and self.version != "latest"
 
 
+class StorageCode(Wire):
+    """Code from booth-storage — a save-time snapshot (ADR 0063), structurally parallel to
+    ``CatalogCode``: ``{backendId, path}``.
+
+    Unlike a catalog entry, a storage object has no immutable version to pin to — the
+    ``{backendId, path}`` pair *is* the reference, and it stays resolvable to whatever is at that
+    path right now. Re-resolution therefore follows the same rule as an already-pinned catalog
+    reference: the service reuses whatever it already snapshotted for this exact ``{backendId,
+    path}`` in the pipeline's own previous version, rather than re-fetching on every save — so
+    saving an unrelated edit still works while storage is unreachable, and a task's code cannot
+    change out from under a run just because the file at that path was overwritten later. Picking
+    the file again in the builder (a fresh reference) is what pulls in new content.
+    """
+
+    type: Literal["storage"] = "storage"
+    backend_id: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=4096)
+    # Filled by the service on save; ignored (and overwritten) if a client sends them.
+    name: str | None = None  # the path's basename, for display
+    language: str | None = None  # inferred from the path's extension at save time
+    sha256: str | None = None
+    source: str | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.source is not None and self.sha256 is not None
+
+
 class InlineCode(Wire):
-    """Code the user wrote in the builder ("the user's own workspace" — see docs/decisions/0001).
+    """Code the user wrote in the builder — the pre-ADR-0063 way of authoring code, kept only for
+    back-compat ("the user's own workspace" — see docs/decisions/0001). The builder no longer
+    offers a path to create new inline code (ADR 0063): a pipeline saved before that still loads
+    and runs exactly as it did, but new tasks pick a catalog or storage reference instead.
 
     This is what makes the base runner work with zero other modules installed: no catalog, no
     storage, no anything.
@@ -142,7 +173,7 @@ class InlineCode(Wire):
         return v
 
 
-Code = Annotated[CatalogCode | InlineCode, Field(discriminator="type")]
+Code = Annotated[CatalogCode | InlineCode | StorageCode, Field(discriminator="type")]
 
 
 def code_language(code: Code) -> str:

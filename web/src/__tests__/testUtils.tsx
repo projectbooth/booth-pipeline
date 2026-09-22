@@ -44,6 +44,9 @@ export class FakeBackend {
   failNext = new Map<string, { status: number; error: string; field?: string }>();
   catalogDown = false;
   catalogEntries = [{ id: "e1", name: "loader", description: "loads things", language: "python", latestVersion: { version: "2.0.0" }, versionCount: 2 }];
+  storageDown = false;
+  storageBackends = [{ id: "b1", name: "Main" }];
+  storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   runners = [
     { id: "base", displayName: "Base", available: true, reason: null },
     { id: "spark", displayName: "Spark", available: false, reason: "booth-spark does not yet define a compute-submission interface" },
@@ -81,11 +84,13 @@ export class FakeBackend {
     const u = new URL(url, "http://shell");
     const method = (init.method ?? "GET").toUpperCase();
     const body = init.body ? JSON.parse(init.body as string) : undefined;
-    const path = u.pathname.replace(/^\/modules\/(pipeline|catalog)\/api/, "");
+    const path = u.pathname.replace(/^\/modules\/(pipeline|catalog|storage)\/api/, "");
     const isCatalog = u.pathname.startsWith("/modules/catalog");
-    this.calls.push({ method, path: (isCatalog ? "catalog:" : "") + path + u.search, body, headers: new Headers(init.headers) });
+    const isStorage = u.pathname.startsWith("/modules/storage");
+    const prefix = isCatalog ? "catalog:" : isStorage ? "storage:" : "";
+    this.calls.push({ method, path: prefix + path + u.search, body, headers: new Headers(init.headers) });
 
-    const key = `${method} ${(isCatalog ? "catalog:" : "") + path}`;
+    const key = `${method} ${prefix + path}`;
     const fail = this.failNext.get(key);
     if (fail) {
       this.failNext.delete(key);
@@ -96,6 +101,17 @@ export class FakeBackend {
       if (this.catalogDown) return new Response("module not found", { status: 404 });
       if (path === "/code") return this.json({ items: this.catalogEntries, total: this.catalogEntries.length });
       if (/^\/code\/[^/]+\/versions$/.test(path)) return this.json({ items: [{ version: "2.0.0", seq: 2, notes: "" }, { version: "1.0.0", seq: 1, notes: "" }], total: 2 });
+    }
+
+    if (isStorage) {
+      if (this.storageDown) return new Response("module not found", { status: 404 });
+      if (path === "/backends") return this.json({ items: this.storageBackends });
+      const om = path.match(/^\/backends\/([^/]+)\/objects$/);
+      if (om) {
+        const wantPrefix = u.searchParams.get("prefix") ?? "";
+        const paths = (this.storageObjects[om[1]] ?? []).filter((p) => p.startsWith(wantPrefix));
+        return this.json({ entries: paths.map((p) => ({ path: p })) });
+      }
     }
 
     let m: RegExpMatchArray | null;

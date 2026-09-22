@@ -12,6 +12,8 @@ import type {
   Run,
   RunDetail,
   RunnerInfo,
+  StorageBackendSummary,
+  StorageObjectSummary,
   ValidateResult,
 } from "../types";
 
@@ -24,6 +26,9 @@ const PIPELINE = "/modules/pipeline/api";
 // booth-catalog is called through the same gateway, with the user's own token, only for the code
 // picker. The pipeline BACKEND resolves the chosen entry itself at save time; this is browse-only.
 const CATALOG = "/modules/catalog/api";
+// booth-storage, likewise browse-only (ADR 0063): the pipeline backend resolves and snapshots the
+// chosen {backendId, path} itself at save time.
+const STORAGE = "/modules/storage/api";
 
 export type GetAccessToken = () => string | null;
 
@@ -124,4 +129,10 @@ export const api = {
     request<Page<CatalogCodeEntry>>(c, CATALOG, `/code${qs({ q, language: "python", limit: 25 })}`),
   catalogVersions: (c: ApiContext, entryId: string) =>
     request<Page<CatalogVersionSummary>>(c, CATALOG, `/code/${e(entryId)}/versions?limit=200`),
+
+  // booth-storage (browse-only). Same "never break the builder" rule as the catalog: a failure
+  // here is shown next to the picker, not thrown at the whole page.
+  storageBackends: (c: ApiContext) => request<{ items: StorageBackendSummary[] }>(c, STORAGE, "/backends"),
+  storageObjects: (c: ApiContext, backendId: string, prefix = "") =>
+    request<{ entries: StorageObjectSummary[] }>(c, STORAGE, `/backends/${e(backendId)}/objects${qs({ prefix, recursive: "true" })}`),
 };

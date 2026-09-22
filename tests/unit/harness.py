@@ -14,6 +14,7 @@ from booth_pipeline.app import create_app
 from booth_pipeline.auth import AuthError, Claims
 from booth_pipeline.catalog_client import CatalogClient
 from booth_pipeline.config import Config
+from booth_pipeline.storage_client import StorageClient
 from booth_pipeline.store.memory import MemoryStore
 
 WS = "acme"
@@ -67,10 +68,38 @@ class FakeCatalog:
 
 
 @dataclass
+class FakeStorage:
+    """A booth-storage stand-in for save-time code resolution (ADR 0063). Content, not a fixture
+    of versions: a storage object has no version to enumerate, just whatever is at a path now."""
+
+    # backend id -> {path: content}
+    objects: dict[str, dict[str, str]] = field(default_factory=dict)
+    down: bool = False  # simulate unreachable
+    not_installed: bool = False  # the gateway's plain-text 404
+    requests: list[httpx.Request] = field(default_factory=list)
+
+    def add(self, backend_id: str, path: str, content: str) -> None:
+        self.objects.setdefault(backend_id, {})[path] = content
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.down:
+            raise httpx.ConnectError("connection refused")
+        if self.not_installed:
+            return httpx.Response(404, text="module not found")
+        backend_id, _, obj_path = request.url.path.removeprefix("/modules/storage/api/backends/").partition("/objects/")
+        content = self.objects.get(backend_id, {}).get(obj_path)
+        if content is None:
+            return httpx.Response(404, json={"error": "object not found"})
+        return httpx.Response(200, content=content.encode("utf-8"))
+
+
+@dataclass
 class Env:
     client: TestClient
     store: MemoryStore
     catalog: FakeCatalog
+    storage: FakeStorage
     app: Any
 
     def call(self, method: str, path: str, token: str = "tok-editor", json: Any = None, headers: dict[str, str] | None = None, ws: str = WS):
@@ -91,9 +120,11 @@ def make_env(**cfg_overrides: Any) -> Env:
     cfg = Config(dev_memory=True, oidc_issuer_url="https://idp.test/realms/booth", oidc_client_id="booth-pipeline", **cfg_overrides)
     store = MemoryStore()
     catalog = FakeCatalog()
+    storage = FakeStorage()
     client_catalog = CatalogClient("http://core.test", transport=httpx.MockTransport(catalog.handler))
-    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, start_scheduler=False)
-    return Env(TestClient(app), store, catalog, app)
+    client_storage = StorageClient("http://core.test", transport=httpx.MockTransport(storage.handler))
+    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, storage=client_storage, start_scheduler=False)
+    return Env(TestClient(app), store, catalog, storage, app)
 
 
 def task(key: str, kind: str = "transform", deps: list[str] | None = None, source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import type { ApiContext } from "../api/client";
 import { KEY_RE, checkConnection } from "../graph";
 import type { Backoff, RunnerInfo, Task, TaskKind } from "../types";
 import { CodePicker } from "./CodePicker";
+import { StoragePicker } from "./StoragePicker";
 import { Banner, Button, Field, inputClass, monoClass } from "./ui";
 
 // Configures ONE task: what code it runs, which runner it targets, its retry override and its
@@ -70,7 +71,6 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
 
   // Only tasks that could legally be upstream of this one are offered (same rules as drawing an edge).
   const candidates = tasks.filter((t) => t.key !== task.key && (task.dependsOn.includes(t.key) || checkConnection(tasks, t.key, task.key).ok));
-  const isCatalog = task.code.type === "catalog";
   const retry = task.retry ?? { maxRetries: 0, delaySeconds: 0, backoff: "fixed" as Backoff };
 
   return (
@@ -124,59 +124,62 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
 
         <section aria-label="Code" className="flex flex-col gap-2">
           <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Code this task runs</h3>
+          {task.code.type === "inline" && (
+            <Banner tone="info">
+              This task's code was written directly in the builder — an older way of authoring code that has been retired. It keeps working as
+              saved; pick a catalog or storage source below to replace it.
+            </Banner>
+          )}
           <div role="radiogroup" aria-label="Where the code comes from" className="flex gap-4 text-sm text-slate-700 dark:text-slate-300">
             <label className="flex items-center gap-1.5">
               <input
                 type="radio"
                 name="code-type"
-                checked={!isCatalog}
-                onChange={() => onChange({ ...task, code: { type: "inline", source: task.code.source ?? "def run(ctx):\n    pass\n" } })}
+                checked={task.code.type === "catalog"}
+                onChange={() => onChange({ ...task, code: { type: "catalog", entryId: "", version: "latest" } })}
               />
-              Write code here
+              From the code catalog
             </label>
             <label className="flex items-center gap-1.5">
               <input
                 type="radio"
                 name="code-type"
-                checked={isCatalog}
-                onChange={() => onChange({ ...task, code: { type: "catalog", entryId: "", version: "latest" } })}
+                checked={task.code.type === "storage"}
+                onChange={() => onChange({ ...task, code: { type: "storage", backendId: "", path: "" } })}
               />
-              From the code catalog
+              From storage
             </label>
           </div>
           {task.code.type === "inline" ? (
-            <Field id="task-source" label="Python source" help="Define run(ctx). Its return value goes to downstream tasks; print() goes to the task log.">
-              {(p) => (
-                <textarea
-                  {...p}
-                  className={`${inputClass} ${monoClass} h-56 resize-y`}
-                  spellCheck={false}
-                  value={task.code.type === "inline" ? task.code.source : ""}
-                  onChange={(e) => onChange({ ...task, code: { type: "inline", source: e.target.value } })}
-                />
-              )}
+            <Field id="task-source" label="Saved source" help="Read-only: new code is picked from the catalog or storage above, not written here.">
+              {(p) => <textarea {...p} className={`${inputClass} ${monoClass} h-56 resize-y`} readOnly value={task.code.source ?? ""} />}
             </Field>
+          ) : task.code.type === "catalog" ? (
+            <CodePicker
+              api={api}
+              disabled={readOnly}
+              value={task.code.entryId ? task.code : null}
+              onChange={(code) => onChange({ ...task, code })}
+            />
           ) : (
-            <>
-              <CodePicker
-                api={api}
-                disabled={readOnly}
-                value={task.code.entryId ? task.code : null}
-                onChange={(code) => onChange({ ...task, code })}
-              />
-              {task.code.source && (
-                <div>
-                  <Button onClick={() => setShowSource((v) => !v)} aria-expanded={showSource}>
-                    {showSource ? "Hide" : "View"} saved source
-                  </Button>
-                  {showSource && (
-                    <pre className={`${monoClass} mt-2 max-h-56 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-950`}>
-                      {task.code.source}
-                    </pre>
-                  )}
-                </div>
+            <StoragePicker
+              api={api}
+              disabled={readOnly}
+              value={task.code.path ? task.code : null}
+              onChange={(code) => onChange({ ...task, code })}
+            />
+          )}
+          {task.code.type !== "inline" && task.code.source && (
+            <div>
+              <Button onClick={() => setShowSource((v) => !v)} aria-expanded={showSource}>
+                {showSource ? "Hide" : "View"} saved source
+              </Button>
+              {showSource && (
+                <pre className={`${monoClass} mt-2 max-h-56 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-950`}>
+                  {task.code.source}
+                </pre>
               )}
-            </>
+            </div>
           )}
         </section>
 

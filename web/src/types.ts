@@ -14,14 +14,26 @@ export interface RetryPolicy {
 }
 
 /** Code a Task runs. `catalog` is the v0 code-catalog reference shape (ADR 0010): just
- *  {entryId, version}. The rest is filled in by the server at save time — a snapshot, so a run
- *  never depends on the catalog being reachable. */
+ *  {entryId, version}. `storage` (ADR 0063) is structurally parallel — {backendId, path} — but
+ *  has no version to pin, since a storage object has none. Both are filled in by the server at
+ *  save time — a snapshot, so a run never depends on the catalog or storage being reachable.
+ *  `inline` (free-text source typed into the builder) has no new creation path since ADR 0063,
+ *  but old pipelines that already have it keep working. */
 export type TaskCode =
   | { type: "inline"; source: string; sha256?: string | null }
   | {
       type: "catalog";
       entryId: string;
       version: string;
+      name?: string | null;
+      language?: string | null;
+      sha256?: string | null;
+      source?: string | null;
+    }
+  | {
+      type: "storage";
+      backendId: string;
+      path: string;
       name?: string | null;
       language?: string | null;
       sha256?: string | null;
@@ -198,4 +210,15 @@ export interface CatalogVersionSummary {
   version: string;
   seq: number;
   notes: string;
+}
+
+// booth-storage, as much of it as the picker needs (its own API; read-only here, ADR 0063).
+export interface StorageBackendSummary {
+  id: string;
+  name?: string;
+}
+
+export interface StorageObjectSummary {
+  path: string;
+  size?: number;
 }
