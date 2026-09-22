@@ -15,8 +15,9 @@ from psycopg import errors as pgerr
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import TypeAdapter
 
-from ..model import PipelineSpec, RetryPolicy, Schedule
+from ..model import PipelineSpec, RetryPolicy, Trigger
 from ..records import (
     RUN_ACTIVE,
     RUN_QUEUED,
@@ -31,12 +32,16 @@ from ..records import (
     Run,
     TaskRun,
 )
-from ..schedule import next_fire
+from ..schedule import next_fire_trigger
 from .base import Busy, Conflict, InUse
 
 # Arbitrary constant: the advisory lock that serialises schema migration across replicas that
 # start at the same moment.
 _MIGRATION_LOCK = 0x626F6F7470  # "boot p"
+
+# A stored `schedule` JSON blob can be either union member (ADR 0065); dispatch on it rather than
+# assuming CronTrigger, which would blow up on a stored IntervalTrigger row.
+_trigger_adapter: TypeAdapter[Trigger] = TypeAdapter(Trigger)
 
 
 def _like(q: str) -> str:
@@ -97,7 +102,7 @@ class PostgresStore:
             name=r["name"],
             pipeline_id=r["pipeline_id"],
             pipeline_version=r["pipeline_version"],
-            schedule=Schedule.model_validate(r["schedule"]) if r["schedule"] else None,
+            schedule=_trigger_adapter.validate_python(r["schedule"]) if r["schedule"] else None,
             retry=RetryPolicy.model_validate(r["retry"]) if r["retry"] else None,
             allow_concurrent_runs=r["allow_concurrent_runs"],
             created_by=r["created_by"],
@@ -285,9 +290,20 @@ class PostgresStore:
             for r in rows:
                 job = self._job(r)
                 out.append(job)
-                nxt = next_fire(job.schedule.cron, job.schedule.timezone, now)  # type: ignore[union-attr]
+                nxt = next_fire_trigger(job.schedule, now)  # type: ignore[arg-type]
                 conn.execute("UPDATE jobs SET next_run_at=%s WHERE id=%s", (nxt, job.id))
         return out
+
+    def list_upcoming(self, limit):
+        # A plain read — no FOR UPDATE, no transaction, no advance. Safe (and cheap) for every
+        # replica to run on a coarse cadence; only claim_due_jobs above is the locking write.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE next_run_at IS NOT NULL AND schedule IS NOT NULL"
+                " AND (schedule->>'enabled')::boolean ORDER BY next_run_at, id LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [self._job(r) for r in rows]
 
     # ---- runs ----
     def create_run(self, run, task_keys, exclusive=False):

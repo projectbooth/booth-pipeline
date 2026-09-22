@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from booth_pipeline.model import MIN_INTERVAL_SECONDS
+
 from .harness import Env, etl_spec, make_env, task
 
 T0 = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
@@ -92,6 +94,24 @@ def test_two_schedulers_polling_at_once_start_a_due_fire_exactly_once(env):
     env.wait_run(started[0])
 
 
+def test_an_interval_job_fires_via_tick_and_reschedules_by_simple_addition(env):
+    p = env.call("POST", "/pipelines", json={"name": "etl", "spec": etl_spec()}).json()
+    job = env.call("POST", "/jobs", json={"name": "frequent", "pipelineId": p["id"], "schedule": {"type": "interval", "seconds": 30}}).json()
+    assert job["schedule"] == {"type": "interval", "seconds": 30, "enabled": True}
+    make_due(env, job["id"], T0)
+    # no calendar alignment: an interval reschedules from the moment it actually fired, not from
+    # whenever it was due — tick with "now" exactly at T0 so the math is exact and predictable.
+    (rid,) = env.app.state.scheduler.tick(T0)
+    env.wait_run(rid)
+    assert env.call("GET", f"/jobs/{job['id']}").json()["nextRunAt"] == "2026-03-01T09:00:30+00:00"
+
+
+def test_an_interval_below_the_minimum_is_rejected(env):
+    p = env.call("POST", "/pipelines", json={"name": "etl", "spec": etl_spec()}).json()
+    r = env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"type": "interval", "seconds": MIN_INTERVAL_SECONDS - 1}})
+    assert r.status_code == 422 and r.json()["field"] == "schedule.interval.seconds"
+
+
 def test_a_run_pins_the_version_that_was_latest_when_it_started(env):
     p, job = scheduled_job(env)
     make_due(env, job["id"], T0)
@@ -141,3 +161,102 @@ def test_a_run_that_never_started_is_eventually_failed(env):
     stuck_run(env, "queued", None, now - timedelta(hours=2))
     assert env.app.state.scheduler._manager.sweep() == 1
     assert "never started" in env.call("GET", "/runs/r-stuck").json()["error"]
+
+
+# ---- the loop itself: index-driven, not a fixed-cadence poll (ADR 0065) ----------------------
+
+
+def test_the_loop_does_not_claim_when_nothing_is_due():
+    """The whole point of the redesign: no due jobs means no locking write query, even across
+    several refresh cycles — only the cheap read (list_upcoming) runs on the index cadence."""
+    import time
+
+    e = make_env()
+    with e.client:
+        sched = e.app.state.scheduler
+        sched._index_refresh_seconds = 0.2
+        claims = []
+        original = e.store.claim_due_jobs
+        e.store.claim_due_jobs = lambda *a, **k: (claims.append(1) or original(*a, **k))
+        sched.start()
+        time.sleep(0.9)  # several refresh cycles at 0.2s each
+        sched.stop()
+        assert claims == []
+
+
+def test_a_due_job_fires_promptly_even_with_a_long_refresh_cadence():
+    """The sleep is driven by the index's earliest known fire time, not capped to the refresh
+    cadence — a job due in under a second fires in under a second even if the index only refreshes
+    every 30s."""
+    import time
+
+    e = make_env()
+    with e.client:
+        p = e.call("POST", "/pipelines", json={"name": "etl", "spec": etl_spec()}).json()
+        job = e.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"type": "interval", "seconds": MIN_INTERVAL_SECONDS}}).json()
+        make_due(e, job["id"], datetime.now(UTC))
+        sched = e.app.state.scheduler
+        sched._index_refresh_seconds = 30  # deliberately long
+        t0 = time.monotonic()
+        sched.start()
+        try:
+            for _ in range(100):
+                if e.call("GET", f"/runs?jobId={job['id']}").json()["total"] >= 1:
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError("the due job never fired")
+            assert time.monotonic() - t0 < 5  # nowhere near the 30s refresh cadence
+        finally:
+            sched.stop()
+
+
+def test_a_short_interval_is_not_throttled_to_the_refresh_cadence():
+    """After a claim, the index re-checks immediately — so a job firing every few seconds keeps
+    firing at its own pace even when the refresh cadence is much longer."""
+    import time
+
+    e = make_env()
+    with e.client:
+        p = e.call("POST", "/pipelines", json={"name": "etl", "spec": etl_spec()}).json()
+        job = e.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"type": "interval", "seconds": MIN_INTERVAL_SECONDS}, "allowConcurrentRuns": True}).json()
+        make_due(e, job["id"], datetime.now(UTC))
+        sched = e.app.state.scheduler
+        sched._index_refresh_seconds = 60
+        sched.start()
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if e.call("GET", f"/runs?jobId={job['id']}").json()["total"] >= 2:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("a second fire never happened — the loop is stuck waiting out the refresh cadence")
+        finally:
+            sched.stop()
+
+
+def test_the_index_notices_a_job_created_after_the_loop_started():
+    """A replica whose index was last refreshed before a job existed still picks it up — within
+    one refresh cycle, via the coarser index read, not the claim query."""
+    import time
+
+    e = make_env()
+    with e.client:
+        sched = e.app.state.scheduler
+        sched._index_refresh_seconds = 0.3
+        sched.start()
+        try:
+            time.sleep(0.1)  # the loop is running with an empty index
+            p = e.call("POST", "/pipelines", json={"name": "etl", "spec": etl_spec()}).json()
+            job = e.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"type": "interval", "seconds": MIN_INTERVAL_SECONDS}}).json()
+            make_due(e, job["id"], datetime.now(UTC))
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if e.call("GET", f"/runs?jobId={job['id']}").json()["total"] >= 1:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("a job created after the loop started was never picked up")
+        finally:
+            sched.stop()

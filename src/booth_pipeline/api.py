@@ -34,7 +34,7 @@ def _iso(d: datetime | None) -> str | None:
     return d.isoformat() if d else None
 
 
-def _schedule(s: m.Schedule | None) -> dict[str, Any] | None:
+def _schedule(s: m.Trigger | None) -> dict[str, Any] | None:
     return s.model_dump(by_alias=True) if s else None
 
 

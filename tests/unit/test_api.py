@@ -282,7 +282,7 @@ def test_jobs_need_a_saved_version_and_validate_their_schedule(env):
     assert env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "pipelineVersion": 5}).status_code == 422
     assert env.call("POST", "/jobs", json={"name": "j", "pipelineId": "nope"}).status_code == 404
     bad = env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"cron": "every day"}})
-    assert bad.status_code == 422 and bad.json()["field"] == "schedule"
+    assert bad.status_code == 422 and bad.json()["field"] == "schedule.cron"
     bad = env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"cron": "0 9 * * *", "timezone": "Mars/Base"}})
     assert bad.status_code == 422
 
@@ -290,7 +290,7 @@ def test_jobs_need_a_saved_version_and_validate_their_schedule(env):
 def test_job_config_is_persisted_and_re_editable(env):
     p = new_pipeline(env)
     job = new_job(env, p["id"], schedule={"cron": "0 9 * * 1-5", "timezone": "America/Toronto"}, retry={"maxRetries": 2, "delaySeconds": 5, "backoff": "exponential"}, pipelineVersion=1)
-    assert job["nextRunAt"] and job["schedule"] == {"cron": "0 9 * * 1-5", "timezone": "America/Toronto", "enabled": True}
+    assert job["nextRunAt"] and job["schedule"] == {"type": "cron", "cron": "0 9 * * 1-5", "timezone": "America/Toronto", "enabled": True}
     got = env.call("GET", f"/jobs/{job['id']}").json()
     assert got["retry"] == {"maxRetries": 2, "delaySeconds": 5.0, "backoff": "exponential"} and got["pipelineVersion"] == 1
     r = env.call("PUT", f"/jobs/{job['id']}", json={"name": "renamed", "pipelineId": p["id"], "schedule": {"cron": "*/5 * * * *", "enabled": False}, "allowConcurrentRuns": True})

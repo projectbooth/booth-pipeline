@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import { Banner, Button, EmptyState, Field, Link, Loaded, PageHeader, StatusChip, inputClass, linkClass, tdClass, thClass } from "../components/ui";
+import { ScheduleEditor, type TriggerShape } from "../components/ScheduleEditor";
 import type { ViewCtx } from "../context";
-import { COMMON_TIMEZONES, CRON_PRESETS, describeSchedule, formatDuration, formatTime, localTimezone } from "../format";
+import { describeSchedule, formatDuration, formatTime, localTimezone } from "../format";
 import { errorMessage, useLoad } from "../hooks";
-import type { Backoff, Job, JobInput, Pipeline, RetryPolicy, Schedule } from "../types";
+import type { Backoff, Job, JobInput, Pipeline, RetryPolicy } from "../types";
 
 // Jobs: a Pipeline turned into something you can run on demand or on a schedule. A Job carries
 // its own schedule, default retry policy and run history, and either follows the pipeline's latest
@@ -225,8 +226,11 @@ function JobForm({
   const [pid, setPid] = useState(initial?.pipelineId ?? pipelineId ?? pipelines[0]?.id ?? "");
   const [pinned, setPinned] = useState<number | null>(initial?.pipelineVersion ?? null);
   const [scheduled, setScheduled] = useState(initial?.schedule != null);
-  const [cron, setCron] = useState(initial?.schedule?.cron ?? "0 9 * * *");
-  const [timezone, setTimezone] = useState(initial?.schedule?.timezone ?? localTimezone());
+  const [shape, setShape] = useState<TriggerShape>(() =>
+    initial?.schedule?.type === "interval"
+      ? { type: "interval", seconds: initial.schedule.seconds }
+      : { type: "cron", cron: initial?.schedule?.cron ?? "0 9 * * *", timezone: initial?.schedule?.timezone ?? localTimezone() },
+  );
   const [enabled, setEnabled] = useState(initial?.schedule?.enabled ?? true);
   const [retryOn, setRetryOn] = useState(initial?.retry != null && initial.retry.maxRetries > 0);
   const [retry, setRetry] = useState<RetryPolicy>(initial?.retry ?? { maxRetries: 2, delaySeconds: 30, backoff: "exponential" });
@@ -255,7 +259,11 @@ function JobForm({
     setBusy(true);
     setError(null);
     setSaved(false);
-    const schedule: Schedule | null = scheduled ? { cron: cron.trim(), timezone: timezone.trim(), enabled } : null;
+    const schedule: JobInput["schedule"] = scheduled
+      ? shape.type === "interval"
+        ? { type: "interval", seconds: shape.seconds, enabled }
+        : { type: "cron", cron: shape.cron.trim(), timezone: shape.timezone.trim(), enabled }
+      : null;
     const body: JobInput = {
       name: name.trim(),
       pipelineId: pid,
@@ -331,26 +339,7 @@ function JobForm({
           </label>
           {scheduled ? (
             <>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field id="job-cron" label="Cron expression" required error={fieldError("schedule")} help="Five fields: minute hour day-of-month month day-of-week.">
-                  {(p) => <input {...p} className={`${inputClass} font-mono`} value={cron} onChange={(e) => setCron(e.target.value)} list="cron-presets" />}
-                </Field>
-                <Field id="job-tz" label="Timezone" help="Evaluated in this timezone, so 09:00 stays 09:00 across daylight saving.">
-                  {(p) => <input {...p} className={inputClass} value={timezone} onChange={(e) => setTimezone(e.target.value)} list="timezones" />}
-                </Field>
-              </div>
-              <datalist id="cron-presets">
-                {CRON_PRESETS.map((c) => (
-                  <option key={c.cron} value={c.cron}>
-                    {c.label}
-                  </option>
-                ))}
-              </datalist>
-              <datalist id="timezones">
-                {COMMON_TIMEZONES.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
+              <ScheduleEditor value={shape} onChange={setShape} fallbackTimezone={localTimezone()} fieldError={fieldError} />
               <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
                 <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
                 Schedule is active (untick to pause without losing it)
@@ -413,7 +402,7 @@ function JobForm({
       </fieldset>
 
       {error && !error.field && <Banner tone="error">{error.message}</Banner>}
-      {error?.field && !["name", "schedule", "pipelineVersion"].includes(error.field) && <Banner tone="error">{error.message}</Banner>}
+      {error?.field && !["name", "schedule.cron", "schedule.interval.seconds", "pipelineVersion"].includes(error.field) && <Banner tone="error">{error.message}</Banner>}
       {saved && <Banner tone="success">Job saved.</Banner>}
       {!readOnly && (
         <div>

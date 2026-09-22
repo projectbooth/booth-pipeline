@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from .model import PipelineSpec, RetryPolicy, Schedule, Wire
+from .model import PipelineSpec, RetryPolicy, Trigger, Wire
 
 MAX_NAME = 200
 MAX_DESCRIPTION = 4000
@@ -40,7 +40,7 @@ class JobInput(Wire):
     pipeline_id: str = Field(min_length=1, max_length=64)
     # null = follow the pipeline's latest saved version; an integer pins that version.
     pipeline_version: int | None = Field(None, ge=1)
-    schedule: Schedule | None = None
+    schedule: Trigger | None = None
     retry: RetryPolicy | None = None
     allow_concurrent_runs: bool = False
     # The most a run's platform token (for tasks that opt in) may be granted; capped again by the

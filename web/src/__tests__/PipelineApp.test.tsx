@@ -376,6 +376,7 @@ describe("jobs", () => {
     mount("editor", "/pipeline/jobs/new?pipeline=p1");
     await user.type(await screen.findByLabelText(/^Name/), "nightly");
     await user.click(screen.getByLabelText("Run on a schedule"));
+    await user.selectOptions(screen.getByLabelText("Frequency"), "Custom (cron expression)");
     const cron = screen.getByLabelText(/Cron expression/);
     await user.clear(cron);
     await user.type(cron, "0 2 * * *");
@@ -389,12 +390,25 @@ describe("jobs", () => {
       name: "nightly",
       pipelineId: "p1",
       pipelineVersion: null, // follows the latest by default
-      schedule: { cron: "0 2 * * *", timezone: "America/Toronto", enabled: true },
+      schedule: { type: "cron", cron: "0 2 * * *", timezone: "America/Toronto", enabled: true },
       retry: { maxRetries: 2, delaySeconds: 30, backoff: "exponential" },
       allowConcurrentRuns: false,
       roleCeiling: "editor", // the default: read and write, never owner
     });
     await waitFor(() => expect(window.location.pathname).toBe("/pipeline/jobs/j1"));
+  });
+
+  it("creates a job on a sub-minute interval trigger (ADR 0065)", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("etl", ETL());
+    mount("editor", "/pipeline/jobs/new?pipeline=p1");
+    await user.type(await screen.findByLabelText(/^Name/), "frequent");
+    await user.click(screen.getByLabelText("Run on a schedule"));
+    await user.selectOptions(screen.getByLabelText("Frequency"), "Every N seconds");
+    expect(screen.queryByLabelText("Timezone")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create job" }));
+    await waitFor(() => expect(be.called("POST", "/jobs")).toHaveLength(1));
+    expect((be.called("POST", "/jobs")[0].body as { schedule: unknown }).schedule).toEqual({ type: "interval", seconds: 5, enabled: true });
   });
 
   it("can pin a job to a specific version", async () => {
@@ -412,7 +426,7 @@ describe("jobs", () => {
   it("maps a bad-schedule error onto the cron field", async () => {
     const user = userEvent.setup();
     be.addPipeline("etl", ETL());
-    be.failNext.set("POST /jobs", { status: 422, error: "cron must have exactly 5 fields: minute hour day-of-month month day-of-week", field: "schedule" });
+    be.failNext.set("POST /jobs", { status: 422, error: "cron must have exactly 5 fields: minute hour day-of-month month day-of-week", field: "schedule.cron" });
     mount("editor", "/pipeline/jobs/new?pipeline=p1");
     await user.type(await screen.findByLabelText(/^Name/), "bad");
     await user.click(screen.getByLabelText("Run on a schedule"));
@@ -449,7 +463,7 @@ describe("jobs", () => {
 
   it("a viewer can read jobs but not run or create them", async () => {
     be.addPipeline("etl", ETL());
-    be.jobs.push({ id: "j1", name: "nightly", pipelineId: "p1", pipelineVersion: null, schedule: { cron: "0 9 * * 1-5", timezone: "UTC", enabled: true }, retry: null, allowConcurrentRuns: false, roleCeiling: "editor", hasOwner: true, createdBy: "e", createdAt: "", updatedAt: "", nextRunAt: null });
+    be.jobs.push({ id: "j1", name: "nightly", pipelineId: "p1", pipelineVersion: null, schedule: { type: "cron", cron: "0 9 * * 1-5", timezone: "UTC", enabled: true }, retry: null, allowConcurrentRuns: false, roleCeiling: "editor", hasOwner: true, createdBy: "e", createdAt: "", updatedAt: "", nextRunAt: null });
     mount("viewer", "/pipeline/jobs");
     expect(await screen.findByText("weekdays at 09:00 (UTC)")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Run nightly now/ })).not.toBeInTheDocument();

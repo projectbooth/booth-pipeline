@@ -26,7 +26,7 @@ from ..records import (
     Run,
     TaskRun,
 )
-from ..schedule import next_fire
+from ..schedule import next_fire_trigger
 from .base import Busy, Conflict, InUse
 
 
@@ -181,9 +181,15 @@ class MemoryStore:
             out = []
             for j in due[:limit]:
                 claimed = copy.deepcopy(j)
-                j.next_run_at = next_fire(j.schedule.cron, j.schedule.timezone, now)
+                j.next_run_at = next_fire_trigger(j.schedule, now)
                 out.append(claimed)
             return out
+
+    def list_upcoming(self, limit):
+        with self._lock:
+            due = [j for j in self._jobs.values() if j.schedule and j.schedule.enabled and j.next_run_at]
+            due.sort(key=lambda j: (j.next_run_at, j.id))
+            return copy.deepcopy(due[:limit])
 
     # ---- runs ----
     def create_run(self, run, task_keys, exclusive=False):

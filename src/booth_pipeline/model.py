@@ -22,7 +22,7 @@ import hashlib
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 # Bounds. Each exists so one request cannot make the service hold or execute something unbounded.
@@ -280,19 +280,61 @@ def validate_structure(spec: PipelineSpec, available_runners: set[str] | None = 
         raise ModelError(f"the pipeline's code totals more than {MAX_SPEC_SOURCE_BYTES} bytes", "tasks")
 
 
-# ---- Job-level config ----------------------------------------------------------------------
+# ---- Job-level config: triggers (ADR 0065) --------------------------------------------------
+#
+# A job's `schedule` field is a discriminated `Trigger` union so a future trigger type is a new
+# member, not a redesign. `cron` is the original mechanism (5-field, minute-granularity, unchanged)
+# and `interval` is new, for schedules below cron's one-minute floor.
+
+# A run has real overhead (a Dagster job compile, dispatch to the runner, a subprocess start, and
+# — if any task opts in — a workload-token mint): measured at ~0.17-0.2s steady-state for a single
+# trivial in-process task (see docs/decisions/0009). MIN_INTERVAL_SECONDS is a conservative floor
+# well above that, leaving headroom for the runner-pod hop, larger pipelines and real infra
+# latency — an honest engineering floor, not an arbitrary policy line.
+MIN_INTERVAL_SECONDS = 5
+MAX_INTERVAL_SECONDS = 30 * 24 * 3600  # beyond this, cron is the right tool
 
 
-class Schedule(Wire):
-    """A basic cron schedule (5 fields, minute granularity) in an IANA timezone."""
+class CronTrigger(Wire):
+    """The original mechanism: a 5-field cron expression (minute granularity) in an IANA timezone."""
 
+    type: Literal["cron"] = "cron"
     cron: str = Field(min_length=1, max_length=100)
     timezone: str = "UTC"
     enabled: bool = True
 
     @model_validator(mode="after")
-    def _valid(self) -> Schedule:
+    def _valid(self) -> CronTrigger:
         from .schedule import validate_schedule
 
         validate_schedule(self.cron, self.timezone)
         return self
+
+
+class IntervalTrigger(Wire):
+    """Run every N seconds — for schedules below cron's one-minute floor (ADR 0065). Deliberately
+    its own type rather than accepting croniter's 6-field seconds syntax: cron is already the
+    thing the friendlier UI exists to hide, and stacking a seconds field onto it would make the
+    one case where clarity matters most (very short intervals) more cryptic, not less."""
+
+    type: Literal["interval"] = "interval"
+    seconds: int = Field(ge=MIN_INTERVAL_SECONDS, le=MAX_INTERVAL_SECONDS)
+    enabled: bool = True
+
+
+def _coerce_trigger(v: Any) -> Any:
+    """Back-compat (ADR 0065): every trigger saved before this existed is a bare
+    ``{cron, timezone, enabled}`` object with no ``type`` — the shape ``Schedule`` used to be.
+    Inject the discriminator so it keeps loading as a ``CronTrigger``, unchanged, with no
+    migration. Anything that already has a ``type`` (or isn't a dict at all) passes through as-is."""
+    if isinstance(v, dict) and "type" not in v and "cron" in v:
+        return {**v, "type": "cron"}
+    return v
+
+
+Trigger = Annotated[CronTrigger | IntervalTrigger, Field(discriminator="type"), BeforeValidator(_coerce_trigger)]
+
+# Deprecated alias: existing code (and anyone's saved bookmark of the name) that says "Schedule"
+# means "the cron-shaped trigger" — kept so `Schedule(cron=..., ...)` still constructs the same
+# thing it always did. Prefer `CronTrigger` in new code; the wire shape is unaffected either way.
+Schedule = CronTrigger

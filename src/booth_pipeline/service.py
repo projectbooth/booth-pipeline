@@ -39,7 +39,7 @@ from .records import (
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .runs import RunManager
-from .schedule import next_fire
+from .schedule import next_fire_trigger
 from .schemas import JobInput
 from .store.base import Busy, Store
 
@@ -302,4 +302,4 @@ class PipelineService:
 
 def _next(body: JobInput, now: datetime) -> datetime | None:
     s = body.schedule
-    return next_fire(s.cron, s.timezone, now) if s and s.enabled else None
+    return next_fire_trigger(s, now) if s and s.enabled else None

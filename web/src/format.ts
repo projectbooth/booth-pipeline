@@ -1,4 +1,4 @@
-import type { Schedule } from "./types";
+import type { Trigger } from "./types";
 
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -35,8 +35,23 @@ const PRESETS: Record<string, string> = {
 
 export const CRON_PRESETS: { label: string; cron: string }[] = Object.entries(PRESETS).map(([cron, label]) => ({ cron, label }));
 
-export function describeSchedule(s: Schedule | null): string {
+/** "every 30 seconds" / "every 5 minutes" / "every 2 hours" — the same phrasing an interval's
+ *  friendly picker uses, so the read-only description and the editable form always agree. */
+export function describeInterval(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const h = seconds / 3600;
+    return `every ${h} hour${h === 1 ? "" : "s"}`;
+  }
+  if (seconds % 60 === 0) {
+    const m = seconds / 60;
+    return `every ${m} minute${m === 1 ? "" : "s"}`;
+  }
+  return `every ${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
+export function describeSchedule(s: Trigger | null): string {
   if (!s) return "On demand only";
+  if (s.type === "interval") return `${describeInterval(s.seconds)}${s.enabled ? "" : " — paused"}`;
   const text = PRESETS[s.cron] ?? `cron ${s.cron}`;
   return `${text} (${s.timezone})${s.enabled ? "" : " — paused"}`;
 }

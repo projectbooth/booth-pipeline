@@ -8,10 +8,14 @@ granularity is a deliberate floor (a pipeline run is not a sub-minute unit of wo
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
+
+if TYPE_CHECKING:
+    from .model import CronTrigger, IntervalTrigger
 
 
 def validate_schedule(cron: str, timezone: str) -> None:
@@ -37,3 +41,16 @@ def next_fire(cron: str, timezone: str, after: datetime) -> datetime:
     local = after.astimezone(tz)
     nxt = croniter(cron, local).get_next(datetime)
     return nxt.astimezone(UTC)
+
+
+def next_fire_trigger(trigger: CronTrigger | IntervalTrigger, after: datetime) -> datetime:
+    """``next_fire`` generalised over the ``Trigger`` union (ADR 0065): a ``CronTrigger`` behaves
+    exactly as before; an ``IntervalTrigger`` simply fires ``seconds`` after ``after`` — no
+    calendar alignment, since an interval has none to keep."""
+    from .model import CronTrigger
+
+    if isinstance(trigger, CronTrigger):
+        return next_fire(trigger.cron, trigger.timezone, after)
+    if after.tzinfo is None:
+        raise ValueError("after must be timezone-aware")
+    return after + timedelta(seconds=trigger.seconds)

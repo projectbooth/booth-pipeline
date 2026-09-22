@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -152,3 +153,82 @@ def test_schedule_validation():
             Schedule(cron=bad)
     with pytest.raises(ValidationError):
         Schedule(cron="0 9 * * *", timezone="Mars/Olympus")
+
+
+# ---- Trigger union (ADR 0065) -----------------------------------------------------------------
+
+
+def test_a_bare_cron_shaped_dict_with_no_type_still_loads_as_a_crontrigger():
+    """Back-compat: every trigger saved before ADR 0065 is a bare {cron, timezone, enabled} object
+    with no discriminator. This is the exact shape a pre-existing database row still has."""
+    from pydantic import TypeAdapter
+
+    from booth_pipeline.model import CronTrigger, Trigger
+
+    adapter = TypeAdapter(Trigger)
+    t = adapter.validate_python({"cron": "0 9 * * *", "timezone": "America/Toronto", "enabled": True})
+    assert isinstance(t, CronTrigger)
+    assert (t.type, t.cron, t.timezone) == ("cron", "0 9 * * *", "America/Toronto")
+    # a value that already has an explicit type is untouched by the coercion
+    t2 = adapter.validate_python({"type": "cron", "cron": "* * * * *", "timezone": "UTC", "enabled": False})
+    assert t2 == CronTrigger(cron="* * * * *", enabled=False)
+
+
+def test_interval_trigger_shape_and_bounds():
+    from pydantic import TypeAdapter
+
+    from booth_pipeline.model import MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, IntervalTrigger, Trigger
+
+    t = IntervalTrigger(seconds=30)
+    assert (t.type, t.seconds, t.enabled) == ("interval", 30, True)
+    IntervalTrigger(seconds=MIN_INTERVAL_SECONDS)
+    IntervalTrigger(seconds=MAX_INTERVAL_SECONDS)
+    for bad in (MIN_INTERVAL_SECONDS - 1, 0, -5, MAX_INTERVAL_SECONDS + 1):
+        with pytest.raises(ValidationError):
+            IntervalTrigger(seconds=bad)
+    # and it round-trips through the discriminated union exactly like the cron member does
+    adapter = TypeAdapter(Trigger)
+    assert adapter.validate_python({"type": "interval", "seconds": 45, "enabled": True}) == IntervalTrigger(seconds=45)
+
+
+def test_an_unknown_trigger_type_is_rejected_not_silently_ignored():
+    from pydantic import TypeAdapter
+
+    from booth_pipeline.model import Trigger
+
+    with pytest.raises(ValidationError):
+        TypeAdapter(Trigger).validate_python({"type": "webhook", "url": "http://example.com"})
+
+
+def test_trigger_is_optional_on_a_job_and_none_passes_through():
+    from booth_pipeline.schemas import JobInput
+
+    assert JobInput(name="j", pipeline_id="p").schedule is None
+    assert JobInput(name="j", pipeline_id="p", schedule=None).schedule is None
+
+
+def test_next_fire_trigger_dispatches_cron_unchanged_and_interval_by_simple_addition():
+    from datetime import timedelta
+
+    from booth_pipeline.model import IntervalTrigger
+    from booth_pipeline.schedule import next_fire, next_fire_trigger
+
+    now = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    cron = Schedule(cron="*/15 * * * *", timezone="UTC")
+    assert next_fire_trigger(cron, now) == next_fire(cron.cron, cron.timezone, now)
+
+    interval = IntervalTrigger(seconds=90)
+    assert next_fire_trigger(interval, now) == now + timedelta(seconds=90)
+    # no calendar alignment: firing again from the fire time just adds the interval again
+    fired_at = next_fire_trigger(interval, now)
+    assert next_fire_trigger(interval, fired_at) == fired_at + timedelta(seconds=90)
+
+
+def test_next_fire_trigger_requires_a_timezone_aware_after_for_either_kind():
+    from booth_pipeline.model import IntervalTrigger
+    from booth_pipeline.schedule import next_fire_trigger
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        next_fire_trigger(IntervalTrigger(seconds=10), datetime(2026, 1, 1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        next_fire_trigger(Schedule(cron="* * * * *"), datetime(2026, 1, 1))

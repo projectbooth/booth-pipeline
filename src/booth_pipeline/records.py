@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .model import PipelineSpec, RetryPolicy, Schedule
+from .model import PipelineSpec, RetryPolicy, Trigger
 
 # Run and task-run lifecycle. Terminal states never change again.
 RUN_QUEUED, RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED = "queued", "running", "succeeded", "failed", "canceled"
@@ -61,7 +61,7 @@ class Job:
     pipeline_id: str
     # None = always run the pipeline's latest saved version; an int pins it.
     pipeline_version: int | None
-    schedule: Schedule | None
+    schedule: Trigger | None
     # Default retry policy for tasks that don't carry their own override.
     retry: RetryPolicy | None
     allow_concurrent_runs: bool

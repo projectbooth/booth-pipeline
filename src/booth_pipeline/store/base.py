@@ -68,6 +68,19 @@ class Store(Protocol):
 
         Each returned job's ``next_run_at`` has *already been advanced* to its next fire time
         in the same atomic step, so with several replicas each due fire is claimed exactly once.
+        A write (row locks in the SQL store) — the scheduler calls this only when it actually
+        believes something is due, never on a fixed cadence (ADR 0065; see ``list_upcoming``).
+        """
+        ...
+
+    def list_upcoming(self, limit: int) -> list[Job]:
+        """Across all workspaces: jobs whose schedule is enabled and has a ``next_run_at``, the
+        soonest first. A plain read — no claiming, no locking, ``next_run_at`` untouched.
+
+        This is the scheduler's in-memory index (ADR 0065): called on a coarser cadence than a
+        claim, so a fleet of replicas can each know "what's coming up" without every one of them
+        running a locking write query every few seconds. Bounded staleness — a job created or
+        rescheduled by another replica is visible within one refresh, not instantly.
         """
         ...
 

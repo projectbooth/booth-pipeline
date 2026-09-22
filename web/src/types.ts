@@ -72,18 +72,33 @@ export interface PipelineVersion extends PipelineVersionSummary {
   spec: PipelineSpec;
 }
 
-export interface Schedule {
+/** A basic cron schedule (5 fields, minute granularity) in an IANA timezone — the original
+ *  mechanism, unchanged (ADR 0065). */
+export interface CronTrigger {
+  type: "cron";
   cron: string;
   timezone: string;
   enabled: boolean;
 }
+
+/** Run every N seconds — for schedules below cron's one-minute floor (ADR 0065). */
+export interface IntervalTrigger {
+  type: "interval";
+  seconds: number;
+  enabled: boolean;
+}
+
+/** A job's schedule (ADR 0065): a discriminated union so a future trigger type is a new member,
+ *  not a redesign. `Schedule` is kept as an alias for the pre-0065 name; prefer `Trigger`. */
+export type Trigger = CronTrigger | IntervalTrigger;
+export type Schedule = CronTrigger;
 
 export interface Job {
   id: string;
   name: string;
   pipelineId: string;
   pipelineVersion: number | null;
-  schedule: Schedule | null;
+  schedule: Trigger | null;
   retry: RetryPolicy | null;
   allowConcurrentRuns: boolean;
   /** The most a run's platform token may carry, whatever its owner holds. Never "owner". */
@@ -100,7 +115,7 @@ export interface JobInput {
   name: string;
   pipelineId: string;
   pipelineVersion: number | null;
-  schedule: Schedule | null;
+  schedule: Trigger | null;
   retry: RetryPolicy | null;
   allowConcurrentRuns: boolean;
   roleCeiling: "viewer" | "editor";
