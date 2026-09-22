@@ -132,7 +132,7 @@ def _make_op(
             inv = TaskInvocation(
                 run_id=run_id,
                 task_key=task.key,
-                kind=task.kind,
+                kind=task.kind or "",  # decorative only (ADR 0062); ctx.kind is "" for an untagged task
                 attempt=attempt,
                 source=task.code.source or "",
                 params=task.params,

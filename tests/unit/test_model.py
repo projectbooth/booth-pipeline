@@ -49,14 +49,6 @@ def test_empty_pipeline_is_rejected():
         ([task("a", "source"), task("a", "source")], "duplicate task key", "tasks[1].key"),
         ([task("a", "source", ["a"])], "cannot depend on itself", "tasks[0].dependsOn"),
         ([task("a", "source"), task("b", "transform", ["nope"])], "not a task in this pipeline", "tasks[1].dependsOn"),
-        ([task("a", "source", ["b"]), task("b", "source")], "source 'a' cannot have dependencies", "tasks[0].dependsOn"),
-        ([task("a", "source"), task("b", "transform")], "needs at least one upstream", "tasks[1].dependsOn"),
-        ([task("a", "source"), task("b", "sink")], "needs at least one upstream", "tasks[1].dependsOn"),
-        (
-            [task("a", "source"), task("b", "sink", ["a"]), task("c", "transform", ["b"])],
-            "sink 'b' cannot have downstream tasks",
-            "tasks[1].kind",
-        ),
         ([task("a", "source"), task("b", "transform", ["a", "a"])], "same dependency twice", "tasks[1].dependsOn"),
     ],
 )
@@ -64,6 +56,30 @@ def test_structural_rules_name_the_offending_field(tasks, message, field):
     with pytest.raises(ModelError, match=message) as ei:
         validate_structure(spec(*tasks))
     assert ei.value.field == field
+
+
+def test_kind_is_optional_and_purely_decorative_never_a_dependency_constraint():
+    """ADR 0062: kind is a label, not a topology constraint. Each of these was a hard 422 before —
+    a "source" with dependencies, a "sink"/"transform" with none, a "sink" with downstream tasks,
+    and a completely untagged task — and every one is now simply valid."""
+    validate_structure(spec(task("a", "source", ["b"]), task("b", "source")))  # a "source" WITH deps
+    validate_structure(spec(task("a", "source"), task("b", "transform")))  # a "transform" with none
+    validate_structure(spec(task("a", "source"), task("b", "sink")))  # a "sink" with none
+    validate_structure(spec(task("a", "source"), task("b", "sink", ["a"]), task("c", "transform", ["b"])))  # sink with downstream
+    validate_structure(spec({"key": "a", "code": {"type": "inline", "source": "x = 1"}}))  # no kind at all
+    assert spec({"key": "a", "code": {"type": "inline", "source": "x = 1"}}).tasks[0].kind is None
+
+
+def test_kind_none_round_trips_and_an_old_saved_pipeline_with_kind_set_stays_valid():
+    bare = PipelineSpec.model_validate({"tasks": [{"key": "a", "code": {"type": "inline", "source": "x = 1"}}]})
+    assert bare.tasks[0].kind is None
+    dumped = bare.model_dump(by_alias=True)
+    assert dumped["tasks"][0]["kind"] is None
+    assert PipelineSpec.model_validate(dumped) == bare
+    # a pipeline saved under the old, stricter rules is unaffected: still valid, kind preserved
+    tagged = spec(task("a", "source"), task("b", "sink", ["a"]))
+    validate_structure(tagged)
+    assert [t.kind for t in tagged.tasks] == ["source", "sink"]
 
 
 def test_cycle_is_rejected():

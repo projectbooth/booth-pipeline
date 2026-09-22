@@ -31,7 +31,7 @@ export function JobList({ v }: { v: ViewCtx }) {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Jobs"
-        subtitle="A job runs a pipeline on demand or on a schedule, with its own retry policy and run history."
+        subtitle="A Job is a runnable, schedulable instance of a Pipeline — the same pipeline can back several jobs, each with its own schedule, retry policy and run history."
         actions={v.canWrite ? <Link href={v.href({ name: "job-new" })} onNavigate={v.goPath} className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">New job</Link> : undefined}
       />
       {runError && <Banner tone="error">{runError}</Banner>}

@@ -27,7 +27,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Pipelines"
-        subtitle="A pipeline is a graph of tasks — sources, transforms and sinks — that you draw once and run as jobs."
+        subtitle="A Pipeline is the DAG definition — the graph of tasks you draw here. It doesn't run on its own: turn it into a Job (in the Jobs tab) to schedule or trigger it."
         actions={v.canWrite && !creating ? <Button variant="primary" onClick={() => setCreating(true)}>New pipeline</Button> : undefined}
       />
       {creating && (

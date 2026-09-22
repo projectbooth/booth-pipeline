@@ -23,11 +23,15 @@ import { StatusChip } from "./ui";
 // graph.ts. There is no second copy of the graph inside React Flow to fall out of sync with what
 // gets saved. Passing no `onChange` makes it read-only (run view, viewer role, an old version).
 
+// Purely decorative (ADR 0062): `kind` is a label, never a constraint on which handles a task
+// gets — every task has both a target and a source handle regardless of kind (or no kind at all),
+// since dependency wiring no longer has anything to do with it.
 const KIND_STYLE: Record<TaskKind, { bar: string; label: string }> = {
   source: { bar: "bg-sky-500", label: "Source" },
   transform: { bar: "bg-indigo-500", label: "Transform" },
   sink: { bar: "bg-emerald-500", label: "Sink" },
 };
+const UNTAGGED_STYLE = { bar: "bg-slate-400 dark:bg-slate-500", label: "Task" };
 
 type TaskNodeData = FlowNode["data"] & Record<string, unknown>;
 
@@ -39,7 +43,7 @@ function codeLabel(task: Task): string {
 
 function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {
   const { task, status, error } = data;
-  const style = KIND_STYLE[task.kind];
+  const style = task.kind ? KIND_STYLE[task.kind] : UNTAGGED_STYLE;
   return (
     <div
       data-testid={`task-node-${task.key}`}
@@ -53,7 +57,8 @@ function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {
       }`}
     >
       <div className={`w-1.5 shrink-0 ${style.bar}`} aria-hidden="true" />
-      {task.kind !== "source" && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-500" />}
+      {/* Every task gets both handles: kind no longer says anything about whether connections are legal (ADR 0062). */}
+      <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-500" />
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 px-2.5 py-1.5">
         <div className="flex items-center justify-between gap-2">
           <span className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{task.name || task.key}</span>
@@ -66,7 +71,7 @@ function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {
           {task.retry && task.retry.maxRetries > 0 ? ` · ↻${task.retry.maxRetries}` : ""}
         </span>
       </div>
-      {task.kind !== "sink" && <Handle type="source" position={Position.Right} className="!h-3 !w-3 !bg-slate-500" />}
+      <Handle type="source" position={Position.Right} className="!h-3 !w-3 !bg-slate-500" />
     </div>
   );
 }

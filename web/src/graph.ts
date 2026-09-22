@@ -73,41 +73,48 @@ export function autoLayout(tasks: Task[]): Task[] {
   });
 }
 
-const TEMPLATES: Record<TaskKind, string> = {
+// Starter templates. `kind` is purely decorative now (ADR 0062) — these are just friendlier
+// example content for whichever label an author happens to pick; nothing about the shape of a
+// task depends on them, and a task with no kind gets the generic one.
+const GENERIC_TEMPLATE = `def run(ctx):
+    # ctx.inputs maps each upstream task's key to what it returned; ctx.params are this task's
+    # configured parameters. The return value (anything JSON-serialisable) becomes this task's
+    # output, available to anything that depends on it.
+    return None
+`;
+const KIND_TEMPLATES: Partial<Record<TaskKind, string>> = {
   source: `def run(ctx):
-    # A source is where data comes from. Whatever this returns (anything JSON-serialisable)
-    # is handed to the tasks that depend on it as ctx.inputs["<this task's key>"].
     print("reading source data")
     return [{"id": 1}, {"id": 2}, {"id": 3}]
 `,
   transform: `def run(ctx):
-    # ctx.inputs maps each upstream task's key to what it returned.
     rows = [row for upstream in ctx.inputs.values() for row in upstream]
     print(f"transforming {len(rows)} rows")
     return rows
 `,
   sink: `def run(ctx):
-    # A sink is where data ends up. Nothing runs after it.
     rows = [row for upstream in ctx.inputs.values() for row in upstream]
     print(f"writing {len(rows)} rows")
 `,
 };
 
-export function uniqueKey(kind: TaskKind, existing: Iterable<string>): string {
+export function uniqueKey(prefix: string, existing: Iterable<string>): string {
   const taken = new Set(existing);
   for (let i = 1; ; i++) {
-    const k = `${kind}_${i}`;
+    const k = `${prefix}_${i}`;
     if (!taken.has(k)) return k;
   }
 }
 
-export function newTask(kind: TaskKind, existing: Task[], position?: { x: number; y: number }): Task {
-  const key = uniqueKey(kind, existing.map((t) => t.key));
+/** A new task. `kind` is an optional hint (ADR 0062: purely decorative, never required) used only
+ *  to pick a nicer starter key/template — omit it for the generic "+ Add task" action. */
+export function newTask(existing: Task[], kind: TaskKind | null = null, position?: { x: number; y: number }): Task {
+  const key = uniqueKey(kind ?? "task", existing.map((t) => t.key));
   return {
     key,
     name: "",
     kind,
-    code: { type: "inline", source: TEMPLATES[kind] },
+    code: { type: "inline", source: (kind && KIND_TEMPLATES[kind]) || GENERIC_TEMPLATE },
     runner: "base",
     retry: null,
     dependsOn: [],
@@ -125,15 +132,14 @@ function nextFreePosition(existing: Task[]): { x: number; y: number } {
 }
 
 /** Whether the canvas should let a user draw an edge `from` -> `to` (from upstream to downstream).
- *  Mirrors the server's rules: sources take no inputs, sinks feed nothing, no self-loops, no
- *  duplicates, no cycles. Returns the reason when refused, so the UI can say why. */
+ *  Mirrors the server's rules (ADR 0062: `kind` plays no part in this — it's a label, not a
+ *  topology constraint): no self-loops, no duplicates, no cycles. Returns the reason when refused,
+ *  so the UI can say why. */
 export function checkConnection(tasks: Task[], from: string, to: string): { ok: true } | { ok: false; reason: string } {
   const src = tasks.find((t) => t.key === from);
   const dst = tasks.find((t) => t.key === to);
   if (!src || !dst) return { ok: false, reason: "unknown task" };
   if (from === to) return { ok: false, reason: "a task cannot depend on itself" };
-  if (dst.kind === "source") return { ok: false, reason: "a source is where data comes from, so it cannot depend on another task" };
-  if (src.kind === "sink") return { ok: false, reason: "a sink is where data ends up, so nothing can depend on it" };
   if (dst.dependsOn.includes(from)) return { ok: false, reason: "already connected" };
   if (reaches(tasks, to, from)) return { ok: false, reason: "that would create a cycle" };
   return { ok: true };

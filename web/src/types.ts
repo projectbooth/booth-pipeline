@@ -31,7 +31,9 @@ export type TaskCode =
 export interface Task {
   key: string;
   name: string;
-  kind: TaskKind;
+  /** Purely decorative (ADR 0062): a label for the canvas, never a constraint on dependency
+   *  wiring. A task doesn't have to be tagged at all. */
+  kind: TaskKind | null;
   code: TaskCode;
   runner: string;
   retry: RetryPolicy | null;

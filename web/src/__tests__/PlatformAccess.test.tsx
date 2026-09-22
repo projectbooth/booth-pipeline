@@ -51,7 +51,7 @@ const job = (over: Record<string, unknown> = {}) => ({
 
 describe("platform access on a task", () => {
   it("is off by default: a new task asks for no identity", () => {
-    expect(newTask("source", []).platformAccess).toBe(false);
+    expect(newTask([]).platformAccess).toBe(false);
   });
 
   it("is a per-task opt-in that explains itself and is saved in the spec", async () => {

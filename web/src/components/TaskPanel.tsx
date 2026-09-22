@@ -70,7 +70,6 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
 
   // Only tasks that could legally be upstream of this one are offered (same rules as drawing an edge).
   const candidates = tasks.filter((t) => t.key !== task.key && (task.dependsOn.includes(t.key) || checkConnection(tasks, t.key, task.key).ok));
-  const inputsAllowed = task.kind !== "source";
   const isCatalog = task.code.type === "catalog";
   const retry = task.retry ?? { maxRetries: 0, delaySeconds: 0, backoff: "fixed" as Backoff };
 
@@ -105,18 +104,15 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           )}
         </Field>
 
-        <Field id="task-kind" label="Type" required>
+        <Field id="task-kind" label="Type" help="Purely a label for the canvas — it never changes what a task can connect to.">
           {(p) => (
             <select
               {...p}
               className={inputClass}
-              value={task.kind}
-              onChange={(e) => {
-                const kind = e.target.value as TaskKind;
-                // a source cannot have inputs: switching to one drops them
-                onChange({ ...task, kind, dependsOn: kind === "source" ? [] : task.dependsOn });
-              }}
+              value={task.kind ?? ""}
+              onChange={(e) => onChange({ ...task, kind: (e.target.value || null) as TaskKind | null })}
             >
+              <option value="">— untagged —</option>
               {KINDS.map((k) => (
                 <option key={k.value} value={k.value}>
                   {k.label}
@@ -205,10 +201,8 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
 
         <section aria-label="Dependencies" className="flex flex-col gap-1.5">
           <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Depends on</h3>
-          {!inputsAllowed ? (
-            <p className="text-xs text-slate-500 dark:text-slate-400">A source has no inputs — it is where data comes from.</p>
-          ) : candidates.length === 0 ? (
-            <p className="text-xs text-slate-500 dark:text-slate-400">No other task can feed this one yet. Add a source or transform, or drag from another task's right-hand handle.</p>
+          {candidates.length === 0 ? (
+            <p className="text-xs text-slate-500 dark:text-slate-400">No other task can feed this one yet. Add another task, or drag from another task's right-hand handle.</p>
           ) : (
             candidates.map((t) => (
               <label key={t.key} className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">

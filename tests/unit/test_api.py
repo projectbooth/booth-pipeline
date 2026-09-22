@@ -172,7 +172,7 @@ def test_invalid_specs_are_422_naming_the_field(env, spec, field, fragment):
 def test_live_validation_endpoint_reports_without_saving(env):
     ok = env.call("POST", "/pipelines/validate", json={"spec": etl_spec()}).json()
     assert ok == {"valid": True}
-    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [task("a", "sink")]}})
+    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [task("a", "sink", ["ghost"])]}})
     assert bad.status_code == 200 and bad.json()["valid"] is False and bad.json()["field"] == "tasks[0].dependsOn"
     assert env.call("GET", "/pipelines").json()["total"] == 0
 

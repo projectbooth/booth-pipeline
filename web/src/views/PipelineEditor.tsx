@@ -6,7 +6,7 @@ import { Banner, Button, Chip, Link, Loaded, PageHeader, inputClass, linkClass }
 import type { ViewCtx } from "../context";
 import { autoLayout, newTask, removeTask, renameKey, taskIndexOfField } from "../graph";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
-import type { Pipeline, PipelineVersion, RunnerInfo, Task, TaskKind, ValidateResult } from "../types";
+import type { Pipeline, PipelineVersion, RunnerInfo, Task, ValidateResult } from "../types";
 
 // The graphical DAG builder: draw a Pipeline (source -> transform(s) -> sink), configure each
 // Task, and save. Every save is a NEW immutable version — the canvas edits a draft, and nothing
@@ -99,16 +99,18 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
     setSavedAs(null);
   }, [setSavedAs]);
 
-  function add(kind: TaskKind) {
-    const t = newTask(kind, tasks);
+  function add() {
+    const t = newTask(tasks);
     change([...tasks, t]);
     setSelected(t.key);
   }
 
+  // A suggested starting shape — source -> transform -> sink is one common way to draw a
+  // pipeline, not the only legal one (ADR 0062: kind is a label, not a requirement).
   function starter() {
-    const s = newTask("source", []);
-    const t = { ...newTask("transform", [s]), dependsOn: [s.key] };
-    const k = { ...newTask("sink", [s, t]), dependsOn: [t.key] };
+    const s = newTask([], "source");
+    const t = { ...newTask([s], "transform"), dependsOn: [s.key] };
+    const k = { ...newTask([s, t], "sink"), dependsOn: [t.key] };
     change(autoLayout([s, t, k]));
     setSelected(s.key);
   }
@@ -156,9 +158,9 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       <div className="flex flex-wrap items-center gap-2" role="toolbar" aria-label="Pipeline builder">
         {!readOnly && (
           <>
-            <Button onClick={() => add("source")}>+ Source</Button>
-            <Button onClick={() => add("transform")}>+ Transform</Button>
-            <Button onClick={() => add("sink")}>+ Sink</Button>
+            <Button variant="primary" onClick={add}>
+              + Add task
+            </Button>
             <Button onClick={() => change(autoLayout(tasks))} disabled={tasks.length === 0}>
               Tidy layout
             </Button>

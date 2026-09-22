@@ -150,7 +150,12 @@ class Task(Wire):
 
     key: str
     name: str = Field(default="", max_length=200)
-    kind: Kind
+    # Purely decorative (ADR 0062): a label for the canvas, never a constraint on dependency
+    # wiring. A task doesn't have to be tagged at all — an untagged task behaves identically to
+    # a tagged one in every way except display styling. (Earlier v0 made this required and used
+    # it to gate which tasks could have dependencies; that coupling forced mislabeling a
+    # zero-dependency "transform" as a "source" purely because of its wiring, not what it did.)
+    kind: Kind | None = None
     code: Code
     runner: str = BASE_RUNNER
     retry: RetryPolicy | None = None
@@ -237,7 +242,9 @@ def topological_order(spec: PipelineSpec) -> list[str]:
 
 
 def validate_structure(spec: PipelineSpec, available_runners: set[str] | None = None) -> None:
-    """Enforce the DAG rules the brief states: source -> transform(s) -> sink.
+    """Enforce the DAG's actual mechanics — no self-loops, no duplicate edges, no cycles, every
+    dependency resolves, every runner is available. ``kind`` plays no role here (ADR 0062): it is
+    a purely decorative label, never a constraint on which tasks may depend on which.
 
     Raises ``ModelError`` naming the first problem and the field it is about
     (``tasks[2].dependsOn``), so the canvas can mark the exact node. Pure: no I/O, so it runs
@@ -261,20 +268,11 @@ def validate_structure(spec: PipelineSpec, available_runners: set[str] | None = 
                 raise ModelError(f"{t.key!r} cannot depend on itself", f"{f}.dependsOn")
             if d not in seen:
                 raise ModelError(f"{t.key!r} depends on {d!r}, which is not a task in this pipeline", f"{f}.dependsOn")
-        if t.kind == "source" and t.depends_on:
-            raise ModelError(f"source {t.key!r} cannot have dependencies — a source is where data comes from", f"{f}.dependsOn")
-        if t.kind in ("transform", "sink") and not t.depends_on:
-            raise ModelError(f"{t.kind} {t.key!r} needs at least one upstream task", f"{f}.dependsOn")
         if available_runners is not None and t.runner not in available_runners:
             raise ModelError(
                 f"runner {t.runner!r} is not available; available: {', '.join(sorted(available_runners))}",
                 f"{f}.runner",
             )
-
-    down = spec.downstream()
-    for i, t in enumerate(spec.tasks):
-        if t.kind == "sink" and down[t.key]:
-            raise ModelError(f"sink {t.key!r} cannot have downstream tasks — a sink is where data ends up", f"tasks[{i}].kind")
 
     topological_order(spec)  # cycle check
 

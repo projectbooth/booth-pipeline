@@ -132,9 +132,9 @@ describe("builder", () => {
     be.addPipeline("etl", ETL());
     mount("editor", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
-    await user.click(screen.getByRole("button", { name: "+ Transform" }));
-    expect(screen.getByTestId("node-transform_1")).toBeInTheDocument();
-    expect(screen.getByRole("form", { name: /Configure task transform_1/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "+ Add task" }));
+    expect(screen.getByTestId("node-task_1")).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: /Configure task task_1/ })).toBeInTheDocument();
     await user.click(screen.getByTestId("node-clean"));
     expect(screen.getByRole("form", { name: /Configure task clean/ })).toBeInTheDocument();
   });
@@ -145,14 +145,14 @@ describe("builder", () => {
     be.failNext.set("POST /pipelines/p1/versions", { status: 422, error: "'clean' depends on 'ghost', which is not a task in this pipeline", field: "tasks[1].dependsOn" });
     mount("editor", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
-    await user.click(screen.getByRole("button", { name: "+ Sink" })); // make it dirty so save is enabled
+    await user.click(screen.getByRole("button", { name: "+ Add task" })); // make it dirty so save is enabled
     await user.click(screen.getByRole("button", { name: "Save as new version" }));
     // shown in the page banner AND on the offending task's own panel (it is auto-selected)
     const alerts = await screen.findAllByRole("alert");
     expect(alerts.length).toBeGreaterThanOrEqual(1);
     expect(alerts.every((a) => a.textContent?.includes("depends on 'ghost'"))).toBe(true);
     expect(screen.getByTestId("node-clean")).toHaveTextContent("[ERROR:");
-    expect(screen.getByTestId("node-sink_1")).toBeInTheDocument(); // the draft survived
+    expect(screen.getByTestId("node-task_1")).toBeInTheDocument(); // the draft survived
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 
@@ -167,7 +167,7 @@ describe("builder", () => {
         ? Promise.resolve(new Response(JSON.stringify({ valid: false, error: "sink 'sink_1' needs at least one upstream task", field: "tasks[3].dependsOn" }), { status: 200, headers: { "Content-Type": "application/json" } }))
         : orig(u, i),
     );
-    await user.click(screen.getByRole("button", { name: "+ Sink" }));
+    await user.click(screen.getByRole("button", { name: "+ Add task" }));
     expect(await screen.findByText(/Not ready to save: sink 'sink_1' needs at least one upstream/, {}, { timeout: 3000 })).toBeInTheDocument();
     expect(be.called("POST", "/pipelines/p1/versions")).toHaveLength(0);
   });
@@ -177,7 +177,7 @@ describe("builder", () => {
     mount("viewer", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
     expect(screen.getByTestId("canvas")).toHaveAttribute("data-editable", "no");
-    for (const name of ["+ Source", "+ Transform", "+ Sink", "Save as new version", "Tidy layout"]) {
+    for (const name of ["+ Add task", "Save as new version", "Tidy layout"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
     expect(screen.getByText(/read-only, so the builder is view-only/)).toBeInTheDocument();
@@ -232,10 +232,25 @@ describe("task settings", () => {
     expect(screen.getByLabelText("Max retries")).toHaveValue(0);
   });
 
+  it("kind is optional, untaggable, and never gates what a task can depend on (ADR 0062)", async () => {
+    const { user } = await open(); // 'clean', tagged "transform", already depends on 'extract' (a "source")
+    const kindSelect = screen.getByLabelText("Type") as HTMLSelectElement;
+    expect(kindSelect).toHaveValue("transform");
+    expect(kindSelect).not.toBeRequired();
+    await user.selectOptions(kindSelect, "— untagged —");
+    expect(kindSelect).toHaveValue("");
+    // still wired to 'extract' — untagging changed nothing about the DAG
+    expect(screen.getByTestId("node-clean")).toHaveTextContent("<- extract");
+    await user.selectOptions(kindSelect, "Source — where data comes from");
+    // now tagged "source" while still depending on something — no longer a contradiction
+    expect(screen.getByTestId("node-clean")).toHaveTextContent("<- extract");
+  });
+
   it("wires dependencies with checkboxes — only tasks that could legally feed this one are offered", async () => {
     const { user } = await open();
     const deps = screen.getByRole("region", { name: "Dependencies" });
-    // 'load' is a sink (cannot feed anything); 'extract' is already wired; nothing else is legal
+    // 'load' already depends on 'clean' (ETL), so offering it here would close a cycle — kind plays
+    // no part in this exclusion (ADR 0062); 'extract' is already wired; nothing else is legal
     expect(within(deps).queryByText("load")).not.toBeInTheDocument();
     expect(within(deps).getByRole("checkbox")).toBeChecked();
     await user.click(within(deps).getByRole("checkbox"));
@@ -317,7 +332,7 @@ describe("code catalog picker", () => {
     expect(await screen.findByText(/The code catalog could not be reached/)).toBeInTheDocument();
     expect(screen.getByText(/Inline code needs no catalog/)).toBeInTheDocument();
     // the rest of the builder is untouched
-    expect(screen.getByRole("button", { name: "+ Source" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "+ Add task" })).toBeEnabled();
     await userEvent.setup().click(screen.getByLabelText("Write code here"));
     expect(screen.getByLabelText("Python source")).toBeInTheDocument();
   });

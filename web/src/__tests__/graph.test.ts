@@ -14,7 +14,7 @@ import {
 } from "../graph";
 import type { Task, TaskKind } from "../types";
 
-function t(key: string, kind: TaskKind = "transform", dependsOn: string[] = []): Task {
+function t(key: string, kind: TaskKind | null = "transform", dependsOn: string[] = []): Task {
   return { key, name: "", kind, code: { type: "inline", source: "x" }, runner: "base", retry: null, dependsOn, params: {}, timeoutSeconds: 60, platformAccess: false, position: { x: 0, y: 0 } };
 }
 
@@ -80,10 +80,14 @@ describe("checkConnection (mirrors the server's structural rules)", () => {
   it("allows a legal edge", () => {
     expect(checkConnection([t("a", "source"), t("b", "transform")], "a", "b")).toEqual({ ok: true });
   });
+  it("kind never gates a connection (ADR 0062): a 'source' may take inputs, a 'sink' may feed others", () => {
+    // each of these was a hard refusal pre-0062, purely because of the tagged kind
+    expect(checkConnection([t("a", "source"), t("b", "transform")], "b", "a")).toEqual({ ok: true }); // an edge INTO a "source"
+    expect(checkConnection([t("x", "sink"), t("y", "transform")], "x", "y")).toEqual({ ok: true }); // an edge OUT OF a "sink"
+    expect(checkConnection([t("x", null), t("y", null)], "x", "y")).toEqual({ ok: true }); // untagged tasks connect freely
+  });
   it.each([
     ["a self-loop", "b", "b", /itself/],
-    ["an edge INTO a source", "b", "a", /source/],
-    ["an edge OUT OF a sink", "c", "b", /sink/],
     ["a duplicate", "a", "b", /already/],
     ["an unknown task", "a", "zzz", /unknown/],
   ])("refuses %s", (_name, from, to, reason) => {
@@ -131,18 +135,25 @@ describe("new tasks", () => {
     expect(uniqueKey("source", ["source_2"])).toBe("source_1");
   });
 
-  it.each<TaskKind>(["source", "transform", "sink"])("a new %s starts with runnable, base-runner, inline code", (kind) => {
-    const task = newTask(kind, []);
-    expect(task.kind).toBe(kind);
+  it("a generic '+ Add task' creates an untagged task — no kind required (ADR 0062)", () => {
+    const task = newTask([]);
+    expect(task.kind).toBeNull();
     expect(task.runner).toBe("base"); // ADR 0006: the base runner is the default, never Spark
     expect(task.code.type === "inline" && task.code.source.includes("def run(ctx)")).toBe(true);
     expect(task.dependsOn).toEqual([]);
-    expect(task.key).toMatch(/^[a-z][a-z0-9_]{0,62}$/);
+    expect(task.key).toMatch(/^task_\d+$/);
+  });
+
+  it.each<TaskKind>(["source", "transform", "sink"])("a %s hint still produces a runnable, base-runner task, tagged accordingly", (kind) => {
+    const task = newTask([], kind);
+    expect(task.kind).toBe(kind);
+    expect(task.code.type === "inline" && task.code.source.includes("def run(ctx)")).toBe(true);
+    expect(task.key).toMatch(new RegExp(`^${kind}_\\d+$`));
   });
 
   it("are placed below what is already on the canvas", () => {
     const existing = autoLayout(etl());
-    const fresh = newTask("source", existing);
+    const fresh = newTask(existing);
     expect(fresh.position.y).toBeGreaterThan(Math.max(...existing.map((k) => k.position.y)));
   });
 });
