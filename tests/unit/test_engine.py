@@ -64,6 +64,44 @@ def test_source_transform_sink_runs_in_order_and_passes_data_downstream():
     assert rec.log_text("load") == ["loaded [10, 20, 30]"]
 
 
+def test_a_sql_task_queries_upstream_output_and_a_downstream_python_task_sees_its_rows():
+    """ADR 0064: the base runner's language dispatch is a real registry, not a hardcoded
+    Python-only check. A SQL task's direct upstream is queryable as a table named after its task
+    key (only because its output is a JSON list of rows); the SQL task's own result becomes JSON
+    rows the same way a Python task's return value does, so a downstream Python task sees it
+    exactly like any other upstream output."""
+    s = spec(
+        task("extract", "source", source="def run(ctx):\n    return [{'n': 1}, {'n': 2}, {'n': 3}]\n"),
+        {
+            "key": "agg",
+            "kind": "transform",
+            "dependsOn": ["extract"],
+            "code": {"type": "catalog", "entryId": "e", "version": "1", "language": "sql", "source": "SELECT sum(n) AS total FROM extract"},
+        },
+        task("load", "sink", ["agg"], source="def run(ctx):\n    print('total', ctx.inputs['agg'])\n"),
+    )
+    res, rec = run(s)
+    assert res.success, rec.events
+    assert rec.log_text("load") == ["total [{'total': 6}]"]
+
+
+def test_an_upstream_output_that_is_not_a_list_is_simply_not_a_table_for_a_sql_task():
+    """Not every upstream output is tabular (a scalar, a dict, None) — a SQL task referencing one
+    that isn't gets DuckDB's own "table does not exist" error, not a crash elsewhere."""
+    s = spec(
+        task("extract", "source", source="def run(ctx):\n    return 42\n"),
+        {
+            "key": "agg",
+            "kind": "transform",
+            "dependsOn": ["extract"],
+            "code": {"type": "catalog", "entryId": "e", "version": "1", "language": "sql", "source": "SELECT * FROM extract"},
+        },
+    )
+    res, rec = run(s)
+    assert not res.success
+    assert "agg" in res.error
+
+
 def test_params_and_context_are_available_to_task_code():
     s = spec(
         task(

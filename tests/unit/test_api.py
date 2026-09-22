@@ -255,11 +255,20 @@ def test_catalog_failure_modes_map_to_useful_statuses(env):
     assert save({"tasks": [catalog_task(version="1.0.0")]}).status_code == 503
 
 
-def test_non_python_catalog_code_is_refused_for_the_base_runner(env):
-    env.catalog.add("q", "report", {"1": "select 1"}, language="sql")
+def test_sql_catalog_code_is_accepted_and_actually_runs_on_the_base_runner(env):
+    """ADR 0064: the base runner's language dispatch is a real registry now, not a hardcoded
+    Python-only check — SQL is a second supported language, not just tolerated at save time."""
+    env.catalog.add("q", "report", {"1": "SELECT 1 AS x"}, language="sql")
+    p = new_pipeline(env, spec={"tasks": [catalog_task(entry="q", version="1")]})
+    job = new_job(env, p["id"])
+    assert env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])["status"] == "succeeded"
+
+
+def test_a_language_the_base_runner_has_no_strategy_for_is_still_refused(env):
+    env.catalog.add("q", "report", {"1": "object Report"}, language="scala")
     p = new_pipeline(env, "host")
     r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [catalog_task(entry="q", version="1")]}})
-    assert r.status_code == 422 and "base runner runs Python" in r.json()["error"]
+    assert r.status_code == 422 and "the base runner supports" in r.json()["error"] and "python" in r.json()["error"] and "sql" in r.json()["error"]
 
 
 def test_inline_code_works_with_the_catalog_entirely_absent(env):

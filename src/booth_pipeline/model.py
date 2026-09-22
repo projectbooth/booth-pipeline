@@ -145,6 +145,17 @@ class InlineCode(Wire):
 Code = Annotated[CatalogCode | InlineCode, Field(discriminator="type")]
 
 
+def code_language(code: Code) -> str:
+    """What language a task's code executes as (ADR 0064) — what the base runner's per-language
+    dispatch (``runners/languages.py``) reads. ``InlineCode`` has no language field at all: it is
+    the builder's old free-text path, which only ever wrote Python, so it is always "python".
+    ``CatalogCode``'s ``language`` is an advisory label from the catalog, defaulting the same way
+    when the catalog didn't say."""
+    if isinstance(code, InlineCode):
+        return "python"
+    return code.language or "python"
+
+
 class Task(Wire):
     """One node in the DAG."""
 

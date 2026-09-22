@@ -47,7 +47,7 @@ from dagster import (
     RetryPolicy,
 )
 
-from .model import PipelineSpec, Task, topological_order
+from .model import PipelineSpec, Task, code_language, topological_order
 from .model import RetryPolicy as SpecRetry
 from .runners.base import Cancellation, TaskCanceled, TaskInvocation
 from .runners.registry import RunnerRegistry
@@ -139,6 +139,7 @@ def _make_op(
                 inputs=upstream,
                 timeout_seconds=task.timeout_seconds,
                 access=grant,
+                language=code_language(task.code),
             )
             output = registry.get(task.runner).run(inv, tlog, cancel)
         except TaskCanceled:

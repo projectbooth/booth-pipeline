@@ -1,9 +1,11 @@
 """The base runner: the default execution path every install has, needing no other module.
 
-Each task attempt runs in its **own Python subprocess** (``python -I``) in a private temp
-directory, with a scrubbed environment. That gives real isolation of *state* — a task cannot
-corrupt the service's memory, hang its threads, or ``sys.exit`` it — plus a hard timeout and
-cancellation by killing the process tree.
+Each task attempt runs in its **own subprocess of the service's own interpreter** (``python -I``)
+in a private temp directory, with a scrubbed environment. That gives real isolation of *state* — a
+task cannot corrupt the service's memory, hang its threads, or ``sys.exit`` it — plus a hard
+timeout and cancellation by killing the process tree. This applies identically no matter what
+language the task's source is in: what changes per language is only which file the source is
+written to and which harness script the subprocess runs (``runners/languages.py``, ADR 0064).
 
 What it is NOT: a security sandbox. The subprocess is the same OS user in the same pod, so task
 code can do anything the module process can. Who may run code, and where, is an open
@@ -24,9 +26,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import languages
 from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
 
-HARNESS = Path(__file__).with_name("_harness.py")
 TOKEN_FILE = ".booth-platform-token"
 MAX_LOG_CHUNK = 8192
 
@@ -93,7 +95,8 @@ class SubprocessRunner:
             shutil.rmtree(workdir, ignore_errors=True)
 
     def _run_in(self, workdir: str, inv: TaskInvocation, log: TaskLog, cancel: Cancellation) -> Any:
-        Path(workdir, "task.py").write_text(inv.source, encoding="utf-8")
+        handler = languages.get(inv.language)
+        Path(workdir, handler.source_filename).write_text(inv.source, encoding="utf-8")
         token_key = (inv.run_id, inv.task_key)
         access_meta = None
         if inv.access is not None:
@@ -126,7 +129,7 @@ class SubprocessRunner:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
         proc = subprocess.Popen(
-            [self._python, "-I", str(HARNESS), workdir, result_path],
+            [self._python, "-I", str(handler.harness), workdir, result_path],
             cwd=workdir,
             env=self._env(inv, workdir),
             stdin=subprocess.DEVNULL,

@@ -21,6 +21,7 @@ from .model import (
     InlineCode,
     ModelError,
     PipelineSpec,
+    code_language,
     sha256_text,
     validate_structure,
 )
@@ -36,6 +37,7 @@ from .records import (
     Run,
     TaskRun,
 )
+from .runners import languages
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .runs import RunManager
@@ -150,9 +152,10 @@ class PipelineService:
                     fetched[key] = snap
                     fetched[(snap.entry_id, snap.version)] = snap  # the concrete label, if "latest" was asked
                 code = snap
-                if t.runner == BASE_RUNNER and (code.language or "") not in ("", "python"):
+                if t.runner == BASE_RUNNER and code_language(code) not in languages.available():
                     raise ModelError(
-                        f"catalog entry {code.name!r} is {code.language!r} code; the base runner runs Python",
+                        f"catalog entry {code.name!r} is {code_language(code)!r} code; "
+                        f"the base runner supports: {', '.join(languages.available())}",
                         field,
                     )
             out.append(t.model_copy(update={"code": code}))

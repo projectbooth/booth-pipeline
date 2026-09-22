@@ -141,6 +141,16 @@ def test_catalog_reference_shape_is_just_entry_and_version():
     assert not code.resolved  # nothing has been snapshotted yet
 
 
+def test_code_language_defaults_to_python_for_inline_and_unset_catalog_language():
+    """ADR 0064: InlineCode has no language field at all (the builder's old free-text path only
+    ever wrote Python); a CatalogCode with no language label defaults the same way."""
+    from booth_pipeline.model import CatalogCode, InlineCode, code_language
+
+    assert code_language(InlineCode(source="x = 1")) == "python"
+    assert code_language(CatalogCode(entry_id="e", version="1")) == "python"
+    assert code_language(CatalogCode(entry_id="e", version="1", language="sql")) == "sql"
+
+
 def test_sha256_is_over_utf8_bytes():
     # the same bytes booth-catalog stores, so a digest is comparable across the two modules
     assert sha256_text("héllo") == hashlib.sha256("héllo".encode()).hexdigest()

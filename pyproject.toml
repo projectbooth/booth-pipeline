@@ -17,6 +17,7 @@ dependencies = [
   "croniter>=3.0",
   "pydantic>=2.8",
   "tzdata",            # zoneinfo has no IANA database on Windows or slim images without it
+  "duckdb>=1.0",       # the base runner's SQL language strategy (ADR 0064); embedded, no server to reach
 ]
 
 [project.optional-dependencies]

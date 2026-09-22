@@ -56,6 +56,10 @@ class TaskInvocation:
     inputs: dict[str, Any]
     timeout_seconds: int
     access: TaskAccess | None = None
+    # What language `source` is in (ADR 0064) — where the base runner's language dispatch reads
+    # from (runners/languages.py). Defaults to "python": every task before this ADR was Python,
+    # and InlineCode (the builder's old free-text path) still always is.
+    language: str = "python"
 
 
 class TaskLog(Protocol):
