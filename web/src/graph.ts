@@ -125,6 +125,21 @@ export function newTask(existing: Task[], kind: TaskKind | null = null, position
   };
 }
 
+/** True when two or more tasks sit at the exact same position, so the canvas would draw them
+ *  perfectly stacked — only the last one in the array is visible; the rest are in the DOM (not
+ *  missing) but 100% hidden underneath it. Happens for a pipeline built directly against the API
+ *  (e.g. a test fixture) whose tasks were never dragged in the builder: `position` defaults to
+ *  `{x:0,y:0}` for every task server-side (`model.py`), so they all land in the same spot. */
+export function hasOverlappingPositions(tasks: Task[]): boolean {
+  const seen = new Set<string>();
+  for (const t of tasks) {
+    const key = `${t.position.x},${t.position.y}`;
+    if (seen.has(key)) return true;
+    seen.add(key);
+  }
+  return false;
+}
+
 /** Somewhere sensible for a new node: the column matching its likely role, below what is there. */
 function nextFreePosition(existing: Task[]): { x: number; y: number } {
   const maxY = existing.reduce((m, t) => Math.max(m, t.position.y), -(NODE_HEIGHT + ROW_GAP));

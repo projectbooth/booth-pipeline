@@ -5,6 +5,7 @@ import {
   connect,
   disconnect,
   edgeId,
+  hasOverlappingPositions,
   newTask,
   removeTask,
   renameKey,
@@ -155,6 +156,28 @@ describe("new tasks", () => {
     const existing = autoLayout(etl());
     const fresh = newTask(existing);
     expect(fresh.position.y).toBeGreaterThan(Math.max(...existing.map((k) => k.position.y)));
+  });
+});
+
+describe("hasOverlappingPositions", () => {
+  const at = (key: string, x: number, y: number): Task => ({ ...t(key), position: { x, y } });
+
+  it("is true when every task shares the server's {0,0} default", () => {
+    expect(hasOverlappingPositions([at("a", 0, 0), at("b", 0, 0)])).toBe(true);
+  });
+
+  it("is true for a partial overlap — even one pair stacked is a real bug", () => {
+    expect(hasOverlappingPositions([at("a", 0, 0), at("b", 0, 0), at("c", 300, 0)])).toBe(true);
+  });
+
+  it("is false once every task has been laid out to a distinct spot", () => {
+    expect(hasOverlappingPositions(autoLayout([at("a", 0, 0), at("b", 0, 0), at("c", 0, 0)]))).toBe(false);
+    expect(hasOverlappingPositions([at("a", 0, 0), at("b", 300, 0), at("c", 0, 200)])).toBe(false);
+  });
+
+  it("is false for zero or one task — nothing to overlap", () => {
+    expect(hasOverlappingPositions([])).toBe(false);
+    expect(hasOverlappingPositions([at("a", 0, 0)])).toBe(false);
   });
 });
 

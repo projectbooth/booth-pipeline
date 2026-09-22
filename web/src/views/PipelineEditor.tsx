@@ -4,7 +4,7 @@ import { DagCanvas } from "../components/DagCanvas";
 import { TaskPanel } from "../components/TaskPanel";
 import { Banner, Button, Chip, Link, Loaded, PageHeader, inputClass, linkClass } from "../components/ui";
 import type { ViewCtx } from "../context";
-import { autoLayout, newTask, removeTask, renameKey, taskIndexOfField } from "../graph";
+import { autoLayout, hasOverlappingPositions, newTask, removeTask, renameKey, taskIndexOfField } from "../graph";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
 import type { Pipeline, PipelineVersion, RunnerInfo, Task, ValidateResult } from "../types";
 
@@ -51,8 +51,19 @@ interface EditorProps {
 const spec = (tasks: Task[]) => ({ tasks });
 
 function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setSavedAs }: EditorProps) {
-  const [tasks, setTasks] = useState<Task[]>(current?.spec.tasks ?? []);
-  const [baseline, setBaseline] = useState(() => JSON.stringify(current?.spec.tasks ?? []));
+  // A version loaded straight from the server: if two or more tasks share the exact same
+  // position (the shared {0,0} default for anything built directly against the API, never
+  // dragged in the builder — see graph.ts's hasOverlappingPositions), lay it out once on open
+  // rather than showing what looks like an empty or broken canvas. Baseline is set from the SAME
+  // laid-out array, so this never shows as an unsaved change — only actually editing does.
+  // `Editor` remounts (its key includes the version) whenever `current` changes, so computing
+  // this once at mount — rather than depending on `current` — is deliberate, not an oversight.
+  const initialTasks = useMemo(() => {
+    const loaded = current?.spec.tasks ?? [];
+    return hasOverlappingPositions(loaded) ? autoLayout(loaded) : loaded;
+  }, []);
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [baseline, setBaseline] = useState(() => JSON.stringify(initialTasks));
   const [selected, setSelected] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);

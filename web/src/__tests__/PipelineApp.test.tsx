@@ -10,7 +10,7 @@ import { ETL, FakeBackend, getToken, task } from "./testUtils";
 // editor hands the canvas, and what it does with the canvas's callbacks.
 vi.mock("../components/DagCanvas", () => ({
   DagCanvas: (props: {
-    tasks: { key: string; dependsOn: string[] }[];
+    tasks: { key: string; dependsOn: string[]; position: { x: number; y: number } }[];
     selected: string | null;
     onSelect: (k: string | null) => void;
     onChange?: (t: unknown[]) => void;
@@ -19,7 +19,14 @@ vi.mock("../components/DagCanvas", () => ({
   }) => (
     <div data-testid="canvas" data-editable={props.onChange ? "yes" : "no"}>
       {props.tasks.map((t) => (
-        <button key={t.key} type="button" data-testid={`node-${t.key}`} aria-pressed={props.selected === t.key} onClick={() => props.onSelect(t.key)}>
+        <button
+          key={t.key}
+          type="button"
+          data-testid={`node-${t.key}`}
+          data-position={`${t.position.x},${t.position.y}`}
+          aria-pressed={props.selected === t.key}
+          onClick={() => props.onSelect(t.key)}
+        >
           {t.key}
           {t.dependsOn.length ? ` <- ${t.dependsOn.join(",")}` : ""}
           {props.errors?.[t.key] ? ` [ERROR: ${props.errors[t.key]}]` : ""}
@@ -104,6 +111,30 @@ describe("builder", () => {
     expect(await screen.findByTestId("node-extract")).toBeInTheDocument();
     expect(screen.getByTestId("node-clean")).toHaveTextContent("<- extract");
     expect(screen.getByTestId("node-load")).toHaveTextContent("<- clean");
+  });
+
+  it("a pipeline whose tasks all default to {0,0} (e.g. built directly against the API) is laid out on open, not left stacked and looking blank", async () => {
+    // ETL()'s tasks (like every task() the helper builds) all default to position {0,0} — this
+    // is exactly the shape a raw API caller (booth-e2e's smoke tests included) produces.
+    be.addPipeline("etl", ETL());
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-extract");
+    const positions = ["extract", "clean", "load"].map((k) => screen.getByTestId(`node-${k}`).dataset.position);
+    expect(new Set(positions).size).toBe(3); // three distinct spots, not one shared stack
+    // and — the important part — this must not look like an unsaved edit the moment it opens
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
+  it("a pipeline whose tasks already have distinct positions is left exactly as saved", async () => {
+    be.addPipeline("placed", [
+      task("a", "source", [], { position: { x: 40, y: 10 } }),
+      task("b", "sink", ["a"], { position: { x: 340, y: 90 } }),
+    ]);
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-a");
+    expect(screen.getByTestId("node-a").dataset.position).toBe("40,10");
+    expect(screen.getByTestId("node-b").dataset.position).toBe("340,90");
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 
   it("an empty pipeline offers the source -> transform -> sink starter, which is then valid to save", async () => {
