@@ -1,6 +1,6 @@
 {
   "name": "@projectbooth/pipeline-ui",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Native-mode Pipeline UI (ADR 0030): the graphical DAG builder, jobs and schedules, and per-run task logs — as a component booth-design mounts via its src/lib/nativeModules.ts registry.",
   "license": "UNLICENSED",
