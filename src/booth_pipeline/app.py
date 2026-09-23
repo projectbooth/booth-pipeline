@@ -39,6 +39,54 @@ log = logging.getLogger(__name__)
 MAX_BODY_BYTES = 16 * 1024 * 1024
 
 
+def _pydantic_message(err: dict) -> str:
+    """A user-facing message for one ``pydantic`` v2 error, never its own internal wording.
+
+    ``err["msg"]`` is pydantic's own developer-facing text ("String should have at least 1
+    character") — useful in a traceback, meaningless in a UI banner. This maps the handful of
+    error ``type``s our own models actually produce (Field ``min_length``/``max_length``/``ge``/
+    ``le``/``pattern``, a missing required field, a discriminated union's unrecognized tag, an
+    unknown field under ``extra="forbid"``) to plain copy. ``value_error`` is the one type left
+    alone: it is a message a validator in *this* codebase wrote on purpose (see model.py's
+    ``@field_validator``s), already user-facing, just prefixed by pydantic with "Value error, ".
+
+    Anything not covered here (a pydantic error type this codebase doesn't currently trigger) gets
+    a safe, generic fallback — never `err["msg"]` verbatim, so a future Field constraint doesn't
+    quietly reopen this leak.
+    """
+    kind = err["type"]
+    ctx = err.get("ctx", {})
+    if kind == "value_error":
+        return str(err["msg"]).removeprefix("Value error, ")
+    if kind == "missing":
+        return "is required"
+    if kind == "string_too_short":
+        return "must not be empty" if ctx.get("min_length") == 1 else f"must be at least {ctx.get('min_length')} characters"
+    if kind == "string_too_long":
+        return f"must be at most {ctx.get('max_length')} characters"
+    if kind in ("too_short", "too_long"):
+        bound = ctx.get("min_length" if kind == "too_short" else "max_length")
+        return f"must have at {'least' if kind == 'too_short' else 'most'} {bound} item{'s' if bound != 1 else ''}"
+    if kind == "greater_than_equal":
+        return f"must be at least {ctx.get('ge')}"
+    if kind == "less_than_equal":
+        return f"must be at most {ctx.get('le')}"
+    if kind == "greater_than":
+        return f"must be greater than {ctx.get('gt')}"
+    if kind == "less_than":
+        return f"must be less than {ctx.get('lt')}"
+    if kind == "string_pattern_mismatch":
+        return "does not match the required format"
+    if kind in ("union_tag_invalid", "union_tag_not_found"):
+        expected = ctx.get("expected_tags")
+        return f"must be one of: {expected}" if expected else "has an unrecognized type"
+    if kind == "extra_forbidden":
+        return "is not a recognized field"
+    if kind.endswith("_type"):
+        return f"must be a valid {kind.removesuffix('_type').replace('_', ' ')}"
+    return "is invalid"
+
+
 def field_path(loc) -> str | None:
     """``("body", "spec", "tasks", 2, "dependsOn")`` -> ``spec.tasks[2].dependsOn`` — the same
     path syntax ``ModelError`` uses, so the UI has one format to map onto a form field or node."""
@@ -133,7 +181,7 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, e: RequestValidationError):
         first = e.errors()[0]
-        return err(422, first["msg"].removeprefix("Value error, "), field_path(first["loc"]))
+        return err(422, _pydantic_message(first), field_path(first["loc"]))
 
     @app.exception_handler(NotFound)
     async def _not_found(_: Request, e: NotFound):

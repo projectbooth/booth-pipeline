@@ -45,7 +45,7 @@ export class FakeBackend {
   catalogDown = false;
   catalogEntries = [{ id: "e1", name: "loader", description: "loads things", language: "python", latestVersion: { version: "2.0.0" }, versionCount: 2 }];
   storageDown = false;
-  storageBackends = [{ id: "b1", name: "Main" }];
+  storageBackends = [{ id: "b1", displayName: "Main" }];
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   runners = [
     { id: "base", displayName: "Base", available: true, reason: null },
@@ -100,12 +100,14 @@ export class FakeBackend {
     if (isCatalog) {
       if (this.catalogDown) return new Response("module not found", { status: 404 });
       if (path === "/code") return this.json({ items: this.catalogEntries, total: this.catalogEntries.length });
-      if (/^\/code\/[^/]+\/versions$/.test(path)) return this.json({ items: [{ version: "2.0.0", seq: 2, notes: "" }, { version: "1.0.0", seq: 1, notes: "" }], total: 2 });
+      // Real shape (booth-catalog's handleCodeVersions): {"versions": [...]}, no "items"/"total".
+      if (/^\/code\/[^/]+\/versions$/.test(path)) return this.json({ versions: [{ version: "2.0.0", seq: 2, notes: "" }, { version: "1.0.0", seq: 1, notes: "" }] });
     }
 
     if (isStorage) {
       if (this.storageDown) return new Response("module not found", { status: 404 });
-      if (path === "/backends") return this.json({ items: this.storageBackends });
+      // Real shape (booth-storage's handleListBackends): a bare array, no "items" wrapper.
+      if (path === "/backends") return this.json(this.storageBackends);
       const om = path.match(/^\/backends\/([^/]+)\/objects$/);
       if (om) {
         const wantPrefix = u.searchParams.get("prefix") ?? "";

@@ -215,7 +215,7 @@ export interface CatalogVersionSummary {
 // booth-storage, as much of it as the picker needs (its own API; read-only here, ADR 0063).
 export interface StorageBackendSummary {
   id: string;
-  name?: string;
+  displayName: string;
 }
 
 export interface StorageObjectSummary {

@@ -41,9 +41,10 @@ export default defineConfig(({ command }) => ({
   server: {
     proxy: {
       // Local dev only: booth-core's gateway would normally proxy /modules/pipeline/* to this
-      // service's own /api/* routes (and /modules/catalog/* to booth-catalog, which the code
-      // picker calls). Point BOOTH_PIPELINE_DEV_BACKEND / BOOTH_CATALOG_DEV_BACKEND at locally
-      // running backends so `npm run dev` works without CORS juggling.
+      // service's own /api/* routes (/modules/catalog/* to booth-catalog and /modules/storage/*
+      // to booth-storage, which the code pickers call). Point BOOTH_PIPELINE_DEV_BACKEND /
+      // BOOTH_CATALOG_DEV_BACKEND / BOOTH_STORAGE_DEV_BACKEND at locally running backends so
+      // `npm run dev` works without CORS juggling.
       "/modules/pipeline": {
         target: process.env.BOOTH_PIPELINE_DEV_BACKEND ?? "http://localhost:8090",
         changeOrigin: true,
@@ -56,6 +57,12 @@ export default defineConfig(({ command }) => ({
         target: process.env.BOOTH_CATALOG_DEV_BACKEND ?? "http://localhost:8080",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/modules\/catalog/, ""),
+        configure: gatewayHeaders,
+      },
+      "/modules/storage": {
+        target: process.env.BOOTH_STORAGE_DEV_BACKEND ?? "http://localhost:8071",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/modules\/storage/, ""),
         configure: gatewayHeaders,
       },
     },

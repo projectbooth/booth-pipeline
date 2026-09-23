@@ -31,7 +31,7 @@ export function StoragePicker({ api: ctx, value, onChange, disabled }: { api: Ap
     if (disabled) return;
     let alive = true;
     api.storageBackends(ctx).then(
-      (page) => alive && (setBackends(page.items), setBackendError(null), setBackendId((b) => b || page.items[0]?.id || "")),
+      (list) => alive && (setBackends(list), setBackendError(null), setBackendId((b) => b || list[0]?.id || "")),
       (err: unknown) => alive && (setBackends(null), setBackendError(errorMessage(err))),
     );
     return () => {
@@ -84,7 +84,7 @@ export function StoragePicker({ api: ctx, value, onChange, disabled }: { api: Ap
             <select className={`${inputClass} w-auto`} value={backendId} onChange={(e) => (setBackendId(e.target.value), setEntries(null))}>
               {backends.map((b) => (
                 <option key={b.id} value={b.id}>
-                  {b.name ?? b.id}
+                  {b.displayName || b.id}
                 </option>
               ))}
             </select>

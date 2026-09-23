@@ -40,7 +40,7 @@ export function CodePicker({ api: ctx, value, onChange, disabled }: { api: ApiCo
     if (!entryId) return;
     let alive = true;
     api.catalogVersions(ctx, entryId).then(
-      (page) => alive && setVersions(page.items),
+      (list) => alive && setVersions(list),
       () => alive && setVersions([]),
     );
     return () => {

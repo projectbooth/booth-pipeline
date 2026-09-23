@@ -157,8 +157,8 @@ def test_a_bad_first_version_does_not_leave_an_empty_pipeline_behind(env):
         ({"tasks": [task("a", "transform", ["b"]), task("b", "transform", ["a"])]}, "tasks", "cycle"),
         ({"tasks": [task("a", "source", runner="spark")]}, "tasks[0].runner", "not available"),
         ({"tasks": [task("Bad Key", "source")]}, "spec.tasks[0].key", "lowercase"),
-        ({"tasks": [task("a", "source", retry={"maxRetrys": 1})]}, "spec.tasks[0].retry.maxRetrys", "Extra inputs"),
-        ({"tasks": [task("a", "source", retry={"maxRetries": 99})]}, "spec.tasks[0].retry.maxRetries", "less than or equal"),
+        ({"tasks": [task("a", "source", retry={"maxRetrys": 1})]}, "spec.tasks[0].retry.maxRetrys", "not a recognized field"),
+        ({"tasks": [task("a", "source", retry={"maxRetries": 99})]}, "spec.tasks[0].retry.maxRetries", "at most 10"),
     ],
 )
 def test_invalid_specs_are_422_naming_the_field(env, spec, field, fragment):
@@ -167,6 +167,17 @@ def test_invalid_specs_are_422_naming_the_field(env, spec, field, fragment):
     assert r.status_code == 422, r.text
     body = r.json()
     assert body["field"] == field and fragment in body["error"]
+
+
+def test_a_field_constraint_violation_gets_a_clean_message_not_pydantics_own(env):
+    """Regression for the 2026-09-23 pilot finding: switching a task's code-source radio before
+    anything is picked sends an entryId/backendId of "" — a bare Field(min_length=1) violation —
+    and the global RequestValidationError handler used to pass pydantic's own internal wording
+    straight through ("String should have at least 1 character")."""
+    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [{"key": "a", "code": {"type": "catalog", "entryId": "", "version": "latest"}}]}})
+    assert bad.status_code == 422
+    assert bad.json()["error"] == "must not be empty"
+    assert "String should have" not in bad.json()["error"]
 
 
 def test_live_validation_endpoint_reports_without_saving(env):

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { ApiContext, GetAccessToken } from "./api/client";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Link } from "./components/ui";
 import type { ViewCtx } from "./context";
 import { DEFAULT_BASE_PATH, defaultNavigate, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
@@ -85,7 +86,9 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
           ))}
         </nav>
       </header>
-      <main>{renderRoute(route, v)}</main>
+      <main>
+        <ErrorBoundary key={routePath(route, basePath)}>{renderRoute(route, v)}</ErrorBoundary>
+      </main>
     </div>
   );
 }

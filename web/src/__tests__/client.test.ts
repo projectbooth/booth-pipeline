@@ -90,6 +90,21 @@ describe("endpoints", () => {
     expect(lastCall().init.method).toBeUndefined();
   });
 
+  // Regression for the 2026-09-23 pilot finding: these two endpoints' real response shapes
+  // (confirmed against booth-catalog's/booth-storage's own Go source, not this repo's fakes,
+  // which had independently — and wrongly — assumed the same {items: [...]} shape every other
+  // list endpoint here uses) differ from every other list endpoint in this file, and a mismatch
+  // crashed the picker the moment it loaded real data.
+  it("parses booth-catalog's real versions shape — {versions: [...]}, no items/total", async () => {
+    fetchMock.mockResolvedValueOnce(json({ versions: [{ version: "1.0.0", seq: 1, notes: "" }] }));
+    await expect(api.catalogVersions(ctx(), "e1")).resolves.toEqual([{ version: "1.0.0", seq: 1, notes: "" }]);
+  });
+
+  it("parses booth-storage's real backends shape — a bare array, not {items: [...]}", async () => {
+    fetchMock.mockResolvedValueOnce(json([{ id: "b1", displayName: "Main" }]));
+    await expect(api.storageBackends(ctx())).resolves.toEqual([{ id: "b1", displayName: "Main" }]);
+  });
+
   it("unwraps runners", async () => {
     fetchMock.mockResolvedValueOnce(json({ items: [{ id: "base", displayName: "Base", available: true, reason: null }] }));
     expect((await api.runners(ctx()))[0].id).toBe("base");

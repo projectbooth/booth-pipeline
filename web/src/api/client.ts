@@ -127,12 +127,19 @@ export const api = {
   // no catalog at all, so callers surface the error next to the picker and carry on.
   catalogCode: (c: ApiContext, q = "") =>
     request<Page<CatalogCodeEntry>>(c, CATALOG, `/code${qs({ q, language: "python", limit: 25 })}`),
+  // The real endpoint has no pagination and wraps its array as {versions: [...]} — NOT the
+  // {items, total} shape every other list endpoint in this file uses (confirmed 2026-09-23
+  // against booth-catalog's own handleCodeVersions, after a mismatch here crashed the picker on
+  // every entry selection; see docs/decisions for the incident).
   catalogVersions: (c: ApiContext, entryId: string) =>
-    request<Page<CatalogVersionSummary>>(c, CATALOG, `/code/${e(entryId)}/versions?limit=200`),
+    request<{ versions: CatalogVersionSummary[] }>(c, CATALOG, `/code/${e(entryId)}/versions`).then((r) => r.versions),
 
   // booth-storage (browse-only). Same "never break the builder" rule as the catalog: a failure
   // here is shown next to the picker, not thrown at the whole page.
-  storageBackends: (c: ApiContext) => request<{ items: StorageBackendSummary[] }>(c, STORAGE, "/backends"),
+  // The real endpoint returns a bare array, not {items: [...]} — confirmed 2026-09-23 against
+  // booth-storage's own handleListBackends, after the same wrong assumption crashed the picker
+  // the moment "From storage" was selected.
+  storageBackends: (c: ApiContext) => request<StorageBackendSummary[]>(c, STORAGE, "/backends"),
   storageObjects: (c: ApiContext, backendId: string, prefix = "") =>
     request<{ entries: StorageObjectSummary[] }>(c, STORAGE, `/backends/${e(backendId)}/objects${qs({ prefix, recursive: "true" })}`),
 };
