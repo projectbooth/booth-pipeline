@@ -16,19 +16,34 @@ type CatalogRef = Extract<TaskCode, { type: "catalog" }>;
 
 const LATEST = "latest";
 
-export function CodePicker({ api: ctx, value, onChange, disabled }: { api: ApiContext; value: CatalogRef | null; onChange: (c: CatalogRef) => void; disabled?: boolean }) {
+export function CodePicker({
+  api: ctx,
+  value,
+  onChange,
+  disabled,
+  error,
+}: {
+  api: ApiContext;
+  value: CatalogRef | null;
+  onChange: (c: CatalogRef) => void;
+  disabled?: boolean;
+  /** A server validation message about the chosen entry/version (e.g. "must not be empty" before
+   *  anything has been picked yet) — distinct from `loadError` below, which is about the catalog
+   *  itself being unreachable, not what was picked from it. */
+  error?: string;
+}) {
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query, 300);
   const [entries, setEntries] = useState<CatalogCodeEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [versions, setVersions] = useState<CatalogVersionSummary[]>([]);
 
   useEffect(() => {
     if (disabled) return;
     let alive = true;
     api.catalogCode(ctx, debounced).then(
-      (page) => alive && (setEntries(page.items), setError(null)),
-      (err: unknown) => alive && (setEntries(null), setError(errorMessage(err))),
+      (page) => alive && (setEntries(page.items), setLoadError(null)),
+      (err: unknown) => alive && (setEntries(null), setLoadError(errorMessage(err))),
     );
     return () => {
       alive = false;
@@ -61,8 +76,13 @@ export function CodePicker({ api: ctx, value, onChange, disabled }: { api: ApiCo
 
   return (
     <div className="flex flex-col gap-2">
+      {loadError && (
+        <Banner tone="warn">The code catalog could not be reached ({loadError}). Pick a storage reference instead, or try again shortly.</Banner>
+      )}
       {error && (
-        <Banner tone="warn">The code catalog could not be reached ({error}). Pick a storage reference instead, or try again shortly.</Banner>
+        <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+          {error}
+        </p>
       )}
       {value && (
         <div className="rounded-md border border-slate-200 p-2 text-sm dark:border-slate-700">

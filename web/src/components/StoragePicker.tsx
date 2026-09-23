@@ -18,7 +18,22 @@ import { Banner, Button, inputClass } from "./ui";
 
 type StorageRef = Extract<TaskCode, { type: "storage" }>;
 
-export function StoragePicker({ api: ctx, value, onChange, disabled }: { api: ApiContext; value: StorageRef | null; onChange: (c: StorageRef) => void; disabled?: boolean }) {
+export function StoragePicker({
+  api: ctx,
+  value,
+  onChange,
+  disabled,
+  error,
+}: {
+  api: ApiContext;
+  value: StorageRef | null;
+  onChange: (c: StorageRef) => void;
+  disabled?: boolean;
+  /** A server validation message about the chosen backend/path (e.g. "must not be empty" before
+   *  anything has been picked yet) — distinct from `backendError`/`listError` below, which are
+   *  about storage itself being unreachable, not what was picked from it. */
+  error?: string;
+}) {
   const [backends, setBackends] = useState<StorageBackendSummary[] | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [backendId, setBackendId] = useState(value?.backendId ?? "");
@@ -63,6 +78,11 @@ export function StoragePicker({ api: ctx, value, onChange, disabled }: { api: Ap
         <Banner tone="warn">
           Storage backends could not be listed ({backendError}). Pick a catalog reference instead, or try again shortly.
         </Banner>
+      )}
+      {error && (
+        <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+          {error}
+        </p>
       )}
       {value && (
         <div className="rounded-md border border-slate-200 p-2 text-sm dark:border-slate-700">

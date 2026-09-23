@@ -7,9 +7,9 @@ import {
   edgeId,
   hasOverlappingPositions,
   newTask,
+  parseTaskField,
   removeTask,
   renameKey,
-  taskIndexOfField,
   toFlow,
   uniqueKey,
 } from "../graph";
@@ -183,15 +183,21 @@ describe("hasOverlappingPositions", () => {
   });
 });
 
-describe("taskIndexOfField", () => {
+describe("parseTaskField", () => {
   it.each([
-    ["tasks[2].dependsOn", 2],
-    ["spec.tasks[0].retry.maxRetries", 0],
+    ["tasks[2].dependsOn", { index: 2, rest: "dependsOn" }],
+    ["spec.tasks[0].retry.maxRetries", { index: 0, rest: "retry.maxRetries" }],
+    // a discriminated union's own tag survives in the path verbatim (ADR 0063's code union,
+    // same shape ADR 0065's schedule union already produces) — a caller matches against this
+    // literal string, not a guessed shorter form.
+    ["spec.tasks[0].code.catalog.entryId", { index: 0, rest: "code.catalog.entryId" }],
+    ["spec.tasks[1].code.storage.backendId", { index: 1, rest: "code.storage.backendId" }],
+    ["tasks[1]", { index: 1, rest: null }],
     ["tasks", null],
     ["name", null],
     [undefined, null],
     [null, null],
   ])("%s -> %s", (field, want) => {
-    expect(taskIndexOfField(field as string | null | undefined)).toBe(want);
+    expect(parseTaskField(field as string | null | undefined)).toEqual(want);
   });
 });

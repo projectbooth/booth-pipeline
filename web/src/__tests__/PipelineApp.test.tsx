@@ -187,6 +187,26 @@ describe("builder", () => {
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 
+  it("routes a field-specific validation error to the matching input, not just the generic banner", async () => {
+    // Coordinator follow-up (2026-09-23): the backend already names the exact field
+    // ("tasks[1].code.storage.backendId"), but the frontend used to keep only the task index and
+    // show the same generic message everywhere — so a task with several fields still gave no clue
+    // which one was wrong. This proves the message lands next to the actual broken input.
+    const user = userEvent.setup();
+    be.addPipeline("etl", ETL());
+    be.failNext.set("POST /pipelines/p1/versions", { status: 422, error: "must not be empty", field: "tasks[1].code.storage.backendId" });
+    mount("editor", "/pipeline/pipelines/p1");
+    await user.click(await screen.findByTestId("node-clean"));
+    await user.click(screen.getByLabelText("From storage"));
+    await user.click(screen.getByRole("button", { name: "Save as new version" }));
+    const codeSection = await screen.findByRole("region", { name: "Code" });
+    expect(within(codeSection).getByText("must not be empty")).toBeInTheDocument();
+    // and NOT as TaskPanel's own generic top-of-form banner — it has a slot for this field, so it
+    // doesn't also repeat the message unscoped.
+    const form = screen.getByRole("form", { name: /Configure task clean/ });
+    expect(within(form).getAllByText("must not be empty")).toHaveLength(1);
+  });
+
   it("live validation from the server is shown while drawing, without saving anything", async () => {
     const user = userEvent.setup();
     be.addPipeline("etl", ETL());
@@ -368,6 +388,14 @@ describe("code catalog picker", () => {
     expect(screen.getByRole("button", { name: "+ Add task" })).toBeEnabled();
     await user.click(screen.getByLabelText("From storage"));
     expect(await screen.findByRole("button", { name: /Use tasks\/a\.py/ })).toBeInTheDocument();
+  });
+
+  it("routes a catalog-field validation error to the picker, not just the generic banner", async () => {
+    const user = await pickCatalog();
+    be.failNext.set("POST /pipelines/p1/versions", { status: 422, error: "must not be empty", field: "tasks[1].code.catalog.entryId" });
+    await user.click(screen.getByRole("button", { name: "Save as new version" }));
+    const codeSection = await screen.findByRole("region", { name: "Code" });
+    expect(within(codeSection).getByText("must not be empty")).toBeInTheDocument();
   });
 });
 

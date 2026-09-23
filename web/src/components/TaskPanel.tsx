@@ -16,14 +16,36 @@ const KINDS: { value: TaskKind; label: string }[] = [
   { value: "sink", label: "Sink — where data ends up" },
 ];
 
+/** Everything worth naming as its own field in the "Configure task" panel — matched literally
+ *  against the backend's `field` path (relative to the task, "tasks[N]." already stripped by
+ *  `parseTaskField`), including a discriminated union's own tag where the backend's path has one
+ *  (e.g. "code.catalog.entryId", not "code.entryId" — see `parseTaskField`'s own docstring). */
+const KNOWN_ERROR_FIELDS = new Set([
+  "key",
+  "name",
+  "kind",
+  "runner",
+  "timeoutSeconds",
+  "params",
+  "dependsOn",
+  "retry.maxRetries",
+  "retry.delaySeconds",
+  "retry.backoff",
+  "code.catalog.entryId",
+  "code.catalog.version",
+  "code.storage.backendId",
+  "code.storage.path",
+]);
+
 export interface TaskPanelProps {
   task: Task;
   tasks: Task[];
   runners: RunnerInfo[];
   api: ApiContext;
   readOnly: boolean;
-  /** A server validation message about this task, shown on the panel. */
-  error?: string;
+  /** A server validation message about this task, and which of its fields (if any) it names —
+   *  `field: null` (or a field this panel has no dedicated slot for) falls back to the banner. */
+  error?: { message: string; field: string | null };
   onChange: (task: Task) => void;
   onRename: (from: string, to: string) => void;
   onSetDependencies: (key: string, dependsOn: string[]) => void;
@@ -73,15 +95,21 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
   const candidates = tasks.filter((t) => t.key !== task.key && (task.dependsOn.includes(t.key) || checkConnection(tasks, t.key, task.key).ok));
   const retry = task.retry ?? { maxRetries: 0, delaySeconds: 0, backoff: "fixed" as Backoff };
 
+  // A server error naming one of the fields below is shown right on that field, same pattern as
+  // `keyError`; anything else (no field, or a field this panel has no slot for) falls back to the
+  // banner, so a message is never silently dropped just because it doesn't map to an input here.
+  const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
+  const showBanner = error && (!error.field || !KNOWN_ERROR_FIELDS.has(error.field));
+
   return (
     <form
       aria-label={`Configure task ${task.name || task.key}`}
       className="flex flex-col gap-4"
       onSubmit={(e) => e.preventDefault()}
     >
-      {error && <Banner tone="error">{error}</Banner>}
+      {showBanner && <Banner tone="error">{error.message}</Banner>}
       <fieldset disabled={readOnly} className="flex min-w-0 flex-col gap-4 disabled:opacity-90">
-        <Field id="task-name" label="Name" help="Shown on the canvas. Optional.">
+        <Field id="task-name" label="Name" error={fieldError("name")} help="Shown on the canvas. Optional.">
           {(p) => <input {...p} className={inputClass} value={task.name} maxLength={200} onChange={(e) => onChange({ ...task, name: e.target.value })} />}
         </Field>
 
@@ -89,7 +117,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           id="task-key"
           label="Key"
           required
-          error={keyError}
+          error={keyError ?? fieldError("key")}
           help={"Downstream code reads this task's output as ctx.inputs[\"key\"], so renaming it changes what they must read."}
         >
           {(p) => (
@@ -104,7 +132,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           )}
         </Field>
 
-        <Field id="task-kind" label="Type" help="Purely a label for the canvas — it never changes what a task can connect to.">
+        <Field id="task-kind" label="Type" error={fieldError("kind")} help="Purely a label for the canvas — it never changes what a task can connect to.">
           {(p) => (
             <select
               {...p}
@@ -160,6 +188,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
               disabled={readOnly}
               value={task.code.entryId ? task.code : null}
               onChange={(code) => onChange({ ...task, code })}
+              error={fieldError("code.catalog.entryId") ?? fieldError("code.catalog.version")}
             />
           ) : (
             <StoragePicker
@@ -167,6 +196,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
               disabled={readOnly}
               value={task.code.path ? task.code : null}
               onChange={(code) => onChange({ ...task, code })}
+              error={fieldError("code.storage.backendId") ?? fieldError("code.storage.path")}
             />
           )}
           {task.code.type !== "inline" && task.code.source && (
@@ -183,7 +213,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           )}
         </section>
 
-        <Field id="task-runner" label="Runs on" help="The base runner needs nothing else installed. Spark is only ever a choice you make, and only when it is installed.">
+        <Field id="task-runner" label="Runs on" error={fieldError("runner")} help="The base runner needs nothing else installed. Spark is only ever a choice you make, and only when it is installed.">
           {(p) => (
             <select {...p} className={inputClass} value={task.runner} onChange={(e) => onChange({ ...task, runner: e.target.value })}>
               {runners.map((r) => (
@@ -204,6 +234,11 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
 
         <section aria-label="Dependencies" className="flex flex-col gap-1.5">
           <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Depends on</h3>
+          {fieldError("dependsOn") && (
+            <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+              {fieldError("dependsOn")}
+            </p>
+          )}
           {candidates.length === 0 ? (
             <p className="text-xs text-slate-500 dark:text-slate-400">No other task can feed this one yet. Add another task, or drag from another task's right-hand handle.</p>
           ) : (
@@ -227,7 +262,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Retry override</h3>
           <p className="-mt-1 text-xs text-slate-500 dark:text-slate-400">Replaces the job's default retry policy for this task. Zero retries means it fails on the first error.</p>
           <div className="grid grid-cols-3 gap-2">
-            <Field id="retry-max" label="Max retries">
+            <Field id="retry-max" label="Max retries" error={fieldError("retry.maxRetries")}>
               {(p) => (
                 <input
                   {...p}
@@ -240,7 +275,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
                 />
               )}
             </Field>
-            <Field id="retry-delay" label="Delay (s)">
+            <Field id="retry-delay" label="Delay (s)" error={fieldError("retry.delaySeconds")}>
               {(p) => (
                 <input
                   {...p}
@@ -252,7 +287,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
                 />
               )}
             </Field>
-            <Field id="retry-backoff" label="Backoff">
+            <Field id="retry-backoff" label="Backoff" error={fieldError("retry.backoff")}>
               {(p) => (
                 <select {...p} className={inputClass} value={retry.backoff} onChange={(e) => onChange({ ...task, retry: { ...retry, backoff: e.target.value as Backoff } })}>
                   <option value="fixed">Fixed</option>
@@ -288,7 +323,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           </p>
         </section>
 
-        <Field id="task-timeout" label="Timeout (seconds)" help="The task is killed if it runs longer than this.">
+        <Field id="task-timeout" label="Timeout (seconds)" error={fieldError("timeoutSeconds")} help="The task is killed if it runs longer than this.">
           {(p) => (
             <input
               {...p}
@@ -301,7 +336,7 @@ export function TaskPanel({ task, tasks, runners, api, readOnly, error, onChange
           )}
         </Field>
 
-        <Field id="task-params" label="Parameters (JSON)" error={paramsError ?? undefined} help="Available to the task as ctx.params.">
+        <Field id="task-params" label="Parameters (JSON)" error={paramsError ?? fieldError("params")} help="Available to the task as ctx.params.">
           {(p) => <textarea {...p} className={`${inputClass} ${monoClass} h-24 resize-y`} spellCheck={false} value={paramsDraft} onChange={(e) => setParams(e.target.value)} />}
         </Field>
       </fieldset>

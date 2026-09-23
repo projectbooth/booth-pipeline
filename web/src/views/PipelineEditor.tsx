@@ -4,7 +4,7 @@ import { DagCanvas } from "../components/DagCanvas";
 import { TaskPanel } from "../components/TaskPanel";
 import { Banner, Button, Chip, Link, Loaded, PageHeader, inputClass, linkClass } from "../components/ui";
 import type { ViewCtx } from "../context";
-import { autoLayout, hasOverlappingPositions, newTask, removeTask, renameKey, taskIndexOfField } from "../graph";
+import { autoLayout, hasOverlappingPositions, newTask, parseTaskField, removeTask, renameKey } from "../graph";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
 import type { Pipeline, PipelineVersion, RunnerInfo, Task, ValidateResult } from "../types";
 
@@ -99,10 +99,11 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
   }, [debounced, v.api]);
 
   const problem = saveError ?? (live && !live.valid ? { message: live.error ?? "invalid", field: live.field ?? undefined } : null);
+  const parsedField = useMemo(() => parseTaskField(problem?.field), [problem]);
   const taskErrors = useMemo(() => {
-    const idx = taskIndexOfField(problem?.field);
-    return idx !== null && tasks[idx] ? { [tasks[idx].key]: problem?.message ?? "" } : {};
-  }, [problem, tasks]);
+    const t = parsedField && tasks[parsedField.index];
+    return t ? { [t.key]: problem?.message ?? "" } : {};
+  }, [parsedField, tasks, problem]);
 
   const change = useCallback((next: Task[]) => {
     setTasks(next);
@@ -140,14 +141,21 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       reload();
     } catch (err) {
       setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? err.field : undefined });
-      const idx = err instanceof ApiError ? taskIndexOfField(err.field) : null;
-      if (idx !== null && tasks[idx]) setSelected(tasks[idx].key);
+      const parsed = err instanceof ApiError ? parseTaskField(err.field) : null;
+      if (parsed && tasks[parsed.index]) setSelected(tasks[parsed.index].key);
     } finally {
       setSaving(false);
     }
   }
 
   const selectedTask = tasks.find((t) => t.key === selected) ?? null;
+  // The bit of `problem` that is about the SELECTED task specifically, with the field path kept
+  // relative to it (the "tasks[N]." prefix stripped) — TaskPanel maps `field` onto its own inputs
+  // the same way its `keyError` already does, instead of only ever showing the generic message.
+  const selectedTaskError =
+    selectedTask && parsedField && tasks[parsedField.index]?.key === selectedTask.key && problem
+      ? { message: problem.message, field: parsedField.rest }
+      : undefined;
 
   return (
     <div className="flex flex-col gap-3">
@@ -261,7 +269,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
               runners={runners}
               api={v.api}
               readOnly={readOnly}
-              error={taskErrors[selectedTask.key]}
+              error={selectedTaskError}
               onChange={(t) => change(tasks.map((x) => (x.key === selectedTask.key ? t : x)))}
               onRename={(from, to) => {
                 change(renameKey(tasks, from, to));

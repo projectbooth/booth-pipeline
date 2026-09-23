@@ -174,10 +174,19 @@ export function renameKey(tasks: Task[], from: string, to: string): Task[] {
   });
 }
 
-/** The task index a server error's `field` path refers to ("tasks[2].dependsOn" -> 2), or null. */
-export function taskIndexOfField(field: string | null | undefined): number | null {
-  const m = /(?:^|\.)tasks\[(\d+)\]/.exec(field ?? "");
-  return m ? Number(m[1]) : null;
+/** A server error's `field` path, parsed relative to the task it names:
+ *  "tasks[2].dependsOn" -> {index: 2, rest: "dependsOn"}
+ *  "spec.tasks[0].code.catalog.entryId" -> {index: 0, rest: "code.catalog.entryId"}
+ *  "tasks[1]" or "tasks" -> {index: 1, rest: null} / null (no field within the task, or no task at all)
+ *
+ *  `rest` keeps everything after "tasks[N]." verbatim, including a discriminated union's own tag
+ *  when the backend's path includes one (a catalog/storage code error's path really is
+ *  "code.catalog.entryId", not "code.entryId" — the same shape JobViews.tsx's schedule fields
+ *  already match on, e.g. "schedule.interval.seconds") — so a caller matches against the same
+ *  literal strings the backend actually sends, not a guessed shorter form. */
+export function parseTaskField(field: string | null | undefined): { index: number; rest: string | null } | null {
+  const m = /(?:^|\.)tasks\[(\d+)\]\.?(.*)$/.exec(field ?? "");
+  return m ? { index: Number(m[1]), rest: m[2] || null } : null;
 }
 
 export const KEY_RE = /^[a-z][a-z0-9_]{0,62}$/;
