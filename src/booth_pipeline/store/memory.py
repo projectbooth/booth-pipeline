@@ -11,20 +11,21 @@ import threading
 from datetime import datetime
 from uuid import uuid4
 
-from ..model import PipelineSpec
+from ..model import PipelineSpec, TaskConfig
 from ..records import (
     RUN_ACTIVE,
     RUN_QUEUED,
     RUN_RUNNING,
     RUN_TERMINAL,
     TASK_PENDING,
-    Job,
     LogLine,
     Page,
     Pipeline,
     PipelineVersion,
     Run,
+    TaskEntity,
     TaskRun,
+    TaskVersionRecord,
 )
 from ..schedule import next_fire_trigger
 from .base import Busy, Conflict, InUse
@@ -41,7 +42,8 @@ class MemoryStore:
         self._lock = threading.RLock()
         self._pipelines: dict[str, Pipeline] = {}
         self._versions: dict[str, list[PipelineVersion]] = {}
-        self._jobs: dict[str, Job] = {}
+        self._tasks: dict[str, TaskEntity] = {}
+        self._task_versions: dict[str, list[TaskVersionRecord]] = {}
         self._runs: dict[str, Run] = {}
         self._task_runs: dict[str, dict[str, TaskRun]] = {}
         self._logs: dict[str, list[LogLine]] = {}
@@ -55,14 +57,14 @@ class MemoryStore:
             p = Pipeline(str(uuid4()), workspace, name, description, by, now, now)
             self._pipelines[p.id] = p
             self._versions[p.id] = []
-            return copy.copy(p)
+            return copy.deepcopy(p)
 
     def _pipeline(self, workspace, pipeline_id):
         p = self._pipelines.get(pipeline_id)
         return p if p and p.workspace == workspace else None
 
     def _with_latest(self, p: Pipeline) -> Pipeline:
-        out = copy.copy(p)
+        out = copy.deepcopy(p)
         out.latest_version = len(self._versions.get(p.id, []))
         return out
 
@@ -92,11 +94,28 @@ class MemoryStore:
             p = self._pipeline(workspace, pipeline_id)
             if not p:
                 return False
-            if any(j.pipeline_id == p.id for j in self._jobs.values()):
-                raise InUse("this pipeline still has jobs; delete them first")
             del self._pipelines[p.id]
             self._versions.pop(p.id, None)
+            # Pipeline now owns its run history directly (ADR 0071: no more Job to block or
+            # survive this) — deleting it cascades, the same way pipeline_versions already did.
+            for rid in [r.id for r in self._runs.values() if r.pipeline_id == p.id]:
+                self._runs.pop(rid)
+                self._task_runs.pop(rid, None)
+                self._logs.pop(rid, None)
             return True
+
+    def update_schedule(self, pipeline: Pipeline):
+        with self._lock:
+            p = self._pipeline(pipeline.workspace, pipeline.id)
+            if not p:
+                return None
+            p.schedule = pipeline.schedule
+            p.allow_concurrent_runs = pipeline.allow_concurrent_runs
+            p.next_run_at = pipeline.next_run_at
+            p.owner_sub = pipeline.owner_sub
+            p.role_ceiling = pipeline.role_ceiling
+            p.updated_at = _now()
+            return self._with_latest(p)
 
     def add_version(self, workspace, pipeline_id, spec: PipelineSpec, notes, by):
         with self._lock:
@@ -129,73 +148,108 @@ class MemoryStore:
             items = list(reversed(self._versions[p.id]))
             return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
 
-    # ---- jobs ----
-    def create_job(self, job):
+    # ---- tasks (ADR 0071) ----
+    def create_task(self, workspace, name, description, by):
         with self._lock:
-            if any(j.workspace == job.workspace and j.name == job.name for j in self._jobs.values()):
-                raise Conflict("a job with that name already exists in this workspace", "name")
-            self._jobs[job.id] = copy.deepcopy(job)
-            return copy.deepcopy(job)
+            now = _now()
+            t = TaskEntity(str(uuid4()), workspace, name, description, by, now, now)
+            self._tasks[t.id] = t
+            self._task_versions[t.id] = []
+            return copy.deepcopy(t)
 
-    def get_job(self, workspace, job_id):
-        with self._lock:
-            j = self._jobs.get(job_id)
-            return copy.deepcopy(j) if j and j.workspace == workspace else None
+    def _task(self, workspace, task_id):
+        t = self._tasks.get(task_id)
+        return t if t and t.workspace == workspace else None
 
-    def list_jobs(self, workspace, pipeline_id, q, limit, offset):
-        with self._lock:
-            items = [
-                j
-                for j in self._jobs.values()
-                if j.workspace == workspace and (pipeline_id is None or j.pipeline_id == pipeline_id) and _matches(q, j.name, "")
-            ]
-            items.sort(key=lambda j: (j.name.lower(), j.id))
-            return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
+    def _task_with_latest(self, t: TaskEntity) -> TaskEntity:
+        out = copy.deepcopy(t)
+        out.latest_version = len(self._task_versions.get(t.id, []))
+        return out
 
-    def update_job(self, job):
+    def get_task(self, workspace, task_id):
         with self._lock:
-            cur = self._jobs.get(job.id)
-            if not cur or cur.workspace != job.workspace:
+            t = self._task(workspace, task_id)
+            return self._task_with_latest(t) if t else None
+
+    def list_tasks(self, workspace, q, limit, offset):
+        with self._lock:
+            items = [t for t in self._tasks.values() if t.workspace == workspace and _matches(q, t.name, t.description)]
+            items.sort(key=lambda t: (t.name.lower(), t.id))
+            return Page([self._task_with_latest(t) for t in items[offset : offset + limit]], len(items))
+
+    def update_task(self, workspace, task_id, name, description):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
                 return None
-            if any(o.workspace == job.workspace and o.name == job.name and o.id != job.id for o in self._jobs.values()):
-                raise Conflict("a job with that name already exists in this workspace", "name")
-            self._jobs[job.id] = copy.deepcopy(job)
-            return copy.deepcopy(job)
+            t.name, t.description, t.updated_at = name, description, _now()
+            return self._task_with_latest(t)
 
-    def delete_job(self, workspace, job_id):
+    def delete_task(self, workspace, task_id):
         with self._lock:
-            j = self._jobs.get(job_id)
-            if not j or j.workspace != workspace:
+            t = self._task(workspace, task_id)
+            if not t:
                 return False
-            del self._jobs[job_id]
-            for rid in [r.id for r in self._runs.values() if r.job_id == job_id]:
-                self._runs.pop(rid)
-                self._task_runs.pop(rid, None)
-                self._logs.pop(rid, None)
+            if any(ref.task_id == task_id for versions in self._versions.values() for v in versions for ref in v.spec.tasks):
+                raise InUse("this task is still referenced by a pipeline version; it cannot be removed")
+            del self._tasks[task_id]
+            self._task_versions.pop(task_id, None)
             return True
 
-    def claim_due_jobs(self, now, limit):
+    def add_task_version(self, workspace, task_id, config: TaskConfig, notes, by):
         with self._lock:
-            due = [j for j in self._jobs.values() if j.schedule and j.schedule.enabled and j.next_run_at and j.next_run_at <= now]
-            due.sort(key=lambda j: (j.next_run_at, j.id))
+            t = self._task(workspace, task_id)
+            if not t:
+                return None
+            versions = self._task_versions[t.id]
+            v = TaskVersionRecord(t.id, len(versions) + 1, config.model_copy(deep=True), notes, by, _now())
+            versions.append(v)
+            t.updated_at = v.created_at
+            return copy.deepcopy(v)
+
+    def get_task_version(self, workspace, task_id, version):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
+                return None
+            versions = self._task_versions[t.id]
+            if not versions:
+                return None
+            if version is None:
+                return copy.deepcopy(versions[-1])
+            return copy.deepcopy(versions[version - 1]) if 1 <= version <= len(versions) else None
+
+    def list_task_versions(self, workspace, task_id, limit, offset):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
+                return Page([], 0)
+            items = list(reversed(self._task_versions[t.id]))
+            return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
+
+    # ---- scheduling ----
+    def claim_due_pipelines(self, now, limit):
+        with self._lock:
+            due = [p for p in self._pipelines.values() if p.schedule and p.schedule.enabled and p.next_run_at and p.next_run_at <= now]
+            due.sort(key=lambda p: (p.next_run_at, p.id))
             out = []
-            for j in due[:limit]:
-                claimed = copy.deepcopy(j)
-                j.next_run_at = next_fire_trigger(j.schedule, now)
+            for p in due[:limit]:
+                claimed = copy.deepcopy(p)
+                p.next_run_at = next_fire_trigger(p.schedule, now)
                 out.append(claimed)
             return out
 
     def list_upcoming(self, limit):
         with self._lock:
-            due = [j for j in self._jobs.values() if j.schedule and j.schedule.enabled and j.next_run_at]
-            due.sort(key=lambda j: (j.next_run_at, j.id))
+            due = [p for p in self._pipelines.values() if p.schedule and p.schedule.enabled and p.next_run_at]
+            due.sort(key=lambda p: (p.next_run_at, p.id))
             return copy.deepcopy(due[:limit])
 
     # ---- runs ----
     def create_run(self, run, task_keys, exclusive=False):
         with self._lock:
-            if exclusive and self.count_active_runs(run.workspace, run.job_id) > 0:
-                raise Busy("this job already has an active run")
+            if exclusive and self.count_active_runs(run.workspace, run.pipeline_id) > 0:
+                raise Busy("this pipeline already has an active run")
             self._runs[run.id] = copy.deepcopy(run)
             self._task_runs[run.id] = {k: TaskRun(run.id, k, TASK_PENDING) for k in task_keys}
             self._logs[run.id] = []
@@ -206,19 +260,19 @@ class MemoryStore:
             r = self._runs.get(run_id)
             return copy.deepcopy(r) if r and r.workspace == workspace else None
 
-    def list_runs(self, workspace, job_id, status, limit, offset):
+    def list_runs(self, workspace, pipeline_id, status, limit, offset):
         with self._lock:
             items = [
                 r
                 for r in self._runs.values()
-                if r.workspace == workspace and (job_id is None or r.job_id == job_id) and (status is None or r.status == status)
+                if r.workspace == workspace and (pipeline_id is None or r.pipeline_id == pipeline_id) and (status is None or r.status == status)
             ]
             items.sort(key=lambda r: (r.created_at, r.id), reverse=True)
             return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
 
-    def count_active_runs(self, workspace, job_id):
+    def count_active_runs(self, workspace, pipeline_id):
         with self._lock:
-            return sum(1 for r in self._runs.values() if r.workspace == workspace and r.job_id == job_id and r.status in RUN_ACTIVE)
+            return sum(1 for r in self._runs.values() if r.workspace == workspace and r.pipeline_id == pipeline_id and r.status in RUN_ACTIVE)
 
     def mark_running(self, run_id, worker_id, now):
         with self._lock:
@@ -296,4 +350,3 @@ class MemoryStore:
 def _matches(q: str, *fields: str) -> bool:
     q = q.strip().lower()
     return not q or any(q in f.lower() for f in fields)
-

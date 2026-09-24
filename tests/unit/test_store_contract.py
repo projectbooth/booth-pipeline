@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from booth_pipeline.model import RetryPolicy, Schedule
+from booth_pipeline.model import Schedule, TaskConfig
 from booth_pipeline.records import (
     RUN_FAILED,
     RUN_QUEUED,
@@ -15,24 +15,29 @@ from booth_pipeline.records import (
     RUN_SUCCEEDED,
     TASK_FAILED,
     TASK_RUNNING,
-    Job,
     LogLine,
+    Pipeline,
     Run,
 )
 from booth_pipeline.store.base import Conflict, InUse
 
-from .helpers import linear
+from .helpers import linear, task_config
 
 WS, OTHER = "acme", "other"
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
 
-def new_job(ws=WS, name="nightly", pipeline_id="p", version=None, schedule=None, next_run_at=None) -> Job:
-    return Job(str(uuid4()), ws, name, pipeline_id, version, schedule, None, False, "alice", T0, T0, next_run_at)
+def new_run(pipeline: Pipeline, status=RUN_QUEUED) -> Run:
+    return Run(str(uuid4()), pipeline.workspace, pipeline.id, 1, status, "manual", "alice", T0)
 
 
-def new_run(job: Job, status=RUN_QUEUED) -> Run:
-    return Run(str(uuid4()), job.workspace, job.id, job.pipeline_id, 1, status, "manual", "alice", T0)
+def scheduled(store, pipeline: Pipeline, **over) -> Pipeline:
+    """Persist `pipeline` with the given schedule fields overridden — `update_schedule`'s own
+    contract test fixture."""
+    fields = {"schedule": None, "allow_concurrent_runs": False, "next_run_at": None, "owner_sub": "", "role_ceiling": "editor", **over}
+    for k, v in fields.items():
+        setattr(pipeline, k, v)
+    return store.update_schedule(pipeline)
 
 
 # ---- pipelines & versions --------------------------------------------------------------------
@@ -91,7 +96,7 @@ def test_versions_are_sequential_immutable_and_latest_is_reported(store):
     assert store.list_versions(OTHER, p.id, 10, 0).total == 0
 
 
-def test_spec_round_trips_exactly_including_snapshotted_code(store):
+def test_spec_round_trips_exactly_including_task_refs(store):
     from booth_pipeline.model import PipelineSpec
 
     spec = PipelineSpec.model_validate(
@@ -99,10 +104,9 @@ def test_spec_round_trips_exactly_including_snapshotted_code(store):
             "tasks": [
                 {
                     "key": "a",
-                    "kind": "source",
-                    "code": {"type": "catalog", "entryId": "e1", "version": "1.2.0", "name": "loader", "sha256": "ab" * 32, "source": "def run(ctx):\n    return 'é'\n"},
-                    "retry": {"maxRetries": 2, "delaySeconds": 1.5, "backoff": "linear"},
-                    "params": {"n": [1, {"x": None}]},
+                    "taskId": "t-1",
+                    "taskVersion": 3,
+                    "dependsOn": [],
                     "position": {"x": 10.5, "y": -3},
                 }
             ]
@@ -113,59 +117,136 @@ def test_spec_round_trips_exactly_including_snapshotted_code(store):
     assert store.get_version(WS, p.id, 1).spec == spec
 
 
-def test_cannot_delete_a_pipeline_that_has_jobs(store):
+def test_deleting_a_pipeline_removes_its_runs_task_runs_and_logs(store):
+    """ADR 0071: Pipeline owns its run history directly now — deleting it cascades, the same way
+    pipeline_versions already did (there is no more separate Job to block or survive deletion)."""
     p = store.create_pipeline(WS, "etl", "", "a")
-    j = store.create_job(new_job(pipeline_id=p.id))
-    with pytest.raises(InUse):
-        store.delete_pipeline(WS, p.id)
-    store.delete_job(WS, j.id)
+    r = store.create_run(new_run(p), ["a"])
+    store.append_logs([LogLine(r.id, 1, T0, "a", 1, "stdout", "hi")])
     assert store.delete_pipeline(WS, p.id) is True
+    assert store.get_run(WS, r.id) is None and store.list_task_runs(r.id) == [] and store.list_logs(r.id, None, 0, 10) == []
 
 
-# ---- jobs ------------------------------------------------------------------------------------
+# ---- pipeline scheduling — folded onto Pipeline directly (ADR 0071) ---------------------------
 
 
-def test_job_crud_uniqueness_and_isolation(store):
+def test_update_schedule_persists_schedule_and_ownership_fields(store):
     p = store.create_pipeline(WS, "etl", "", "a")
-    j = store.create_job(new_job(pipeline_id=p.id, schedule=Schedule(cron="0 9 * * *", timezone="America/Toronto")))
-    got = store.get_job(WS, j.id)
-    assert got.schedule.cron == "0 9 * * *" and got.schedule.timezone == "America/Toronto" and got.pipeline_version is None
-    assert store.get_job(OTHER, j.id) is None
-    with pytest.raises(Conflict):
-        store.create_job(new_job(pipeline_id=p.id))
-    j2 = store.create_job(new_job(name="other", pipeline_id=p.id))
-    j2.name = "nightly"
-    with pytest.raises(Conflict):
-        store.update_job(j2)
-    j.retry, j.pipeline_version = RetryPolicy(maxRetries=3, backoff="exponential"), 1
-    saved = store.update_job(j)
-    assert saved.retry.max_retries == 3 and store.get_job(WS, j.id).pipeline_version == 1
-    assert store.list_jobs(WS, p.id, "", 10, 0).total == 2
-    assert store.list_jobs(WS, "nope", "", 10, 0).total == 0
-    assert store.list_jobs(OTHER, None, "", 10, 0).total == 0
-    assert store.delete_job(OTHER, j.id) is False and store.delete_job(WS, j.id) is True
+    assert p.schedule is None and p.owner_sub == "" and p.role_ceiling == "editor"
+    saved = scheduled(store, p, schedule=Schedule(cron="0 9 * * *", timezone="America/Toronto"), owner_sub="sub-1", role_ceiling="viewer", allow_concurrent_runs=True)
+    assert saved.schedule.cron == "0 9 * * *" and saved.schedule.timezone == "America/Toronto"
+    assert saved.owner_sub == "sub-1" and saved.role_ceiling == "viewer" and saved.allow_concurrent_runs is True
+    got = store.get_pipeline(WS, p.id)
+    assert got.schedule.cron == "0 9 * * *" and got.owner_sub == "sub-1"
+    # wrong workspace, and an absent pipeline, are both a no-op None
+    other = Pipeline(p.id, OTHER, p.name, p.description, p.created_by, p.created_at, p.updated_at)
+    assert scheduled(store, other) is None
+    ghost = Pipeline(str(uuid4()), WS, "x", "", "a", T0, T0)
+    assert scheduled(store, ghost) is None
 
 
-def test_claim_due_jobs_claims_each_fire_once_and_advances_the_schedule(store):
-    p = store.create_pipeline(WS, "etl", "", "a")
+def test_claim_due_pipelines_claims_each_fire_once_and_advances_the_schedule(store):
     now = T0 + timedelta(minutes=1)
-    due = store.create_job(new_job(name="due", pipeline_id=p.id, schedule=Schedule(cron="*/10 * * * *"), next_run_at=T0))
-    store.create_job(new_job(name="future", pipeline_id=p.id, schedule=Schedule(cron="*/10 * * * *"), next_run_at=now + timedelta(hours=1)))
-    store.create_job(new_job(name="disabled", pipeline_id=p.id, schedule=Schedule(cron="*/10 * * * *", enabled=False), next_run_at=T0))
-    store.create_job(new_job(name="manual-only", pipeline_id=p.id))
-    claimed = store.claim_due_jobs(now, 10)
-    assert [j.id for j in claimed] == [due.id]
-    assert store.claim_due_jobs(now, 10) == []  # already claimed: a second poller gets nothing
-    assert store.get_job(WS, due.id).next_run_at == datetime(2026, 1, 1, 12, 10, tzinfo=UTC)
+    due = store.create_pipeline(WS, "due", "", "a")
+    scheduled(store, due, schedule=Schedule(cron="*/10 * * * *"), next_run_at=T0)
+    future = store.create_pipeline(WS, "future", "", "a")
+    scheduled(store, future, schedule=Schedule(cron="*/10 * * * *"), next_run_at=now + timedelta(hours=1))
+    disabled = store.create_pipeline(WS, "disabled", "", "a")
+    scheduled(store, disabled, schedule=Schedule(cron="*/10 * * * *", enabled=False), next_run_at=T0)
+    store.create_pipeline(WS, "manual-only", "", "a")
+    claimed = store.claim_due_pipelines(now, 10)
+    assert [p.id for p in claimed] == [due.id]
+    assert store.claim_due_pipelines(now, 10) == []  # already claimed: a second poller gets nothing
+    assert store.get_pipeline(WS, due.id).next_run_at == datetime(2026, 1, 1, 12, 10, tzinfo=UTC)
 
 
-def test_claim_due_jobs_respects_limit_and_orders_oldest_first(store):
-    p = store.create_pipeline(WS, "etl", "", "a")
+def test_claim_due_pipelines_respects_limit_and_orders_oldest_first(store):
     for i in range(3):
-        store.create_job(new_job(name=f"j{i}", pipeline_id=p.id, schedule=Schedule(cron="0 * * * *"), next_run_at=T0 - timedelta(hours=i)))
-    first = store.claim_due_jobs(T0, 2)
-    assert [j.name for j in first] == ["j2", "j1"]
-    assert [j.name for j in store.claim_due_jobs(T0, 2)] == ["j0"]
+        p = store.create_pipeline(WS, f"p{i}", "", "a")
+        scheduled(store, p, schedule=Schedule(cron="0 * * * *"), next_run_at=T0 - timedelta(hours=i))
+    first = store.claim_due_pipelines(T0, 2)
+    assert [p.name for p in first] == ["p2", "p1"]
+    assert [p.name for p in store.claim_due_pipelines(T0, 2)] == ["p0"]
+
+
+# ---- tasks (ADR 0071): the direct counterpart of pipelines & versions above --------------------
+
+
+def test_task_crud_and_workspace_isolation(store):
+    t = store.create_task(WS, "loader", "loads things", "alice")
+    assert store.get_task(WS, t.id).name == "loader"
+    assert store.get_task(OTHER, t.id) is None  # another workspace cannot see it
+    assert store.update_task(OTHER, t.id, "x", "") is None
+    assert store.delete_task(OTHER, t.id) is False
+    assert store.update_task(WS, t.id, "loader2", "d2").name == "loader2"
+    assert store.delete_task(WS, t.id) is True
+    assert store.get_task(WS, t.id) is None
+    assert store.delete_task(WS, t.id) is False
+
+
+def test_task_names_are_not_unique_even_within_one_workspace(store):
+    """Unlike a Pipeline, a Task's name is a browsable label, not something a person types to
+    navigate to it — and this repo's own ADR 0071 migration mints many same-named tasks."""
+    a = store.create_task(WS, "loader", "", "a")
+    b = store.create_task(WS, "loader", "", "a")
+    assert a.id != b.id
+    assert store.list_tasks(WS, "loader", 10, 0).total == 2
+
+
+def test_task_list_search_and_paging(store):
+    for n, d in [("alpha", "loads users"), ("beta", "50%_off report"), ("gamma", "")]:
+        store.create_task(WS, n, d, "a")
+    store.create_task(OTHER, "alpha-elsewhere", "", "a")
+    page = store.list_tasks(WS, "", 10, 0)
+    assert [t.name for t in page.items] == ["alpha", "beta", "gamma"] and page.total == 3
+    assert [t.name for t in store.list_tasks(WS, "", 2, 1).items] == ["beta", "gamma"]
+    assert [t.name for t in store.list_tasks(WS, "USERS", 10, 0).items] == ["alpha"]
+    assert [t.name for t in store.list_tasks(WS, "50%_", 10, 0).items] == ["beta"]
+    assert store.list_tasks(WS, "%", 10, 0).total == 1
+
+
+def test_task_versions_are_sequential_immutable_and_latest_is_reported(store):
+    t = store.create_task(WS, "loader", "", "a")
+    assert store.get_task_version(WS, t.id, None) is None and store.get_task(WS, t.id).latest_version == 0
+    cfg = TaskConfig.model_validate(task_config())
+    v1 = store.add_task_version(WS, t.id, cfg, "first", "alice")
+    v2 = store.add_task_version(WS, t.id, cfg, "second", "bob")
+    assert (v1.version, v2.version) == (1, 2)
+    assert store.get_task(WS, t.id).latest_version == 2
+    assert store.get_task_version(WS, t.id, None).notes == "second"
+    assert store.get_task_version(WS, t.id, 1).notes == "first"
+    assert store.get_task_version(WS, t.id, 3) is None and store.get_task_version(WS, t.id, 0) is None
+    assert [v.version for v in store.list_task_versions(WS, t.id, 10, 0).items] == [2, 1]
+    assert store.add_task_version(OTHER, t.id, cfg, "", "x") is None
+    assert store.get_task_version(OTHER, t.id, 1) is None
+    assert store.list_task_versions(OTHER, t.id, 10, 0).total == 0
+
+
+def test_task_config_round_trips_exactly_including_snapshotted_code(store):
+    cfg = TaskConfig.model_validate(
+        {
+            "code": {"type": "catalog", "entryId": "e1", "version": "1.2.0", "name": "loader", "sha256": "ab" * 32, "source": "def run(ctx):\n    return 'é'\n"},
+            "retry": {"maxRetries": 2, "delaySeconds": 1.5, "backoff": "linear"},
+            "params": {"n": [1, {"x": None}]},
+        }
+    )
+    t = store.create_task(WS, "loader", "", "a")
+    store.add_task_version(WS, t.id, cfg, "", "a")
+    assert store.get_task_version(WS, t.id, 1).config == cfg
+
+
+def test_cannot_delete_a_task_still_referenced_by_a_pipeline_version(store):
+    from booth_pipeline.model import PipelineSpec
+
+    t = store.create_task(WS, "loader", "", "a")
+    store.add_task_version(WS, t.id, TaskConfig.model_validate(task_config()), "", "a")
+    p = store.create_pipeline(WS, "etl", "", "a")
+    spec = PipelineSpec.model_validate({"tasks": [{"key": "a", "taskId": t.id, "taskVersion": 1}]})
+    store.add_version(WS, p.id, spec, "", "a")
+    with pytest.raises(InUse):
+        store.delete_task(WS, t.id)
+    store.delete_pipeline(WS, p.id)
+    assert store.delete_task(WS, t.id) is True
 
 
 # ---- runs ------------------------------------------------------------------------------------
@@ -173,13 +254,12 @@ def test_claim_due_jobs_respects_limit_and_orders_oldest_first(store):
 
 def make_run(store, ws=WS):
     p = store.create_pipeline(ws, f"etl-{uuid4().hex[:6]}", "", "a")
-    j = store.create_job(new_job(ws=ws, name=f"j-{uuid4().hex[:6]}", pipeline_id=p.id))
-    return j, store.create_run(new_run(j), ["a", "b"])
+    return p, store.create_run(new_run(p), ["a", "b"])
 
 
 def test_run_lifecycle_and_first_terminal_write_wins(store):
-    j, r = make_run(store)
-    assert store.get_run(OTHER, r.id) is None and store.count_active_runs(WS, j.id) == 1
+    p, r = make_run(store)
+    assert store.get_run(OTHER, r.id) is None and store.count_active_runs(WS, p.id) == 1
     assert {t.task_key: t.status for t in store.list_task_runs(r.id)} == {"a": "pending", "b": "pending"}
     store.mark_running(r.id, "w1", T0)
     got = store.get_run(WS, r.id)
@@ -188,7 +268,7 @@ def test_run_lifecycle_and_first_terminal_write_wins(store):
     assert store.finish_run(r.id, RUN_FAILED, "late", T0) is False  # terminal states never change
     got = store.get_run(WS, r.id)
     assert (got.status, got.error, got.finished_at) == (RUN_SUCCEEDED, None, T0 + timedelta(seconds=5))
-    assert store.count_active_runs(WS, j.id) == 0
+    assert store.count_active_runs(WS, p.id) == 0
 
 
 def test_mark_running_only_moves_a_queued_run(store):
@@ -200,17 +280,16 @@ def test_mark_running_only_moves_a_queued_run(store):
 
 def test_list_runs_filters_and_orders_newest_first(store):
     p = store.create_pipeline(WS, "etl", "", "a")
-    j = store.create_job(new_job(pipeline_id=p.id))
     ids = []
     for i in range(3):
-        r = new_run(j)
+        r = new_run(p)
         r.created_at = T0 + timedelta(minutes=i)
         ids.append(store.create_run(r, ["a"]).id)
     store.finish_run(ids[0], RUN_FAILED, "x", T0)
-    page = store.list_runs(WS, j.id, None, 10, 0)
+    page = store.list_runs(WS, p.id, None, 10, 0)
     assert [r.id for r in page.items] == ids[::-1] and page.total == 3
-    assert [r.id for r in store.list_runs(WS, j.id, RUN_FAILED, 10, 0).items] == [ids[0]]
-    assert store.list_runs(OTHER, j.id, None, 10, 0).total == 0
+    assert [r.id for r in store.list_runs(WS, p.id, RUN_FAILED, 10, 0).items] == [ids[0]]
+    assert store.list_runs(OTHER, p.id, None, 10, 0).total == 0
     assert len(store.list_runs(WS, None, None, 2, 0).items) == 2
 
 
@@ -251,13 +330,6 @@ def test_task_runs_update(store):
     assert got["b"].status == "pending"
 
 
-def test_deleting_a_job_removes_its_runs_task_runs_and_logs(store):
-    j, r = make_run(store)
-    store.append_logs([LogLine(r.id, 1, T0, "a", 1, "stdout", "hi")])
-    store.delete_job(WS, j.id)
-    assert store.get_run(WS, r.id) is None and store.list_task_runs(r.id) == [] and store.list_logs(r.id, None, 0, 10) == []
-
-
 # ---- logs ------------------------------------------------------------------------------------
 
 
@@ -290,30 +362,28 @@ def test_exclusive_run_creation_is_refused_while_another_is_active(store):
     from booth_pipeline.store.base import Busy
 
     p = store.create_pipeline(WS, "etl", "", "a")
-    j = store.create_job(new_job(pipeline_id=p.id))
-    first = store.create_run(new_run(j), ["a"], exclusive=True)
+    first = store.create_run(new_run(p), ["a"], exclusive=True)
     with pytest.raises(Busy):
-        store.create_run(new_run(j), ["a"], exclusive=True)
-    store.create_run(new_run(j), ["a"], exclusive=False)  # a concurrent-allowed job is never refused
+        store.create_run(new_run(p), ["a"], exclusive=True)
+    store.create_run(new_run(p), ["a"], exclusive=False)  # a concurrent-allowed run is never refused
     store.finish_run(first.id, RUN_SUCCEEDED, None, T0)
-    assert store.count_active_runs(WS, j.id) == 1  # only the non-exclusive one is left
+    assert store.count_active_runs(WS, p.id) == 1  # only the non-exclusive one is left
 
 
 def test_concurrent_exclusive_triggers_admit_exactly_one(store):
-    """The race the lock exists for: N simultaneous triggers of a non-concurrent job."""
+    """The race the lock exists for: N simultaneous triggers of a non-concurrent pipeline."""
     import threading
 
     from booth_pipeline.store.base import Busy
 
     p = store.create_pipeline(WS, "etl", "", "a")
-    j = store.create_job(new_job(pipeline_id=p.id))
     results: list[str] = []
     barrier = threading.Barrier(8)
 
     def go():
         barrier.wait()
         try:
-            store.create_run(new_run(j), ["a"], exclusive=True)
+            store.create_run(new_run(p), ["a"], exclusive=True)
             results.append("ok")
         except Busy:
             results.append("busy")

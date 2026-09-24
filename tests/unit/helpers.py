@@ -5,20 +5,32 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from booth_pipeline.model import PipelineSpec, Task
+from booth_pipeline.model import PipelineSpec
 
 
-def task(key: str, kind: str = "transform", deps: list[str] | None = None, source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dict[str, Any]:
-    return {"key": key, "kind": kind, "code": {"type": "inline", "source": source}, "dependsOn": deps or [], **kw}
+def task_ref(key: str, task_id: str = "t1", version: int | str = 1, deps: list[str] | None = None, **kw: Any) -> dict[str, Any]:
+    """One DAG node (ADR 0071): a reference to a task's version, plus this pipeline's own wiring —
+    what ``PipelineSpec.tasks`` holds now, never an embedded task definition."""
+    return {"key": key, "taskId": task_id, "taskVersion": version, "dependsOn": deps or [], **kw}
 
 
-def spec(*tasks: dict[str, Any]) -> PipelineSpec:
-    return PipelineSpec.model_validate({"tasks": list(tasks)})
+def spec(*refs: dict[str, Any]) -> PipelineSpec:
+    return PipelineSpec.model_validate({"tasks": list(refs)})
 
 
 def linear() -> PipelineSpec:
-    """source -> transform -> sink, the shape the brief's definition of done names."""
-    return spec(task("extract", "source"), task("clean", "transform", ["extract"]), task("load", "sink", ["clean"]))
+    """extract -> clean -> load, the shape the brief's definition of done names."""
+    return spec(
+        task_ref("extract", task_id="t-extract"),
+        task_ref("clean", task_id="t-clean", deps=["extract"]),
+        task_ref("load", task_id="t-load", deps=["clean"]),
+    )
+
+
+def task_config(source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dict[str, Any]:
+    """A standalone Task's own versioned config (ADR 0071) — what ``TaskConfig`` holds,
+    independent of any pipeline node that references it."""
+    return {"code": {"type": "inline", "source": source}, **kw}
 
 
 class ListRecorder:
@@ -56,7 +68,3 @@ class ListRecorder:
 
     def log_text(self, key: str) -> list[str]:
         return [m for k, _a, _s, m in self.lines if k == key]
-
-
-def get(t: Task) -> str:
-    return t.key

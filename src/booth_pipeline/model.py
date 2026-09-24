@@ -1,17 +1,25 @@
-"""The pipeline domain model: what a saved Pipeline *is*.
+"""The pipeline domain model: what a saved Pipeline *is*, and what a standalone Task *is*.
 
-Terminology is fixed by ADR 0010 and the brief — do not rename:
+Terminology is fixed by ADR 0010, restructured by ADR 0071 — do not rename:
 
+* **Task** — a standalone, independently versioned, reusable resource: a unit of code (from
+  ``booth-catalog`` or a ``booth-storage`` file, never typed inline — ADR 0063) that runs against
+  a chosen engine (``runners/languages.py``'s registry — ADR 0064). ``TaskConfig`` is one
+  version's worth of it — the direct counterpart of ``PipelineSpec``, just for a Task instead of a
+  Pipeline. A Task has no ``kind`` (source/transform/sink) — that field is retired entirely, not
+  merely optional (ADR 0062 made it decorative; ADR 0071 removes it).
 * **Pipeline** — a DAG definition, drawn on the canvas, versioned. Each save is an immutable
-  ``PipelineVersion`` holding a ``PipelineSpec``.
-* **Task** — one node of that DAG: a source, transform or sink, with its own code reference,
-  target runner and retry override.
-* **Job** — a schedulable/triggerable instance of a pipeline (see ``jobs.py``/``service.py``).
+  ``PipelineVersion`` holding a ``PipelineSpec``. A DAG node (``TaskRef``) is a *reference* to a
+  specific ``(task_id, task_version)`` pair plus this pipeline's own wiring (dependencies,
+  position) — never an embedded task definition. Pipeline owns scheduling, triggering and run
+  history directly; there is no separate Job entity (ADR 0071 retires it).
 
-The spec is the single artifact everything else derives from: the canvas edits it, ``engine``
-compiles it to a Dagster job, and a Run records which version of it ran. It is therefore
-self-contained on purpose — code is *snapshotted into it* at save time (see ``CodeRef``) so a run
-never has to call another module and a version's behaviour can never change after it is saved.
+A spec (``PipelineSpec`` or ``TaskConfig``) is the artifact its own version history is built from.
+Code is *snapshotted* into a ``TaskConfig`` at save time (see ``CatalogCode``/``StorageCode``) so a
+run never has to call another module and a task version's behaviour can never change after it is
+saved. A ``PipelineSpec`` pins the specific task versions it references at save time the same way —
+updating a task creates a new task version but never retroactively changes a pipeline version that
+still points at the old one.
 
 JSON on the wire is camelCase, like every other Booth module's API.
 """
@@ -26,20 +34,19 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_valida
 from pydantic.alias_generators import to_camel
 
 # Bounds. Each exists so one request cannot make the service hold or execute something unbounded.
-MAX_TASKS = 200
+MAX_TASKS = 200  # nodes in one pipeline's DAG
 MAX_INLINE_SOURCE_BYTES = 256 * 1024
-MAX_SPEC_SOURCE_BYTES = 8 * 1024 * 1024  # all snapshotted source in one version, catalog + inline
+MAX_TASK_SOURCE_BYTES = 8 * 1024 * 1024  # one task version's own snapshotted source (catalog/storage)
 MAX_PARAMS_BYTES = 64 * 1024
 MAX_RETRIES = 10
 MAX_RETRY_DELAY_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT_SECONDS = 3600
 
-# A task key becomes a Dagster op name and an upstream-input name in user code, so it is a
-# restricted identifier: lowercase, starts with a letter, no spaces.
+# A DAG node's local key becomes a Dagster op name and an upstream-input name in user code, so it
+# is a restricted identifier: lowercase, starts with a letter, no spaces.
 TASK_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
-Kind = Literal["source", "transform", "sink"]
 Backoff = Literal["fixed", "linear", "exponential"]
 
 # The one runner every install has. Any other id is only valid if a runner with that id is
@@ -76,7 +83,7 @@ def sha256_text(text: str) -> str:
 
 
 class RetryPolicy(Wire):
-    """A task's retry override (or a job's default). Maps onto Dagster's ``RetryPolicy``."""
+    """A task version's retry policy. Maps onto Dagster's ``RetryPolicy``."""
 
     max_retries: int = Field(0, ge=0, le=MAX_RETRIES)
     delay_seconds: float = Field(0, ge=0, le=MAX_RETRY_DELAY_SECONDS)
@@ -187,37 +194,28 @@ def code_language(code: Code) -> str:
     return code.language or "python"
 
 
-class Task(Wire):
-    """One node in the DAG."""
+class TaskConfig(Wire):
+    """One version's worth of a standalone Task's configuration (ADR 0071) — what actually runs.
+    The direct counterpart of ``PipelineSpec``, just for a Task instead of a Pipeline: a Task's
+    own version history is independent of any pipeline that references it, which is what makes
+    reuse across pipelines possible (today's embedded, 1:1 tasks could never be reused at all).
 
-    key: str
-    name: str = Field(default="", max_length=200)
-    # Purely decorative (ADR 0062): a label for the canvas, never a constraint on dependency
-    # wiring. A task doesn't have to be tagged at all — an untagged task behaves identically to
-    # a tagged one in every way except display styling. (Earlier v0 made this required and used
-    # it to gate which tasks could have dependencies; that coupling forced mislabeling a
-    # zero-dependency "transform" as a "source" purely because of its wiring, not what it did.)
-    kind: Kind | None = None
+    Deliberately has no ``key``, ``dependsOn`` or ``position`` — those describe how one particular
+    ``TaskRef`` is wired into one particular pipeline's DAG, not anything about the Task itself.
+    Also has no ``kind`` (source/transform/sink): ADR 0062 already made it purely decorative;
+    ADR 0071 removes the field entirely rather than continuing to carry a label that constrains
+    nothing.
+    """
+
     code: Code
     runner: str = BASE_RUNNER
     retry: RetryPolicy | None = None
-    depends_on: list[str] = Field(default_factory=list)
     params: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(DEFAULT_TIMEOUT_SECONDS, ge=1, le=MAX_TIMEOUT_SECONDS)
-    # Opt-in, per task, to a short-lived platform token (ADR 0056) so ctx.storage / ctx.catalog work.
-    # Off by default: a task that doesn't need booth-storage/booth-catalog never triggers a mint, so
-    # it can't be blocked by (or leak) an identity it doesn't use. See docs/decisions/0007.
+    # Opt-in to a short-lived platform token (ADR 0056) so ctx.storage / ctx.catalog work. Off by
+    # default: a task that doesn't need booth-storage/booth-catalog never triggers a mint, so it
+    # can't be blocked by (or leak) an identity it doesn't use. See docs/decisions/0007.
     platform_access: bool = False
-    position: Position = Field(default_factory=Position)
-
-    @field_validator("key")
-    @classmethod
-    def _key_ok(cls, v: str) -> str:
-        if not TASK_KEY_RE.match(v):
-            raise ValueError(
-                "must be lowercase letters, digits and underscores, starting with a letter (max 63)"
-            )
-        return v
 
     @field_validator("params")
     @classmethod
@@ -232,18 +230,73 @@ class Task(Wire):
             raise ValueError(f"params are limited to {MAX_PARAMS_BYTES} bytes")
         return v
 
+
+def validate_task_config(config: TaskConfig, available_runners: set[str] | None = None) -> None:
+    """Everything about a ``TaskConfig``'s validity that pydantic's own field constraints (params
+    size, timeout bounds, the ``code`` union's own shape) don't already enforce. Pure: no I/O, so
+    it runs identically whether called live or at save time — the same shape as
+    ``validate_structure`` below, just for a task's own config instead of a pipeline's DAG.
+
+    Runner availability and the task's own snapshotted source size are now checked HERE, at the
+    task's own save time — not at the pipeline's, since both are properties of the Task, not of
+    any pipeline that happens to reference it (ADR 0071 moves this off the pipeline entirely).
+    """
+    if available_runners is not None and config.runner not in available_runners:
+        raise ModelError(f"runner {config.runner!r} is not available; available: {', '.join(sorted(available_runners))}", "runner")
+    src = config.code.source
+    if src and len(src.encode("utf-8")) > MAX_TASK_SOURCE_BYTES:
+        raise ModelError(f"the task's code is more than {MAX_TASK_SOURCE_BYTES} bytes", "code")
+
+
+class TaskRef(Wire):
+    """One node in a Pipeline's DAG (ADR 0071): a reference to a specific standalone Task's
+    ``(task_id, task_version)`` pair, plus this pipeline's own wiring around it.
+
+    Dependency edges and canvas position are properties of the REFERENCE — this pipeline's DAG
+    shape — never of the Task resource being referenced, which may be wired in completely
+    differently by a different pipeline, or by a later version of this same one.
+
+    ``key`` is the DAG-local identifier (what ``dependsOn`` and ``ctx.inputs[...]`` address),
+    deliberately distinct from ``taskId``: the same reusable Task can appear more than once in a
+    pipeline, or across different pipelines, so a reference needs its own identity independent of
+    which Task it happens to point at right now.
+
+    ``taskVersion`` accepts the alias ``"latest"`` at authoring time, exactly like
+    ``CatalogCode.version`` (ADR 0010) and for the same reason: the service pins it to a concrete
+    version number at save time, so what is stored is never a floating pointer — updating a task
+    creates a new version but never retroactively changes a pipeline version that already points
+    at the old one.
+    """
+
+    key: str
+    task_id: str = Field(min_length=1, max_length=64)
+    task_version: int | Literal["latest"] = "latest"
+    depends_on: list[str] = Field(default_factory=list)
+    position: Position = Field(default_factory=Position)
+
+    @field_validator("key")
+    @classmethod
+    def _key_ok(cls, v: str) -> str:
+        if not TASK_KEY_RE.match(v):
+            raise ValueError(
+                "must be lowercase letters, digits and underscores, starting with a letter (max 63)"
+            )
+        return v
+
     @property
-    def display_name(self) -> str:
-        return self.name or self.key
+    def resolved(self) -> bool:
+        return self.task_version != "latest"
 
 
 class PipelineSpec(Wire):
-    """The whole DAG. Edges are each task's ``dependsOn`` — an edge exists iff a task names
-    another as a dependency, so there is no separate edge list that could disagree with it."""
+    """The whole DAG (ADR 0071): each node is a reference to a standalone Task's specific
+    version, never an embedded task definition. Edges are each reference's ``dependsOn`` — an edge
+    exists iff a reference names another (by its local ``key``) as a dependency, so there is no
+    separate edge list that could disagree with it."""
 
-    tasks: list[Task] = Field(default_factory=list, max_length=MAX_TASKS)
+    tasks: list[TaskRef] = Field(default_factory=list, max_length=MAX_TASKS)
 
-    def by_key(self) -> dict[str, Task]:
+    def by_key(self) -> dict[str, TaskRef]:
         return {t.key: t for t in self.tasks}
 
     def downstream(self) -> dict[str, list[str]]:
@@ -254,18 +307,11 @@ class PipelineSpec(Wire):
                     out[d].append(t.key)
         return out
 
-    def total_source_bytes(self) -> int:
-        n = 0
-        for t in self.tasks:
-            src = t.code.source
-            if src:
-                n += len(src.encode("utf-8"))
-        return n
-
 
 def topological_order(spec: PipelineSpec) -> list[str]:
-    """Task keys in a valid execution order (Kahn's algorithm, ties broken by declaration order
-    so the order — and therefore run logs — is deterministic). Raises ``ModelError`` on a cycle."""
+    """DAG-node keys in a valid execution order (Kahn's algorithm, ties broken by declaration
+    order so the order — and therefore run logs — is deterministic). Raises ``ModelError`` on a
+    cycle."""
     indeg = {t.key: len(set(t.depends_on)) for t in spec.tasks}
     down = spec.downstream()
     ready = [t.key for t in spec.tasks if indeg[t.key] == 0]
@@ -283,14 +329,17 @@ def topological_order(spec: PipelineSpec) -> list[str]:
     return order
 
 
-def validate_structure(spec: PipelineSpec, available_runners: set[str] | None = None) -> None:
+def validate_structure(spec: PipelineSpec) -> None:
     """Enforce the DAG's actual mechanics — no self-loops, no duplicate edges, no cycles, every
-    dependency resolves, every runner is available. ``kind`` plays no role here (ADR 0062): it is
-    a purely decorative label, never a constraint on which tasks may depend on which.
+    dependency resolves to another node in this same spec.
 
     Raises ``ModelError`` naming the first problem and the field it is about
     (``tasks[2].dependsOn``), so the canvas can mark the exact node. Pure: no I/O, so it runs
-    identically for the live validation endpoint, at save time, and in tests.
+    identically for the live validation endpoint, at save time, and in tests — and deliberately
+    cannot check that a referenced task actually exists (that needs a store lookup; the service
+    does it at save time) or that its runner is available (that moved to the referenced Task's own
+    save-time validation — ``validate_task_config`` above — since ADR 0071 makes both the task's
+    own concern, not the pipeline's).
     """
     if not spec.tasks:
         raise ModelError("a pipeline needs at least one task", "tasks")
@@ -310,23 +359,17 @@ def validate_structure(spec: PipelineSpec, available_runners: set[str] | None = 
                 raise ModelError(f"{t.key!r} cannot depend on itself", f"{f}.dependsOn")
             if d not in seen:
                 raise ModelError(f"{t.key!r} depends on {d!r}, which is not a task in this pipeline", f"{f}.dependsOn")
-        if available_runners is not None and t.runner not in available_runners:
-            raise ModelError(
-                f"runner {t.runner!r} is not available; available: {', '.join(sorted(available_runners))}",
-                f"{f}.runner",
-            )
 
     topological_order(spec)  # cycle check
 
-    if spec.total_source_bytes() > MAX_SPEC_SOURCE_BYTES:
-        raise ModelError(f"the pipeline's code totals more than {MAX_SPEC_SOURCE_BYTES} bytes", "tasks")
 
-
-# ---- Job-level config: triggers (ADR 0065) --------------------------------------------------
+# ---- Pipeline-level config: triggers (ADR 0065, retargeted onto Pipeline by ADR 0071) --------
 #
-# A job's `schedule` field is a discriminated `Trigger` union so a future trigger type is a new
-# member, not a redesign. `cron` is the original mechanism (5-field, minute-granularity, unchanged)
-# and `interval` is new, for schedules below cron's one-minute floor.
+# A pipeline's `schedule` field is a discriminated `Trigger` union so a future trigger type is a
+# new member, not a redesign. `cron` is the original mechanism (5-field, minute-granularity,
+# unchanged) and `interval` is new, for schedules below cron's one-minute floor. This was a Job's
+# field before ADR 0071 retired Job as an entity; the union and its scheduling mechanics are
+# unaffected, only which entity owns it changed.
 
 # A run has real overhead (a Dagster job compile, dispatch to the runner, a subprocess start, and
 # — if any task opts in — a workload-token mint): measured at ~0.17-0.2s steady-state for a single

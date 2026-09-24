@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .model import PipelineSpec, RetryPolicy, Trigger
+from .model import PipelineSpec, TaskConfig, Trigger
 
 # Run and task-run lifecycle. Terminal states never change again.
 RUN_QUEUED, RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED = "queued", "running", "succeeded", "failed", "canceled"
@@ -41,6 +41,18 @@ class Pipeline:
     updated_at: datetime
     # Derived on read: the highest saved version number, 0 if none has been saved yet.
     latest_version: int = 0
+    # Scheduling/triggering/ownership, folded on from the retired Job entity (ADR 0071) — Pipeline
+    # is now the only thing that ever runs unattended, so there is no more separate place for
+    # these to live.
+    schedule: Trigger | None = None
+    allow_concurrent_runs: bool = False
+    next_run_at: datetime | None = None
+    # The `sub` of the user whose live role caps this pipeline's workload tokens when it runs
+    # unattended (ADR 0058) — whoever created it, or last saved a schedule onto it. Distinct from
+    # `created_by`, which is a display name, not a `sub`.
+    owner_sub: str = ""
+    # The most a run's token may be granted, whatever the owner holds (least privilege).
+    role_ceiling: str = "editor"
 
 
 @dataclass
@@ -54,33 +66,39 @@ class PipelineVersion:
 
 
 @dataclass
-class Job:
+class TaskEntity:
+    """A standalone, reusable Task (ADR 0071) — the direct counterpart of ``Pipeline``: an owned
+    resource with its own version history, referenced by ``(id, version)`` from any number of
+    pipelines rather than embedded 1:1 in exactly one."""
+
     id: str
     workspace: str
     name: str
-    pipeline_id: str
-    # None = always run the pipeline's latest saved version; an int pins it.
-    pipeline_version: int | None
-    schedule: Trigger | None
-    # Default retry policy for tasks that don't carry their own override.
-    retry: RetryPolicy | None
-    allow_concurrent_runs: bool
+    description: str
     created_by: str
     created_at: datetime
     updated_at: datetime
-    next_run_at: datetime | None = None
-    # The `sub` of the user who created the job: whose live role caps the job's workload tokens
-    # when it runs unattended (ADR 0058). Distinct from `created_by`, which is a display name.
-    owner_sub: str = ""
-    # The most a run's token may be granted, whatever the owner holds (least privilege).
-    role_ceiling: str = "editor"
+    # Derived on read: the highest saved version number, 0 if none has been saved yet.
+    latest_version: int = 0
+
+
+@dataclass
+class TaskVersionRecord:
+    """The direct counterpart of ``PipelineVersion``: one immutable, versioned snapshot of a
+    Task's configuration."""
+
+    task_id: str
+    version: int
+    config: TaskConfig
+    notes: str
+    created_by: str
+    created_at: datetime
 
 
 @dataclass
 class Run:
     id: str
     workspace: str
-    job_id: str
     pipeline_id: str
     pipeline_version: int
     status: str
@@ -95,8 +113,8 @@ class Run:
     worker_id: str | None = None
     heartbeat_at: datetime | None = None
     cancel_requested: bool = False
-    # Whose live role caps this run's workload tokens: the job's owner for a scheduled run, the
-    # person who pressed "Run now" for a manual one.
+    # Whose live role caps this run's workload tokens: the pipeline's owner for a scheduled run,
+    # the person who pressed "Run now" for a manual one.
     owner_sub: str = ""
 
 
