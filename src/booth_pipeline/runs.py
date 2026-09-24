@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from . import engine
 from .config import Config
+from .model import ModelError
 from .records import (
     RUN_CANCELED,
     RUN_FAILED,
@@ -32,6 +33,7 @@ from .records import (
     Run,
     TaskRun,
 )
+from .resolve import resolve_task_configs
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .store.base import Store
@@ -202,9 +204,14 @@ class RunManager:
             return
 
         version = store.get_version(run.workspace, run.pipeline_id, run.pipeline_version)
-        job = store.get_job(run.workspace, run.job_id)
-        if version is None or job is None:
-            store.finish_run(run.id, RUN_FAILED, "the pipeline version or job no longer exists", _now())
+        pipeline = store.get_pipeline(run.workspace, run.pipeline_id)
+        if version is None or pipeline is None:
+            store.finish_run(run.id, RUN_FAILED, "the pipeline or its version no longer exists", _now())
+            return
+        try:
+            configs = resolve_task_configs(store, run.workspace, version.spec)
+        except ModelError as e:
+            store.finish_run(run.id, RUN_FAILED, f"cannot start: {e.message}", _now())
             return
 
         store.mark_running(run.id, self.worker_id, _now())
@@ -225,13 +232,13 @@ class RunManager:
                 self._minter,
                 workspace=run.workspace,
                 subject=f"run:{run.id}",
-                role_ceiling=job.role_ceiling,
+                role_ceiling=pipeline.role_ceiling,
                 owner=run.owner_sub,
                 storage_url=self._cfg.storage_base,
                 catalog_url=self._cfg.catalog_base,
             )
             result = engine.execute(
-                version.spec, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, job_retry=job.retry, access=access
+                version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access
             )
             status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_FAILED)
             error = None if result.success else result.error

@@ -20,7 +20,7 @@ from booth_pipeline.workload import (
     WorkloadMinter,
 )
 
-from .helpers import ListRecorder, spec, task
+from .helpers import ListRecorder, build, node
 
 CRED = "bwmc.pipeline.SUPER-SECRET-MAC"
 GOOD = {"token": "jwt-abc", "tokenType": "Bearer", "expiresAt": "2026-09-21T12:10:00Z", "role": "editor"}
@@ -144,9 +144,10 @@ class Spy:
         return "ok"
 
 
-def run_engine(tasks, m, retry=None):
+def run_engine(nodes, m):
+    spec, configs = build(*nodes)
     spy, rec = Spy(), ListRecorder()
-    res = execute(spec(*tasks), run_id="r1", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(m))
+    res = execute(spec, configs, run_id="r1", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(m))
     return res, rec, spy
 
 
@@ -154,13 +155,13 @@ def test_a_task_that_did_not_opt_in_never_triggers_a_mint():
     """The point of the per-task opt-in: a pipeline that never touches storage cannot be blocked by
     a lapsed owner, or hand out an identity it does not use."""
     mints = []
-    res, _, spy = run_engine([task("a", "source"), task("b", "sink", ["a"])], minter(lambda r: mints.append(1) or httpx.Response(200, json=GOOD)))
+    res, _, spy = run_engine([node("a"), node("b", ["a"])], minter(lambda r: mints.append(1) or httpx.Response(200, json=GOOD)))
     assert res.success and mints == [] and spy.access == [None, None]
 
 
 def test_an_opted_in_task_gets_a_token_and_only_that_task_does():
     res, _, spy = run_engine(
-        [task("a", "source", platformAccess=True), task("b", "sink", ["a"])], minter(lambda r: httpx.Response(200, json=GOOD))
+        [node("a", platformAccess=True), node("b", ["a"])], minter(lambda r: httpx.Response(200, json=GOOD))
     )
     assert res.success
     assert spy.access[0] is not None and spy.access[0].token == "jwt-abc" and spy.access[1] is None
@@ -181,7 +182,8 @@ def test_every_attempt_of_a_retried_task_starts_with_a_freshly_minted_token():
             return "ok"
 
     spy, rec = Flaky(), ListRecorder()
-    res = execute(spec(task("a", "source", platformAccess=True, retry={"maxRetries": 2})), run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(minter(handler)))
+    s, c = build(node("a", platformAccess=True, retry={"maxRetries": 2}))
+    res = execute(s, c, run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(minter(handler)))
     assert res.success
     assert [a.token for a in spy.access if a] == ["jwt-1", "jwt-2", "jwt-3"]
 
@@ -193,7 +195,7 @@ def test_a_refused_mint_fails_the_task_plainly_and_is_never_retried():
         mints.append(1)
         return httpx.Response(403, json={"error": "forbidden"})
 
-    res, rec, spy = run_engine([task("a", "source", platformAccess=True, retry={"maxRetries": 5}), task("b", "sink", ["a"])], minter(handler))
+    res, rec, spy = run_engine([node("a", platformAccess=True, retry={"maxRetries": 5}), node("b", ["a"])], minter(handler))
     assert not res.success and not res.canceled
     assert len(mints) == 1  # five retries configured; a refusal will not change in seconds, so none happen
     assert spy.access == []  # the task's code never ran
@@ -212,11 +214,13 @@ def test_a_transient_mint_failure_is_retried_like_any_other_task_failure():
         return httpx.Response(503, json={}) if len(n) < 3 else httpx.Response(200, json=GOOD)
 
     spy, rec = Spy(), ListRecorder()
-    res = execute(spec(task("a", "source", platformAccess=True, retry={"maxRetries": 3})), run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(minter(handler)))
+    s, c = build(node("a", platformAccess=True, retry={"maxRetries": 3}))
+    res = execute(s, c, run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(minter(handler)))
     assert res.success and len(n) == 3
 
 
 def test_a_deployment_without_workload_identity_says_so_instead_of_crashing():
     spy, rec = Spy(), ListRecorder()
-    res = execute(spec(task("a", "source", platformAccess=True)), run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(None))
+    s, c = build(node("a", platformAccess=True))
+    res = execute(s, c, run_id="r", registry=RunnerRegistry([spy]), recorder=rec, cancel=Cancellation(), access=provider(None))
     assert not res.success and "no workload-identity credential" in (res.error or "")

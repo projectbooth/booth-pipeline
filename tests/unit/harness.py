@@ -104,7 +104,40 @@ class Env:
 
     def call(self, method: str, path: str, token: str = "tok-editor", json: Any = None, headers: dict[str, str] | None = None, ws: str = WS):
         h = {"Authorization": f"Bearer {token}", "X-Booth-Workspace": ws, **(headers or {})}
-        return self.client.request(method, "/api" + path, json=json, headers=h)
+        body = self._materialize(json, ws) if isinstance(json, dict) else json
+        return self.client.request(method, "/api" + path, json=body, headers=h)
+
+    def _materialize(self, body: dict[str, Any], ws: str) -> dict[str, Any]:
+        """A pipeline create/version/validate body carries a ``spec`` whose nodes (built with the
+        module-level ``task()`` helper below) bundle a DAG node's wiring together with its
+        ``TaskConfig`` — test ergonomics the old embedded-task model made free. ADR 0071 needs a
+        real standalone Task to exist first, so before the body goes over the wire, this creates
+        one (``POST /tasks``) per node that is not already a real reference, and rewrites the node
+        to the ``{key, taskId, taskVersion, dependsOn, position}`` shape the wire actually expects.
+
+        Always created with a write-capable token, regardless of the outer call's own token: this
+        is test SETUP (in reality the tasks a draft references already exist, created earlier by
+        someone with write access), not part of what a test is exercising."""
+        spec = body.get("spec")
+        if not isinstance(spec, dict) or "tasks" not in spec:
+            return body
+        return {**body, "spec": {**spec, "tasks": [self._materialize_node(n, ws) for n in spec["tasks"]]}}
+
+    def _materialize_node(self, n: dict[str, Any], ws: str) -> dict[str, Any]:
+        if "taskId" in n:  # already a real reference (e.g. reusing a task created earlier in the test)
+            return n
+        n = dict(n)
+        key = n.pop("key")
+        deps = n.pop("dependsOn", [])
+        position = n.pop("position", {"x": 0, "y": 0})
+        code = n.pop("code")
+        r = self.client.post(
+            "/api/tasks",
+            json={"name": key, "config": {"code": code, **n}},
+            headers={"Authorization": "Bearer tok-editor", "X-Booth-Workspace": ws},
+        )
+        assert r.status_code == 201, r.text
+        return {"key": key, "taskId": r.json()["id"], "taskVersion": 1, "dependsOn": deps, "position": position}
 
     def wait_run(self, run_id: str, timeout: float = 60.0, token: str = "tok-editor") -> dict[str, Any]:
         deadline = time.monotonic() + timeout
@@ -127,15 +160,19 @@ def make_env(**cfg_overrides: Any) -> Env:
     return Env(TestClient(app), store, catalog, storage, app)
 
 
-def task(key: str, kind: str = "transform", deps: list[str] | None = None, source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dict[str, Any]:
-    return {"key": key, "kind": kind, "code": {"type": "inline", "source": source}, "dependsOn": deps or [], **kw}
+def task(key: str, deps: list[str] | None = None, source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dict[str, Any]:
+    """A DAG-node builder for API-level tests: this node's wiring plus its ``TaskConfig``, in one
+    dict (ADR 0071 splits these into a ``TaskRef`` and a separately-versioned ``TaskConfig`` —
+    ``Env._materialize`` creates the real standalone Task and rewrites the node to a ``TaskRef``
+    before it goes over the wire)."""
+    return {"key": key, "dependsOn": deps or [], "code": {"type": "inline", "source": source}, **kw}
 
 
 def etl_spec() -> dict[str, Any]:
     return {
         "tasks": [
-            task("extract", "source", source="def run(ctx):\n    print('extracting')\n    return [1, 2, 3]\n"),
-            task("clean", "transform", ["extract"], source="def run(ctx):\n    return [x * 10 for x in ctx.inputs['extract']]\n"),
-            task("load", "sink", ["clean"], source="def run(ctx):\n    print('loading', ctx.inputs['clean'])\n"),
+            task("extract", source="def run(ctx):\n    print('extracting')\n    return [1, 2, 3]\n"),
+            task("clean", ["extract"], source="def run(ctx):\n    return [x * 10 for x in ctx.inputs['extract']]\n"),
+            task("load", ["clean"], source="def run(ctx):\n    print('loading', ctx.inputs['clean'])\n"),
         ]
     }

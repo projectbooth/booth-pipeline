@@ -29,7 +29,7 @@ from .runners.remote import RemoteRunner
 from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
-from .service import JobBusy, NotFound, PipelineService, Unavailable
+from .service import NotFound, PipelineBusy, PipelineService, Unavailable
 from .storage_client import StorageClient
 from .store.base import Conflict, InUse, Store
 from .workload import WorkloadMinter
@@ -195,8 +195,8 @@ def create_app(
     async def _in_use(_: Request, e: InUse):
         return err(409, str(e))
 
-    @app.exception_handler(JobBusy)
-    async def _busy(_: Request, e: JobBusy):
+    @app.exception_handler(PipelineBusy)
+    async def _busy(_: Request, e: PipelineBusy):
         return err(409, str(e))
 
     @app.exception_handler(Unavailable)

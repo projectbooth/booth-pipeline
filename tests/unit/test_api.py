@@ -1,4 +1,4 @@
-"""The HTTP API end to end: auth, pipelines, jobs and runs — real subprocess execution, in-memory
+"""The HTTP API end to end: auth, pipelines, tasks and runs — real subprocess execution, in-memory
 store, faked identity provider and catalog."""
 
 from __future__ import annotations
@@ -21,9 +21,15 @@ def new_pipeline(env: Env, name: str = "etl", spec=None, **kw):
     return r.json()
 
 
-def new_job(env: Env, pipeline_id: str, name: str = "nightly", **kw):
-    r = env.call("POST", "/jobs", json={"name": name, "pipelineId": pipeline_id, **kw})
+def new_task(env: Env, name: str = "t", config=None, token: str = "tok-editor", **kw):
+    r = env.call("POST", "/tasks", token, json={"name": name, "config": config, **kw})
     assert r.status_code == 201, r.text
+    return r.json()
+
+
+def scheduled(env: Env, pipeline_id: str, cron: str = "0 9 * * *", **kw):
+    r = env.call("PUT", f"/pipelines/{pipeline_id}/schedule", json={"schedule": {"cron": cron}, **kw})
+    assert r.status_code == 200, r.text
     return r.json()
 
 
@@ -59,36 +65,34 @@ def test_the_forwarded_role_can_narrow_but_never_widen(env):
 
 def test_viewers_read_but_cannot_write_or_run(env):
     p = new_pipeline(env)
-    job = new_job(env, p["id"])
     assert env.call("GET", "/pipelines", "tok-viewer").status_code == 200
+    assert env.call("GET", "/tasks", "tok-viewer").status_code == 200
     assert env.call("GET", f"/pipelines/{p['id']}/versions/latest", "tok-viewer").status_code == 200
     for method, path, body in [
         ("POST", "/pipelines", {"name": "n"}),
         ("PUT", f"/pipelines/{p['id']}", {"name": "n"}),
         ("DELETE", f"/pipelines/{p['id']}", None),
         ("POST", f"/pipelines/{p['id']}/versions", {"spec": etl_spec()}),
-        ("POST", "/jobs", {"name": "j", "pipelineId": p["id"]}),
-        ("DELETE", f"/jobs/{job['id']}", None),
-        ("POST", f"/jobs/{job['id']}/run", None),
+        ("PUT", f"/pipelines/{p['id']}/schedule", {"schedule": {"cron": "0 9 * * *"}}),
+        ("POST", f"/pipelines/{p['id']}/run", None),
+        ("POST", "/tasks", {"name": "t"}),
     ]:
         assert env.call(method, path, "tok-viewer", json=body).status_code == 403, (method, path)
 
 
 def test_another_workspace_cannot_see_or_touch_anything(env):
-    env.store  # noqa: B018 - the store is shared; isolation is by workspace
     p = new_pipeline(env)
-    job = new_job(env, p["id"])
-    run_id = env.call("POST", f"/jobs/{job['id']}/run").json()["id"]
+    run_id = env.call("POST", f"/pipelines/{p['id']}/run").json()["id"]
     from booth_pipeline.auth import Claims
 
     from .harness import TOKENS
 
     TOKENS["tok-globex"] = Claims("u-g", "gail", ("/workspaces/globex/editor",))
     try:
-        for path in (f"/pipelines/{p['id']}", f"/jobs/{job['id']}", f"/runs/{run_id}", f"/runs/{run_id}/logs"):
+        for path in (f"/pipelines/{p['id']}", f"/runs/{run_id}", f"/runs/{run_id}/logs"):
             assert env.call("GET", path, "tok-globex", ws="globex").status_code == 404, path
         assert env.call("GET", "/pipelines", "tok-globex", ws="globex").json()["total"] == 0
-        assert env.call("POST", f"/jobs/{job['id']}/run", "tok-globex", ws="globex").status_code == 404
+        assert env.call("POST", f"/pipelines/{p['id']}/run", "tok-globex", ws="globex").status_code == 404
         assert env.call("POST", f"/runs/{run_id}/cancel", "tok-globex", ws="globex").status_code == 404
     finally:
         del TOKENS["tok-globex"]
@@ -116,7 +120,7 @@ def test_pipeline_versions_lifecycle(env):
     p = new_pipeline(env)
     assert p["latestVersion"] == 1 and p["version"]["version"] == 1 and p["version"]["taskCount"] == 3
     spec2 = etl_spec()
-    spec2["tasks"].append(task("audit", "sink", ["clean"]))
+    spec2["tasks"].append(task("audit", ["clean"]))
     r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec2, "notes": "add audit"})
     assert r.status_code == 201 and r.json()["version"] == 2
     latest = env.call("GET", f"/pipelines/{p['id']}/versions/latest").json()
@@ -144,7 +148,7 @@ def test_duplicate_name_is_409_with_the_field(env):
 
 
 def test_a_bad_first_version_does_not_leave_an_empty_pipeline_behind(env):
-    bad = {"tasks": [task("a", "source"), task("b", "sink", ["nope"])]}
+    bad = {"tasks": [task("a"), task("b", ["nope"])]}
     assert env.call("POST", "/pipelines", json={"name": "oops", "spec": bad}).status_code == 422
     assert env.call("GET", "/pipelines").json()["total"] == 0
 
@@ -153,12 +157,9 @@ def test_a_bad_first_version_does_not_leave_an_empty_pipeline_behind(env):
     "spec, field, fragment",
     [
         ({"tasks": []}, "tasks", "at least one task"),
-        ({"tasks": [task("a", "source"), task("b", "transform", ["zzz"])]}, "tasks[1].dependsOn", "not a task"),
-        ({"tasks": [task("a", "transform", ["b"]), task("b", "transform", ["a"])]}, "tasks", "cycle"),
-        ({"tasks": [task("a", "source", runner="spark")]}, "tasks[0].runner", "not available"),
-        ({"tasks": [task("Bad Key", "source")]}, "spec.tasks[0].key", "lowercase"),
-        ({"tasks": [task("a", "source", retry={"maxRetrys": 1})]}, "spec.tasks[0].retry.maxRetrys", "not a recognized field"),
-        ({"tasks": [task("a", "source", retry={"maxRetries": 99})]}, "spec.tasks[0].retry.maxRetries", "at most 10"),
+        ({"tasks": [task("a"), task("b", ["zzz"])]}, "tasks[1].dependsOn", "not a task"),
+        ({"tasks": [task("a", ["b"]), task("b", ["a"])]}, "tasks", "cycle"),
+        ({"tasks": [task("Bad Key")]}, "spec.tasks[0].key", "lowercase"),
     ],
 )
 def test_invalid_specs_are_422_naming_the_field(env, spec, field, fragment):
@@ -169,12 +170,18 @@ def test_invalid_specs_are_422_naming_the_field(env, spec, field, fragment):
     assert body["field"] == field and fragment in body["error"]
 
 
+def test_a_pipeline_referencing_a_task_that_does_not_exist_is_422(env):
+    p = new_pipeline(env, "host")
+    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [{"key": "a", "taskId": "no-such-task", "taskVersion": "latest", "dependsOn": [], "position": {"x": 0, "y": 0}}]}})
+    assert r.status_code == 422 and r.json()["field"] == "tasks[0].taskId" and "does not exist" in r.json()["error"]
+
+
 def test_a_field_constraint_violation_gets_a_clean_message_not_pydantics_own(env):
     """Regression for the 2026-09-23 pilot finding: switching a task's code-source radio before
     anything is picked sends an entryId/backendId of "" — a bare Field(min_length=1) violation —
     and the global RequestValidationError handler used to pass pydantic's own internal wording
     straight through ("String should have at least 1 character")."""
-    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [{"key": "a", "code": {"type": "catalog", "entryId": "", "version": "latest"}}]}})
+    bad = env.call("POST", "/tasks", json={"name": "a", "config": {"code": {"type": "catalog", "entryId": "", "version": "latest"}}})
     assert bad.status_code == 422
     assert bad.json()["error"] == "must not be empty"
     assert "String should have" not in bad.json()["error"]
@@ -183,22 +190,99 @@ def test_a_field_constraint_violation_gets_a_clean_message_not_pydantics_own(env
 def test_live_validation_endpoint_reports_without_saving(env):
     ok = env.call("POST", "/pipelines/validate", json={"spec": etl_spec()}).json()
     assert ok == {"valid": True}
-    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [task("a", "sink", ["ghost"])]}})
+    bad = env.call("POST", "/pipelines/validate", json={"spec": {"tasks": [task("a", ["ghost"])]}})
     assert bad.status_code == 200 and bad.json()["valid"] is False and bad.json()["field"] == "tasks[0].dependsOn"
     assert env.call("GET", "/pipelines").json()["total"] == 0
 
 
-# ---- catalog code references (ADR 0010) ----------------------------------------------------
+def test_deleting_things_respects_dependencies(env):
+    p = new_pipeline(env)
+    run_id = env.call("POST", f"/pipelines/{p['id']}/run").json()["id"]
+    env.wait_run(run_id)
+    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 204
+    assert env.call("GET", f"/runs/{run_id}").status_code == 404  # its history goes with it
+    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 404
 
 
-def catalog_task(key="a", entry="e1", version="latest", kind="source", deps=None, **kw):
-    return {"key": key, "kind": kind, "code": {"type": "catalog", "entryId": entry, "version": version}, "dependsOn": deps or [], **kw}
+def test_deleting_a_pipeline_mid_run_stops_the_run(env):
+    slow = {"tasks": [task("a", source="import time\ntime.sleep(60)\n")]}
+    p = new_pipeline(env, spec=slow)
+    run_id = env.call("POST", f"/pipelines/{p['id']}/run").json()["id"]
+    import time
+
+    time.sleep(1.0)
+    t0 = time.monotonic()
+    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 204
+    env.client.__exit__(None, None, None)  # shutdown joins the worker: it must not be left running for 60s
+    assert time.monotonic() - t0 < 20
+    assert run_id
 
 
-def test_catalog_latest_is_resolved_and_snapshotted_at_save(env):
+def test_huge_request_bodies_are_refused(env):
+    r = env.client.post("/api/pipelines", content=b"{}", headers={"Authorization": "Bearer tok-editor", "X-Booth-Workspace": "acme", "Content-Type": "application/json", "Content-Length": str(64 * 1024 * 1024)})
+    assert r.status_code == 413
+
+
+# ---- tasks: CRUD + versioning (ADR 0071 — mirrors booth-catalog's own code versioning) --------
+
+
+def test_task_versions_lifecycle(env):
+    t = new_task(env, "loader", config={"code": {"type": "inline", "source": "x=1"}})
+    assert t["latestVersion"] == 1 and t["version"]["version"] == 1
+    r = env.call("POST", f"/tasks/{t['id']}/versions", json={"config": {"code": {"type": "inline", "source": "x=2"}}, "notes": "v2"})
+    assert r.status_code == 201 and r.json()["version"] == 2
+    latest = env.call("GET", f"/tasks/{t['id']}/versions/latest").json()
+    assert latest["version"] == 2 and latest["config"]["code"]["source"] == "x=2" and latest["notes"] == "v2"
+    v1 = env.call("GET", f"/tasks/{t['id']}/versions/1").json()
+    assert v1["config"]["code"]["source"] == "x=1"  # old versions are immutable
+    assert [v["version"] for v in env.call("GET", f"/tasks/{t['id']}/versions").json()["items"]] == [2, 1]
+    assert env.call("GET", f"/tasks/{t['id']}/versions/9").status_code == 404
+    assert env.call("GET", f"/tasks/{t['id']}").json()["latestVersion"] == 2
+
+
+def test_empty_task_can_be_created_then_configured(env):
+    r = env.call("POST", "/tasks", json={"name": "blank"})
+    t = r.json()
+    assert r.status_code == 201 and t["latestVersion"] == 0 and t["version"] is None
+    assert env.call("GET", f"/tasks/{t['id']}/versions/latest").status_code == 404
+    assert env.call("POST", f"/tasks/{t['id']}/versions", json={"config": {"code": {"type": "inline", "source": "x=1"}}}).status_code == 201
+
+
+def test_task_names_need_not_be_unique(env):
+    new_task(env, "dup")
+    r = env.call("POST", "/tasks", json={"name": "dup"})
+    assert r.status_code == 201  # unlike a pipeline's name, a task's is a browsable label, not an identity
+
+
+def test_a_runner_that_is_not_available_is_refused_at_task_save(env):
+    r = env.call("POST", "/tasks", json={"name": "t", "config": {"code": {"type": "inline", "source": "x=1"}, "runner": "spark"}})
+    assert r.status_code == 422 and r.json()["field"] == "runner" and "not available" in r.json()["error"]
+
+
+def test_deleting_a_task_still_referenced_by_a_pipeline_version_is_refused(env):
+    p = new_pipeline(env)
+    v = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()
+    task_id = v["spec"]["tasks"][0]["taskId"]
+    r = env.call("DELETE", f"/tasks/{task_id}")
+    assert r.status_code == 409
+    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 204
+    assert env.call("DELETE", f"/tasks/{task_id}").status_code == 204  # free once nothing references it
+
+
+def test_updating_a_tasks_own_name_and_description(env):
+    t = new_task(env, "old", description="d1")
+    r = env.call("PUT", f"/tasks/{t['id']}", json={"name": "new", "description": "d2"})
+    assert r.status_code == 200 and r.json()["name"] == "new" and r.json()["description"] == "d2"
+    assert env.call("GET", "/tasks?q=new").json()["total"] == 1
+
+
+# ---- catalog code references (ADR 0010), resolved at TASK-version save time now (ADR 0071) ----
+
+
+def test_catalog_latest_is_resolved_and_snapshotted_at_task_save(env):
     env.catalog.add("e1", "loader", {"1.0.0": "def run(ctx):\n    return 'v1'\n", "2.0.0": "def run(ctx):\n    return 'v2'\n"})
-    p = new_pipeline(env, spec={"tasks": [catalog_task()]})
-    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    t = new_task(env, "a", config={"code": {"type": "catalog", "entryId": "e1", "version": "latest"}})
+    code = t["version"]["config"]["code"]
     import hashlib
 
     assert code["version"] == "2.0.0"  # "latest" pinned to the concrete label
@@ -209,12 +293,12 @@ def test_catalog_latest_is_resolved_and_snapshotted_at_save(env):
 
 def test_runs_use_the_snapshot_and_never_call_the_catalog(env):
     env.catalog.add("e1", "loader", {"1.0.0": "print('from catalog v1')\n"})
-    p = new_pipeline(env, spec={"tasks": [catalog_task(version="1.0.0")]})
-    job = new_job(env, p["id"])
+    t = new_task(env, "a", config={"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]})
     env.catalog.requests.clear()
     env.catalog.down = True  # the catalog disappears entirely after save
     env.catalog.entries["e1"]["versions"]["1.0.0"] = "print('TAMPERED')\n"  # and even if it did change
-    run = env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "succeeded"
     logs = env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"]
     assert [ln["message"] for ln in logs if ln["stream"] == "stdout"] == ["from catalog v1"]
@@ -223,7 +307,7 @@ def test_runs_use_the_snapshot_and_never_call_the_catalog(env):
 
 def test_catalog_call_carries_the_callers_own_token_and_workspace(env):
     env.catalog.add("e1", "loader", {"1.0.0": "pass\n"})
-    new_pipeline(env, spec={"tasks": [catalog_task(version="1.0.0")]})
+    new_task(env, "a", config={"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}})
     assert env.catalog.requests
     for req in env.catalog.requests:
         assert req.headers["authorization"] == "Bearer tok-editor" and req.headers["x-workspace"] == "acme"
@@ -232,67 +316,73 @@ def test_catalog_call_carries_the_callers_own_token_and_workspace(env):
 
 def test_a_client_supplied_snapshot_is_never_trusted(env):
     env.catalog.add("e1", "loader", {"1.0.0": "print('real')\n"})
-    forged = catalog_task(version="1.0.0")
-    forged["code"].update({"source": "print('FORGED')\n", "sha256": "0" * 64, "name": "trust me"})
-    p = new_pipeline(env, spec={"tasks": [forged]})
-    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    forged = {"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0", "source": "print('FORGED')\n", "sha256": "0" * 64, "name": "trust me"}}
+    t = new_task(env, "a", config=forged)
+    code = t["version"]["config"]["code"]
     assert code["source"] == "print('real')\n" and code["name"] == "loader"
 
 
-def test_an_unrelated_edit_can_be_saved_while_the_catalog_is_down(env):
+def test_a_new_task_version_reuses_the_previous_snapshot_while_the_catalog_is_down(env):
     env.catalog.add("e1", "loader", {"1.0.0": "pass\n"})
-    p = new_pipeline(env, spec={"tasks": [catalog_task(version="1.0.0")]})
+    t = new_task(env, "a", config={"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}})
     env.catalog.down = True
-    spec = env.call("GET", f"/pipelines/{p['id']}/versions/latest").json()["spec"]
-    spec["tasks"].append(task("extra", "sink", ["a"]))  # only the previously-resolved ref is re-sent
-    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})
-    assert r.status_code == 201, r.text  # reused OUR stored snapshot; needed no catalog call
+    # only the previously-resolved reference is re-sent: reuses OUR stored snapshot, no catalog call
+    r = env.call("POST", f"/tasks/{t['id']}/versions", json={"config": {"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}}})
+    assert r.status_code == 201, r.text
     # but a *new* catalog reference cannot be resolved while it is down:
-    spec["tasks"].append(catalog_task("b", entry="e2", version="1.0.0", kind="source"))
-    assert env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec}).status_code == 503
+    r2 = env.call("POST", f"/tasks/{t['id']}/versions", json={"config": {"code": {"type": "catalog", "entryId": "e2", "version": "1.0.0"}}})
+    assert r2.status_code == 503
+
+
+def test_a_pipeline_version_needs_no_catalog_or_storage_call_at_all(env):
+    """ADR 0071: a task's code is already snapshotted when its own version is saved, so saving a
+    PIPELINE version — which only references (taskId, taskVersion) pairs — never touches the
+    catalog or storage, unconditionally, not just when reusing a previous reference."""
+    env.catalog.add("e1", "loader", {"1.0.0": "pass\n"})
+    t = new_task(env, "a", config={"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]})
+    env.catalog.requests.clear()
+    env.catalog.down = True
+    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]}})
+    assert r.status_code == 201, r.text
+    assert env.catalog.requests == []
 
 
 def test_catalog_failure_modes_map_to_useful_statuses(env):
-    p = new_pipeline(env, "host")
-    save = lambda spec: env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})  # noqa: E731
-    r = save({"tasks": [catalog_task(entry="nope")]})
-    assert r.status_code == 422 and r.json()["field"] == "tasks[0].code" and "not found" in r.json()["error"]
+    save = lambda config: env.call("POST", "/tasks", json={"name": "t", "config": config})  # noqa: E731
+    r = save({"code": {"type": "catalog", "entryId": "nope", "version": "latest"}})
+    assert r.status_code == 422 and r.json()["field"] == "code" and "not found" in r.json()["error"]
     env.catalog.add("e1", "loader", {"1.0.0": "pass\n"})
-    assert save({"tasks": [catalog_task(version="9.9.9")]}).status_code == 422
+    assert save({"code": {"type": "catalog", "entryId": "e1", "version": "9.9.9"}}).status_code == 422
     env.catalog.not_installed = True  # the gateway's plain-text 404 is NOT "entry not found"
-    r = save({"tasks": [catalog_task(version="1.0.0")]})
+    r = save({"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}})
     assert r.status_code == 503 and "not installed" in r.json()["error"] and "Inline code needs no catalog" in r.json()["error"]
     env.catalog.not_installed, env.catalog.down = False, True
-    assert save({"tasks": [catalog_task(version="1.0.0")]}).status_code == 503
+    assert save({"code": {"type": "catalog", "entryId": "e1", "version": "1.0.0"}}).status_code == 503
 
 
 def test_sql_catalog_code_is_accepted_and_actually_runs_on_the_base_runner(env):
     """ADR 0064: the base runner's language dispatch is a real registry now, not a hardcoded
     Python-only check — SQL is a second supported language, not just tolerated at save time."""
     env.catalog.add("q", "report", {"1": "SELECT 1 AS x"}, language="sql")
-    p = new_pipeline(env, spec={"tasks": [catalog_task(entry="q", version="1")]})
-    job = new_job(env, p["id"])
-    assert env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])["status"] == "succeeded"
+    t = new_task(env, "a", config={"code": {"type": "catalog", "entryId": "q", "version": "1"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]})
+    assert env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])["status"] == "succeeded"
 
 
 def test_a_language_the_base_runner_has_no_strategy_for_is_still_refused(env):
     env.catalog.add("q", "report", {"1": "object Report"}, language="scala")
-    p = new_pipeline(env, "host")
-    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [catalog_task(entry="q", version="1")]}})
+    r = env.call("POST", "/tasks", json={"name": "t", "config": {"code": {"type": "catalog", "entryId": "q", "version": "1"}}})
     assert r.status_code == 422 and "the base runner supports" in r.json()["error"] and "python" in r.json()["error"] and "sql" in r.json()["error"]
 
 
 # ---- storage code references (ADR 0063) -----------------------------------------------------
 
 
-def storage_task(key="a", backend="b1", path="tasks/a.py", kind="source", deps=None, **kw):
-    return {"key": key, "kind": kind, "code": {"type": "storage", "backendId": backend, "path": path}, "dependsOn": deps or [], **kw}
-
-
-def test_storage_code_is_resolved_and_snapshotted_at_save(env):
+def test_storage_code_is_resolved_and_snapshotted_at_task_save(env):
     env.storage.add("b1", "tasks/a.py", "def run(ctx):\n    return 'from storage'\n")
-    p = new_pipeline(env, spec={"tasks": [storage_task()]})
-    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    t = new_task(env, "a", config={"code": {"type": "storage", "backendId": "b1", "path": "tasks/a.py"}})
+    code = t["version"]["config"]["code"]
     import hashlib
 
     assert code["backendId"] == "b1" and code["path"] == "tasks/a.py"
@@ -303,12 +393,12 @@ def test_storage_code_is_resolved_and_snapshotted_at_save(env):
 
 def test_runs_use_the_storage_snapshot_and_never_call_storage_again(env):
     env.storage.add("b1", "tasks/a.py", "print('from storage v1')\n")
-    p = new_pipeline(env, spec={"tasks": [storage_task()]})
-    job = new_job(env, p["id"])
+    t = new_task(env, "a", config={"code": {"type": "storage", "backendId": "b1", "path": "tasks/a.py"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]})
     env.storage.requests.clear()
     env.storage.down = True  # storage disappears entirely after save
     env.storage.objects["b1"]["tasks/a.py"] = "print('TAMPERED')\n"  # and even if the file changed
-    run = env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "succeeded"
     logs = env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"]
     assert [ln["message"] for ln in logs if ln["stream"] == "stdout"] == ["from storage v1"]
@@ -317,7 +407,7 @@ def test_runs_use_the_storage_snapshot_and_never_call_storage_again(env):
 
 def test_storage_call_carries_the_callers_own_token_and_workspace(env):
     env.storage.add("b1", "tasks/a.py", "pass\n")
-    new_pipeline(env, spec={"tasks": [storage_task()]})
+    new_task(env, "a", config={"code": {"type": "storage", "backendId": "b1", "path": "tasks/a.py"}})
     assert env.storage.requests
     for req in env.storage.requests:
         assert req.headers["authorization"] == "Bearer tok-editor" and req.headers["x-workspace"] == "acme"
@@ -326,80 +416,60 @@ def test_storage_call_carries_the_callers_own_token_and_workspace(env):
 
 def test_a_client_supplied_storage_snapshot_is_never_trusted(env):
     env.storage.add("b1", "tasks/a.py", "print('real')\n")
-    forged = storage_task()
-    forged["code"].update({"source": "print('FORGED')\n", "sha256": "0" * 64, "name": "trust me"})
-    p = new_pipeline(env, spec={"tasks": [forged]})
-    code = env.call("GET", f"/pipelines/{p['id']}/versions/1").json()["spec"]["tasks"][0]["code"]
+    forged = {"code": {"type": "storage", "backendId": "b1", "path": "tasks/a.py", "source": "print('FORGED')\n", "sha256": "0" * 64, "name": "trust me"}}
+    t = new_task(env, "a", config=forged)
+    code = t["version"]["config"]["code"]
     assert code["source"] == "print('real')\n" and code["name"] == "a.py"
 
 
-def test_an_unrelated_edit_can_be_saved_while_storage_is_down(env):
-    env.storage.add("b1", "tasks/a.py", "pass\n")
-    p = new_pipeline(env, spec={"tasks": [storage_task()]})
-    env.storage.down = True
-    spec = env.call("GET", f"/pipelines/{p['id']}/versions/latest").json()["spec"]
-    spec["tasks"].append(task("extra", "sink", ["a"]))  # only the previously-resolved ref is re-sent
-    r = env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})
-    assert r.status_code == 201, r.text  # reused OUR stored snapshot; needed no storage call
-    # but a *new* storage reference cannot be resolved while it is down:
-    spec["tasks"].append(storage_task("b", path="tasks/b.py", kind="source"))
-    assert env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec}).status_code == 503
-
-
 def test_storage_failure_modes_map_to_useful_statuses(env):
-    p = new_pipeline(env, "host")
-    save = lambda spec: env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec})  # noqa: E731
-    r = save({"tasks": [storage_task(path="nope.py")]})
-    assert r.status_code == 422 and r.json()["field"] == "tasks[0].code" and "no object" in r.json()["error"]
+    save = lambda config: env.call("POST", "/tasks", json={"name": "t", "config": config})  # noqa: E731
+    r = save({"code": {"type": "storage", "backendId": "b1", "path": "nope.py"}})
+    assert r.status_code == 422 and r.json()["field"] == "code" and "no object" in r.json()["error"]
     env.storage.not_installed = True  # the gateway's plain-text 404 is NOT "object not found"
-    r = save({"tasks": [storage_task(path="also-nope.py")]})
+    r = save({"code": {"type": "storage", "backendId": "b1", "path": "also-nope.py"}})
     assert r.status_code == 503 and "not installed" in r.json()["error"] and "Inline code needs no storage" in r.json()["error"]
     env.storage.not_installed, env.storage.down = False, True
-    assert save({"tasks": [storage_task(path="still-nope.py")]}).status_code == 503
+    assert save({"code": {"type": "storage", "backendId": "b1", "path": "still-nope.py"}}).status_code == 503
 
 
 def test_inline_code_works_with_the_catalog_entirely_absent(env):
     """The brief's hard requirement: the base runner needs zero other modules."""
     env.catalog.not_installed = True
     p = new_pipeline(env)
-    job = new_job(env, p["id"])
-    assert env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])["status"] == "succeeded"
+    assert env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])["status"] == "succeeded"
     assert env.catalog.requests == []
 
 
-# ---- jobs & runs ---------------------------------------------------------------------------
+# ---- scheduling & runs ------------------------------------------------------------------------
 
 
-def test_jobs_need_a_saved_version_and_validate_their_schedule(env):
+def test_scheduling_needs_a_saved_version_and_validates_the_trigger(env):
     blank = env.call("POST", "/pipelines", json={"name": "blank"}).json()
-    r = env.call("POST", "/jobs", json={"name": "j", "pipelineId": blank["id"]})
-    assert r.status_code == 422 and r.json()["field"] == "pipelineVersion"
+    r = env.call("PUT", f"/pipelines/{blank['id']}/schedule", json={"schedule": {"cron": "0 9 * * *"}})
+    assert r.status_code == 422 and r.json()["field"] == "schedule"
     p = new_pipeline(env)
-    assert env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "pipelineVersion": 5}).status_code == 422
-    assert env.call("POST", "/jobs", json={"name": "j", "pipelineId": "nope"}).status_code == 404
-    bad = env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"cron": "every day"}})
+    bad = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"schedule": {"cron": "every day"}})
     assert bad.status_code == 422 and bad.json()["field"] == "schedule.cron"
-    bad = env.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "schedule": {"cron": "0 9 * * *", "timezone": "Mars/Base"}})
+    bad = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"schedule": {"cron": "0 9 * * *", "timezone": "Mars/Base"}})
     assert bad.status_code == 422
 
 
-def test_job_config_is_persisted_and_re_editable(env):
+def test_schedule_is_persisted_and_re_editable(env):
     p = new_pipeline(env)
-    job = new_job(env, p["id"], schedule={"cron": "0 9 * * 1-5", "timezone": "America/Toronto"}, retry={"maxRetries": 2, "delaySeconds": 5, "backoff": "exponential"}, pipelineVersion=1)
-    assert job["nextRunAt"] and job["schedule"] == {"type": "cron", "cron": "0 9 * * 1-5", "timezone": "America/Toronto", "enabled": True}
-    got = env.call("GET", f"/jobs/{job['id']}").json()
-    assert got["retry"] == {"maxRetries": 2, "delaySeconds": 5.0, "backoff": "exponential"} and got["pipelineVersion"] == 1
-    r = env.call("PUT", f"/jobs/{job['id']}", json={"name": "renamed", "pipelineId": p["id"], "schedule": {"cron": "*/5 * * * *", "enabled": False}, "allowConcurrentRuns": True})
+    sched = scheduled(env, p["id"], cron="0 9 * * 1-5")
+    assert sched["nextRunAt"] and sched["schedule"] == {"type": "cron", "cron": "0 9 * * 1-5", "timezone": "UTC", "enabled": True}
+    got = env.call("GET", f"/pipelines/{p['id']}").json()
+    assert got["schedule"]["cron"] == "0 9 * * 1-5"
+    r = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"schedule": {"cron": "*/5 * * * *", "enabled": False}, "allowConcurrentRuns": True})
     upd = r.json()
-    assert upd["name"] == "renamed" and upd["schedule"]["enabled"] is False and upd["nextRunAt"] is None  # disabled: no next fire
-    assert upd["retry"] is None and upd["pipelineVersion"] is None and upd["allowConcurrentRuns"] is True
-    assert env.call("GET", "/jobs?q=renam").json()["total"] == 1
+    assert upd["schedule"]["enabled"] is False and upd["nextRunAt"] is None  # disabled: no next fire
+    assert upd["allowConcurrentRuns"] is True
 
 
 def test_run_now_executes_the_dag_and_records_per_task_state(env):
     p = new_pipeline(env)
-    job = new_job(env, p["id"])
-    r = env.call("POST", f"/jobs/{job['id']}/run")
+    r = env.call("POST", f"/pipelines/{p['id']}/run")
     assert r.status_code == 202 and r.json()["trigger"] == "manual" and r.json()["triggeredBy"] == "eddie"
     run = env.wait_run(r.json()["id"])
     assert run["status"] == "succeeded" and run["error"] is None and run["pipelineVersion"] == 1
@@ -407,13 +477,12 @@ def test_run_now_executes_the_dag_and_records_per_task_state(env):
     tasks = {t["taskKey"]: t for t in run["tasks"]}
     assert {k: t["status"] for k, t in tasks.items()} == {"extract": "succeeded", "clean": "succeeded", "load": "succeeded"}
     assert all(t["attempts"] == 1 and t["startedAt"] and t["finishedAt"] for t in tasks.values())
-    assert env.call("GET", f"/runs?jobId={job['id']}").json()["total"] == 1
+    assert env.call("GET", f"/runs?pipelineId={p['id']}").json()["total"] == 1
 
 
 def test_run_logs_per_run_per_task_with_a_polling_cursor(env):
     p = new_pipeline(env)
-    job = new_job(env, p["id"])
-    run = env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     whole = env.call("GET", f"/runs/{run['id']}/logs").json()
     assert whole["done"] is True
     msgs = [(ln["taskKey"], ln["stream"], ln["message"]) for ln in whole["items"]]
@@ -430,54 +499,46 @@ def test_run_logs_per_run_per_task_with_a_polling_cursor(env):
 
 
 def test_failure_marks_downstream_skipped_and_explains(env):
-    spec = {"tasks": [task("a", "source"), task("boom", "transform", ["a"], source="raise ValueError('bad row 7')\n"), task("z", "sink", ["boom"])]}
+    spec = {"tasks": [task("a"), task("boom", ["a"], source="raise ValueError('bad row 7')\n"), task("z", ["boom"])]}
     p = new_pipeline(env, spec=spec)
-    job = new_job(env, p["id"])
-    run = env.wait_run(env.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "failed" and "boom" in run["error"]
     assert {t["taskKey"]: t["status"] for t in run["tasks"]} == {"a": "succeeded", "boom": "failed", "z": "skipped"}
     assert any("ValueError: bad row 7" in ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs?task=boom").json()["items"])
 
 
-def test_task_retry_override_and_job_default_retry(env):
+def test_a_tasks_own_retry_override_reruns_it(env):
     flaky = "def run(ctx):\n    if ctx.attempt < 3:\n        raise RuntimeError('flaky attempt %d' % ctx.attempt)\n    return 'ok'\n"
-    spec = {"tasks": [task("a", "source", source=flaky, retry={"maxRetries": 2}), task("b", "sink", ["a"])]}
+    spec = {"tasks": [task("a", source=flaky, retry={"maxRetries": 2}), task("b", ["a"])]}
     p = new_pipeline(env, spec=spec)
-    run = env.wait_run(env.call("POST", f"/jobs/{new_job(env, p['id'])['id']}/run").json()["id"])
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "succeeded"
     assert {t["taskKey"]: (t["status"], t["attempts"]) for t in run["tasks"]}["a"] == ("succeeded", 3)
-    # job-level default applies to a task that has no override of its own
-    spec2 = {"tasks": [task("a", "source", source=flaky)]}
-    p2 = new_pipeline(env, "p2", spec=spec2)
-    j2 = new_job(env, p2["id"], "j2", retry={"maxRetries": 2})
-    run2 = env.wait_run(env.call("POST", f"/jobs/{j2['id']}/run").json()["id"])
-    assert run2["status"] == "succeeded" and run2["tasks"][0]["attempts"] == 3
-    # and with no retry configured anywhere the same code simply fails
-    j3 = new_job(env, p2["id"], "j3")
-    assert env.wait_run(env.call("POST", f"/jobs/{j3['id']}/run").json()["id"])["status"] == "failed"
+    # with no retry configured at all the same code simply fails
+    p2 = new_pipeline(env, "p2", spec={"tasks": [task("a", source=flaky)]})
+    assert env.wait_run(env.call("POST", f"/pipelines/{p2['id']}/run").json()["id"])["status"] == "failed"
 
 
-def test_a_non_concurrent_job_refuses_a_second_active_run_and_a_concurrent_one_allows_it(env):
-    slow = {"tasks": [task("a", "source", source="import time\ntime.sleep(3)\n")]}
+def test_a_non_concurrent_pipeline_refuses_a_second_active_run_and_a_concurrent_one_allows_it(env):
+    slow = {"tasks": [task("a", source="import time\ntime.sleep(3)\n")]}
     p = new_pipeline(env, spec=slow)
-    job = new_job(env, p["id"])
-    first = env.call("POST", f"/jobs/{job['id']}/run")
+    first = env.call("POST", f"/pipelines/{p['id']}/run")
     assert first.status_code == 202
-    second = env.call("POST", f"/jobs/{job['id']}/run")
+    second = env.call("POST", f"/pipelines/{p['id']}/run")
     assert second.status_code == 409 and "active run" in second.json()["error"]
     env.wait_run(first.json()["id"])
-    assert env.call("POST", f"/jobs/{job['id']}/run").status_code == 202  # free again
-    conc = new_job(env, p["id"], "conc", allowConcurrentRuns=True)
-    ids = [env.call("POST", f"/jobs/{conc['id']}/run").json()["id"] for _ in range(2)]
+    assert env.call("POST", f"/pipelines/{p['id']}/run").status_code == 202  # free again
+    conc = new_pipeline(env, "conc", spec=slow)
+    scheduled(env, conc["id"], allowConcurrentRuns=True)
+    ids = [env.call("POST", f"/pipelines/{conc['id']}/run").json()["id"] for _ in range(2)]
     for i in ids:
         env.wait_run(i)
 
 
 def test_a_running_run_can_be_canceled(env):
-    slow = {"tasks": [task("a", "source", source="import time\nprint('working', flush=True)\ntime.sleep(60)\n"), task("b", "sink", ["a"])]}
+    slow = {"tasks": [task("a", source="import time\nprint('working', flush=True)\ntime.sleep(60)\n"), task("b", ["a"])]}
     p = new_pipeline(env, spec=slow)
-    job = new_job(env, p["id"])
-    run_id = env.call("POST", f"/jobs/{job['id']}/run").json()["id"]
+    run_id = env.call("POST", f"/pipelines/{p['id']}/run").json()["id"]
     import time
 
     for _ in range(100):  # wait for it to actually be running
@@ -493,46 +554,14 @@ def test_a_running_run_can_be_canceled(env):
     assert env.call("POST", f"/runs/{run_id}/cancel").json()["status"] == "canceled"
 
 
-def test_a_job_follows_latest_or_stays_pinned(env):
-    p = new_pipeline(env, spec={"tasks": [task("a", "source", source="print('v1')\n")]})
-    following = new_job(env, p["id"], "following")
-    pinned = new_job(env, p["id"], "pinned", pipelineVersion=1)
-    env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [task("a", "source", source="print('v2')\n")]}})
-    out = {}
-    for j in (following, pinned):
-        run = env.wait_run(env.call("POST", f"/jobs/{j['id']}/run").json()["id"])
-        out[j["name"]] = (run["pipelineVersion"], [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"])
-    assert out == {"following": (2, ["v2"]), "pinned": (1, ["v1"])}
-
-
-def test_deleting_things_respects_dependencies(env):
-    p = new_pipeline(env)
-    job = new_job(env, p["id"])
-    r = env.call("DELETE", f"/pipelines/{p['id']}")
-    assert r.status_code == 409 and "jobs" in r.json()["error"]
-    run_id = env.call("POST", f"/jobs/{job['id']}/run").json()["id"]
-    env.wait_run(run_id)
-    assert env.call("DELETE", f"/jobs/{job['id']}").status_code == 204
-    assert env.call("GET", f"/runs/{run_id}").status_code == 404  # its history goes with it
-    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 204
-    assert env.call("DELETE", f"/pipelines/{p['id']}").status_code == 404
-
-
-def test_deleting_a_job_mid_run_stops_the_run(env):
-    slow = {"tasks": [task("a", "source", source="import time\ntime.sleep(60)\n")]}
-    p = new_pipeline(env, spec=slow)
-    job = new_job(env, p["id"])
-    run_id = env.call("POST", f"/jobs/{job['id']}/run").json()["id"]
-    import time
-
-    time.sleep(1.0)
-    t0 = time.monotonic()
-    assert env.call("DELETE", f"/jobs/{job['id']}").status_code == 204
-    env.client.__exit__(None, None, None)  # shutdown joins the worker: it must not be left running for 60s
-    assert time.monotonic() - t0 < 20
-    assert run_id
-
-
-def test_huge_request_bodies_are_refused(env):
-    r = env.client.post("/api/pipelines", content=b"{}", headers={"Authorization": "Bearer tok-editor", "X-Booth-Workspace": "acme", "Content-Type": "application/json", "Content-Length": str(64 * 1024 * 1024)})
-    assert r.status_code == 413
+def test_a_scheduled_run_always_runs_the_pipelines_latest_saved_version(env):
+    """ADR 0071: there is no more separate Job instance that could pin an older version
+    independently of the pipeline itself — a run (scheduled or manual) always uses the latest."""
+    p = new_pipeline(env, spec={"tasks": [task("a", source="print('v1')\n")]})
+    run1 = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run1["pipelineVersion"] == 1
+    env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [task("a", source="print('v2')\n")]}})
+    run2 = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run2["pipelineVersion"] == 2
+    msgs = [ln["message"] for ln in env.call("GET", f"/runs/{run2['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"]
+    assert msgs == ["v2"]

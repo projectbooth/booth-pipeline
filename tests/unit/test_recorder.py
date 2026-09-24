@@ -15,10 +15,7 @@ T0 = datetime(2026, 1, 1, tzinfo=UTC)
 def recorder(max_lines=1000, keys=("a", "b")):
     store = MemoryStore()
     p = store.create_pipeline("ws", "p", "", "u")
-    from booth_pipeline.records import Job
-
-    j = store.create_job(Job("j1", "ws", "j", p.id, None, None, None, False, "u", T0, T0))
-    store.create_run(Run("r1", "ws", j.id, p.id, 1, "running", "manual", "u", T0), list(keys))
+    store.create_run(Run("r1", "ws", p.id, 1, "running", "manual", "u", T0), list(keys))
     return store, StoreRecorder(store, "r1", max_lines, flush_interval=0.05)
 
 

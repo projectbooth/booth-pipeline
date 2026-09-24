@@ -2,15 +2,15 @@
 
 Two different things touch the database, at two different cadences (ADR 0065):
 
-* **Claiming** (`claim_due_jobs`) is a locking write — it advances `next_run_at` atomically so
+* **Claiming** (`claim_due_pipelines`) is a locking write — it advances `next_run_at` atomically so
   with several replicas each due fire is started exactly once. The loop calls this **only when it
-  already believes a job is due**, never on a fixed cadence, so a job's `interval` can go well
-  below a minute without every replica hammering the database with a claim query every few
+  already believes a pipeline is due**, never on a fixed cadence, so a pipeline's `interval` can go
+  well below a minute without every replica hammering the database with a claim query every few
   seconds.
 * **Indexing** (`list_upcoming`) is a cheap, lock-free read — "what's coming up, across the whole
   fleet." The loop refreshes this on a coarser cadence (`interval_seconds`, the constructor's one
   knob) and sleeps until either the index's earliest known fire time, or the next scheduled
-  refresh, whichever comes first — so a newly created or rescheduled job (possibly from a
+  refresh, whichever comes first — so a newly created or rescheduled pipeline (possibly from a
   *different* replica) is picked up within one refresh, not never.
 
 `tick()` is the direct, synchronous "claim what's due right now and sweep" entrypoint — unchanged
@@ -18,10 +18,10 @@ in shape from before this redesign, still the one thing tests call directly with
 ``now``. The loop above it is what changed: it used to call `tick()` unconditionally on a fixed
 interval; now it calls it only when the index says to.
 
-Missed fires still **coalesce**: after downtime a job fires once, not once per missed interval,
-because the claim advances ``next_run_at`` from *now*. A nightly report that missed three nights
-should run once when the service returns, not three times in a row. This lives in the store's
-``claim_due_jobs`` and is untouched by any of the above.
+Missed fires still **coalesce**: after downtime a pipeline fires once, not once per missed
+interval, because the claim advances ``next_run_at`` from *now*. A nightly report that missed
+three nights should run once when the service returns, not three times in a row. This lives in the
+store's ``claim_due_pipelines`` and is untouched by any of the above.
 
 Dagster ships its own scheduler daemon; we do not use it. It watches code locations, and our
 pipelines are rows in a database compiled per run (docs/decisions/0003) — driving Dagster's daemon
@@ -67,8 +67,8 @@ class Scheduler:
         and logs). This is the write path — see the module docstring for when the loop calls it."""
         now = now or datetime.now(UTC)
         started: list[str] = []
-        for job in self._store.claim_due_jobs(now, CLAIM_BATCH):
-            run = self._service.start_scheduled(job)
+        for pipeline in self._store.claim_due_pipelines(now, CLAIM_BATCH):
+            run = self._service.start_scheduled(pipeline)
             if run:
                 started.append(run.id)
         self._manager.sweep()
@@ -88,11 +88,11 @@ class Scheduler:
         self._next_known_fire = upcoming[0].next_run_at if upcoming else None
         self._index_loaded_at = time.monotonic()
         if len(upcoming) >= INDEX_SCAN_LIMIT:
-            # More jobs are due soon than one scan covers — sweeping through them at
+            # More pipelines are due soon than one scan covers — sweeping through them at
             # INDEX_SCAN_LIMIT-per-tick will still make progress (tick() claims CLAIM_BATCH at a
             # time and the loop re-indexes after every tick), just not in one pass. Worth knowing
             # about, not worth failing over.
-            log.warning("scheduler index is full (%d jobs); more may be due than one refresh sees", INDEX_SCAN_LIMIT)
+            log.warning("scheduler index is full (%d pipelines); more may be due than one refresh sees", INDEX_SCAN_LIMIT)
 
     def _sleep_seconds(self, now: datetime) -> float:
         # The index's own deadline is an ABSOLUTE monotonic instant (when it was last loaded,

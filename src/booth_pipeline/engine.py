@@ -47,7 +47,7 @@ from dagster import (
     RetryPolicy,
 )
 
-from .model import PipelineSpec, Task, code_language, topological_order
+from .model import PipelineSpec, TaskConfig, TaskRef, code_language, topological_order
 from .model import RetryPolicy as SpecRetry
 from .runners.base import Cancellation, TaskCanceled, TaskInvocation
 from .runners.registry import RunnerRegistry
@@ -90,11 +90,6 @@ class EngineResult:
     error: str | None
 
 
-def effective_retry(task: Task, job_default: SpecRetry | None) -> SpecRetry | None:
-    """A task's own retry override wins outright; otherwise the job's default; otherwise none."""
-    return task.retry if task.retry is not None else job_default
-
-
 def _dagster_retry(policy: SpecRetry | None) -> RetryPolicy | None:
     if policy is None or policy.max_retries == 0:
         return None
@@ -103,47 +98,48 @@ def _dagster_retry(policy: SpecRetry | None) -> RetryPolicy | None:
 
 
 def _make_op(
-    task: Task,
+    ref: TaskRef,
+    config: TaskConfig,
     run_id: str,
-    retry: SpecRetry | None,
     registry: RunnerRegistry,
     recorder: RunRecorder,
     cancel: Cancellation,
     access: AccessProvider | None,
     reasons: dict[str, str],
 ) -> OpDefinition:
+    retry = config.retry
     max_retries = retry.max_retries if retry else 0
 
     # `context` is deliberately unannotated: Dagster inspects the annotation and rejects anything
     # that is not one of its own context types (an `Any` fails at definition time).
     def compute(context, inputs):
         attempt = context.retry_number + 1
-        upstream = {dep: inputs[input_name(dep)] for dep in task.depends_on}
-        recorder.task_started(task.key, attempt)
-        tlog = recorder.task_log(task.key, attempt)
+        upstream = {dep: inputs[input_name(dep)] for dep in ref.depends_on}
+        recorder.task_started(ref.key, attempt)
+        tlog = recorder.task_log(ref.key, attempt)
         try:
             # Only a task that opted in mints anything (ADR 0056, docs/decisions/0007): a task that
             # never touches storage or the catalog must not be blocked by an identity it doesn't use.
             grant = None
-            if task.platform_access:
+            if config.platform_access:
                 if access is None:
                     raise MintNotConfigured("workload identity is not configured for this run")
                 grant = access.grant()
             inv = TaskInvocation(
                 run_id=run_id,
-                task_key=task.key,
-                kind=task.kind or "",  # decorative only (ADR 0062); ctx.kind is "" for an untagged task
+                task_key=ref.key,
+                kind="",  # retired by ADR 0071; kept on the wire only for the runner IPC protocol's own shape
                 attempt=attempt,
-                source=task.code.source or "",
-                params=task.params,
+                source=config.code.source or "",
+                params=config.params,
                 inputs=upstream,
-                timeout_seconds=task.timeout_seconds,
+                timeout_seconds=config.timeout_seconds,
                 access=grant,
-                language=code_language(task.code),
+                language=code_language(config.code),
             )
-            output = registry.get(task.runner).run(inv, tlog, cancel)
+            output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskCanceled:
-            recorder.task_attempt_finished(task.key, attempt, "canceled", "canceled")
+            recorder.task_attempt_finished(ref.key, attempt, "canceled", "canceled")
             # allow_retries=False: a canceled task must not be re-run by its retry policy.
             raise Failure(description="canceled", allow_retries=False) from None
         except (MintRefused, MintNotConfigured) as e:
@@ -151,46 +147,50 @@ def _make_op(
             # owner has not signed in recently enough, ADR 0058). Say so plainly, and do NOT retry —
             # the answer will not change in seconds; the owner has to act.
             message = f"not given platform access: {e}"
-            reasons[task.key] = message
-            recorder.task_attempt_finished(task.key, attempt, "failed", message)
+            reasons[ref.key] = message
+            recorder.task_attempt_finished(ref.key, attempt, "failed", message)
             raise Failure(description=message, allow_retries=False) from None
         except Exception as e:  # noqa: BLE001 - any failure, incl. a runner bug, is a task failure
             will_retry = attempt <= max_retries and not cancel.canceled
             message = str(e) or e.__class__.__name__
-            reasons[task.key] = message
-            recorder.task_attempt_finished(task.key, attempt, "retrying" if will_retry else "failed", message)
+            reasons[ref.key] = message
+            recorder.task_attempt_finished(ref.key, attempt, "retrying" if will_retry else "failed", message)
             if will_retry and retry:
                 recorder.system(
-                    f"task {task.key!r} attempt {attempt} failed ({message}); retrying "
+                    f"task {ref.key!r} attempt {attempt} failed ({message}); retrying "
                     f"(attempt {attempt + 1} of {max_retries + 1})"
                 )
             raise  # re-raised so Dagster's retry policy sees it (fact 1 above)
-        recorder.task_attempt_finished(task.key, attempt, "succeeded", None)
+        recorder.task_attempt_finished(ref.key, attempt, "succeeded", None)
         yield Output(output, output_name=RESULT)
 
     return OpDefinition(
         compute_fn=compute,
-        name=op_name(task.key),
-        ins={input_name(dep): In(dagster_type=DagsterAny) for dep in task.depends_on},
+        name=op_name(ref.key),
+        ins={input_name(dep): In(dagster_type=DagsterAny) for dep in ref.depends_on},
         outs={RESULT: Out(dagster_type=DagsterAny)},
         retry_policy=_dagster_retry(retry),
-        description=task.display_name,
+        description=ref.key,
     )
 
 
 def compile_job(
     spec: PipelineSpec,
+    configs: dict[str, TaskConfig],
     *,
     run_id: str,
     registry: RunnerRegistry,
     recorder: RunRecorder,
     cancel: Cancellation,
-    job_retry: SpecRetry | None = None,
     name: str = "pipeline",
     access: AccessProvider | None = None,
     reasons: dict[str, str] | None = None,
 ) -> JobDefinition:
     """Compile the spec into a Dagster ``JobDefinition``.
+
+    ``configs`` is each node's resolved ``TaskConfig`` (ADR 0071 — ``resolve.py``), keyed by the
+    same ``TaskRef.key`` as ``spec.by_key()``: a ``PipelineSpec`` is now only references, so what
+    actually runs has to be looked up and handed in alongside it.
 
     Called both at save time (to prove the graph compiles — a structural error surfaces when the
     user saves, not at 3am) and at run time (with a real recorder). Raises ``ModelError`` for a
@@ -198,10 +198,8 @@ def compile_job(
     """
     order = topological_order(spec)
     by_key = spec.by_key()
-    ops = [
-        _make_op(by_key[k], run_id, effective_retry(by_key[k], job_retry), registry, recorder, cancel, access, reasons if reasons is not None else {})
-        for k in order
-    ]
+    r = reasons if reasons is not None else {}
+    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r) for k in order]
     deps: dict[str, dict[str, DependencyDefinition]] = {}
     for k in order:
         t = by_key[k]
@@ -218,19 +216,19 @@ def _safe(name: str) -> str:
 
 def execute(
     spec: PipelineSpec,
+    configs: dict[str, TaskConfig],
     *,
     run_id: str,
     registry: RunnerRegistry,
     recorder: RunRecorder,
     cancel: Cancellation,
-    job_retry: SpecRetry | None = None,
     access: AccessProvider | None = None,
 ) -> EngineResult:
     """Run the pipeline to completion (blocking). Never raises for a task failure — that is a
     result, not an exception."""
     reasons: dict[str, str] = {}
     job = compile_job(
-        spec, run_id=run_id, registry=registry, recorder=recorder, cancel=cancel, job_retry=job_retry,
+        spec, configs, run_id=run_id, registry=registry, recorder=recorder, cancel=cancel,
         name=f"run_{run_id}", access=access, reasons=reasons,
     )
     # A fresh in-memory instance per run: nothing is shared between runs, nothing persists in

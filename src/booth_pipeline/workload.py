@@ -141,7 +141,7 @@ class AccessProvider:
                 "this deployment has no workload-identity credential, so tasks cannot be given access to storage or the catalog"
             )
         if not self._owner:
-            raise MintRefused("this job has no recorded owner (it predates workload identity); save it again to take ownership")
+            raise MintRefused("this pipeline has no recorded owner (it predates workload identity); save its schedule again to take ownership")
         return self._minter.mint(self._workspace, self._subject, self._ceiling, self._owner)
 
     def grant(self) -> TaskAccess:

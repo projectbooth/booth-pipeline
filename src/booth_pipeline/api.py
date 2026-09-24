@@ -17,8 +17,26 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from . import model as m
 from .auth import Identity, require_read, require_write
-from .records import RUN_TERMINAL, Job, LogLine, Pipeline, PipelineVersion, Run, TaskRun
-from .schemas import JobInput, PipelineCreate, PipelineUpdate, ValidateRequest, VersionCreate
+from .records import (
+    RUN_TERMINAL,
+    LogLine,
+    Pipeline,
+    PipelineVersion,
+    Run,
+    TaskEntity,
+    TaskRun,
+    TaskVersionRecord,
+)
+from .schemas import (
+    PipelineCreate,
+    PipelineScheduleUpdate,
+    PipelineUpdate,
+    TaskCreate,
+    TaskUpdate,
+    TaskVersionCreate,
+    ValidateRequest,
+    VersionCreate,
+)
 from .service import PipelineService
 
 router = APIRouter(prefix="/api")
@@ -47,6 +65,12 @@ def pipeline_json(p: Pipeline) -> dict[str, Any]:
         "createdAt": _iso(p.created_at),
         "updatedAt": _iso(p.updated_at),
         "latestVersion": p.latest_version,
+        # Scheduling/triggering/ownership, folded onto Pipeline directly (ADR 0071).
+        "schedule": _schedule(p.schedule),
+        "allowConcurrentRuns": p.allow_concurrent_runs,
+        "roleCeiling": p.role_ceiling,
+        "hasOwner": bool(p.owner_sub),
+        "nextRunAt": _iso(p.next_run_at),
     }
 
 
@@ -64,28 +88,34 @@ def version_json(v: PipelineVersion, with_spec: bool = True) -> dict[str, Any]:
     return out
 
 
-def job_json(j: Job) -> dict[str, Any]:
+def task_json(t: TaskEntity) -> dict[str, Any]:
     return {
-        "id": j.id,
-        "name": j.name,
-        "pipelineId": j.pipeline_id,
-        "pipelineVersion": j.pipeline_version,
-        "schedule": _schedule(j.schedule),
-        "retry": j.retry.model_dump(by_alias=True) if j.retry else None,
-        "allowConcurrentRuns": j.allow_concurrent_runs,
-        "roleCeiling": j.role_ceiling,
-        "hasOwner": bool(j.owner_sub),
-        "createdBy": j.created_by,
-        "createdAt": _iso(j.created_at),
-        "updatedAt": _iso(j.updated_at),
-        "nextRunAt": _iso(j.next_run_at),
+        "id": t.id,
+        "name": t.name,
+        "description": t.description,
+        "createdBy": t.created_by,
+        "createdAt": _iso(t.created_at),
+        "updatedAt": _iso(t.updated_at),
+        "latestVersion": t.latest_version,
     }
+
+
+def task_version_json(v: TaskVersionRecord, with_config: bool = True) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "taskId": v.task_id,
+        "version": v.version,
+        "notes": v.notes,
+        "createdBy": v.created_by,
+        "createdAt": _iso(v.created_at),
+    }
+    if with_config:
+        out["config"] = v.config.model_dump(by_alias=True, mode="json")
+    return out
 
 
 def run_json(r: Run) -> dict[str, Any]:
     return {
         "id": r.id,
-        "jobId": r.job_id,
         "pipelineId": r.pipeline_id,
         "pipelineVersion": r.pipeline_version,
         "status": r.status,
@@ -147,7 +177,7 @@ def runners(request: Request, _: Identity = Depends(require_read)) -> dict[str, 
     return {"items": [{"id": r.id, "displayName": r.display_name, "available": r.available, "reason": r.reason} for r in svc(request).registry.describe()]}
 
 
-# ---- pipelines ----------------------------------------------------------------------------
+# ---- pipelines -----------------------------------------------------------------------------
 
 
 @router.get("/pipelines")
@@ -164,10 +194,11 @@ def create_pipeline(request: Request, body: PipelineCreate, ident: Identity = De
 
 @router.post("/pipelines/validate")
 def validate_pipeline(request: Request, body: ValidateRequest, ident: Identity = Depends(require_read)):
-    """Live check for the canvas: never saves, never calls the catalog. 200 with ``valid``
-    rather than 422, because "this draft is not valid yet" is the normal state while drawing."""
+    """Live check for the canvas: never saves, never calls the catalog or storage. 200 with
+    ``valid`` rather than 422, because "this draft is not valid yet" is the normal state while
+    drawing."""
     try:
-        svc(request).validate_draft(body.spec)
+        svc(request).validate_draft(ident, body.spec)
     except m.ModelError as e:
         return {"valid": False, "error": e.message, "field": e.field}
     return {"valid": True}
@@ -187,6 +218,17 @@ def update_pipeline(request: Request, pipeline_id: str, body: PipelineUpdate, id
 def delete_pipeline(request: Request, pipeline_id: str, ident: Identity = Depends(require_write)):
     svc(request).delete_pipeline(ident, pipeline_id)
     return Response(status_code=204)
+
+
+@router.put("/pipelines/{pipeline_id}/schedule")
+def update_schedule(request: Request, pipeline_id: str, body: PipelineScheduleUpdate, ident: Identity = Depends(require_write)):
+    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling))
+
+
+@router.post("/pipelines/{pipeline_id}/run", status_code=202)
+def run_pipeline(request: Request, pipeline_id: str, ident: Identity = Depends(require_write)):
+    """Run now. 202: the run is queued and executes asynchronously — poll ``GET /api/runs/{id}``."""
+    return run_json(svc(request).run_now(ident, pipeline_id))
 
 
 @router.get("/pipelines/{pipeline_id}/versions")
@@ -213,48 +255,67 @@ def get_version(request: Request, pipeline_id: str, version: str, ident: Identit
     return version_json(svc(request).get_version(ident, pipeline_id, n))
 
 
-# ---- jobs ---------------------------------------------------------------------------------
+# ---- tasks (ADR 0071: standalone, versioned, reusable — mirrors booth-catalog's own code versioning) ---
 
 
-@router.get("/jobs")
-def list_jobs(request: Request, q: str = "", pipelineId: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
-    page = svc(request).list_jobs(ident, pipelineId, q, limit, offset)
-    return page_json(page.items, page.total, job_json)
+@router.get("/tasks")
+def list_tasks(request: Request, q: str = "", limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
+    page = svc(request).list_tasks(ident, q, limit, offset)
+    return page_json(page.items, page.total, task_json)
 
 
-@router.post("/jobs", status_code=201)
-def create_job(request: Request, body: JobInput, ident: Identity = Depends(require_write)):
-    return job_json(svc(request).create_job(ident, body))
+@router.post("/tasks", status_code=201)
+def create_task(request: Request, body: TaskCreate, ident: Identity = Depends(require_write)):
+    t, v = svc(request).create_task(ident, body.name, body.description, body.config, body.notes)
+    return {**task_json(t), "version": task_version_json(v) if v else None}
 
 
-@router.get("/jobs/{job_id}")
-def get_job(request: Request, job_id: str, ident: Identity = Depends(require_read)):
-    return job_json(svc(request).get_job(ident, job_id))
+@router.get("/tasks/{task_id}")
+def get_task(request: Request, task_id: str, ident: Identity = Depends(require_read)):
+    return task_json(svc(request).get_task(ident, task_id))
 
 
-@router.put("/jobs/{job_id}")
-def update_job(request: Request, job_id: str, body: JobInput, ident: Identity = Depends(require_write)):
-    return job_json(svc(request).update_job(ident, job_id, body))
+@router.put("/tasks/{task_id}")
+def update_task(request: Request, task_id: str, body: TaskUpdate, ident: Identity = Depends(require_write)):
+    return task_json(svc(request).update_task(ident, task_id, body.name, body.description))
 
 
-@router.delete("/jobs/{job_id}", status_code=204)
-def delete_job(request: Request, job_id: str, ident: Identity = Depends(require_write)):
-    svc(request).delete_job(ident, job_id)
+@router.delete("/tasks/{task_id}", status_code=204)
+def delete_task(request: Request, task_id: str, ident: Identity = Depends(require_write)):
+    svc(request).delete_task(ident, task_id)
     return Response(status_code=204)
 
 
-@router.post("/jobs/{job_id}/run", status_code=202)
-def run_job(request: Request, job_id: str, ident: Identity = Depends(require_write)):
-    """Run now. 202: the run is queued and executes asynchronously — poll ``GET /api/runs/{id}``."""
-    return run_json(svc(request).run_now(ident, job_id))
+@router.get("/tasks/{task_id}/versions")
+def list_task_versions(request: Request, task_id: str, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
+    page = svc(request).list_task_versions(ident, task_id, limit, offset)
+    return page_json(page.items, page.total, lambda v: task_version_json(v, with_config=False))
+
+
+@router.post("/tasks/{task_id}/versions", status_code=201)
+def save_task_version(request: Request, task_id: str, body: TaskVersionCreate, ident: Identity = Depends(require_write)):
+    return task_version_json(svc(request).save_task_version(ident, task_id, body.config, body.notes))
+
+
+@router.get("/tasks/{task_id}/versions/{version}")
+def get_task_version(request: Request, task_id: str, version: str, ident: Identity = Depends(require_read)):
+    """``version`` is a number, or ``latest``."""
+    if version == "latest":
+        n = None
+    else:
+        try:
+            n = int(version)
+        except ValueError:
+            raise HTTPException(404, "task version not found") from None
+    return task_version_json(svc(request).get_task_version(ident, task_id, n))
 
 
 # ---- runs ---------------------------------------------------------------------------------
 
 
 @router.get("/runs")
-def list_runs(request: Request, jobId: str | None = None, status: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
-    page = svc(request).list_runs(ident, jobId, status, limit, offset)
+def list_runs(request: Request, pipelineId: str | None = None, status: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
+    page = svc(request).list_runs(ident, pipelineId, status, limit, offset)
     return page_json(page.items, page.total, run_json)
 
 

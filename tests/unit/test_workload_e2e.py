@@ -71,11 +71,25 @@ class World:
     def mints(self):
         return [r for r in self.core.requests if r.path == "/api/internal/workload-tokens"]
 
-    def job(self, spec_tasks, token="tok-editor", **body):
-        p = self.call("POST", "/pipelines", token, json={"name": f"p{len(self.store._pipelines)}", "spec": {"tasks": spec_tasks}}).json()
-        j = self.call("POST", "/jobs", token, json={"name": f"j{len(self.store._jobs)}", "pipelineId": p["id"], **body})
-        assert j.status_code == 201, j.text
-        return j.json()
+    def pipeline(self, spec_tasks, token="tok-editor", **schedule_kw):
+        refs = [self._task(n, token) for n in spec_tasks]
+        p = self.call("POST", "/pipelines", token, json={"name": f"p{len(self.store._pipelines)}", "spec": {"tasks": refs}})
+        assert p.status_code == 201, p.text
+        body = p.json()
+        if schedule_kw:
+            r = self.call("PUT", f"/pipelines/{body['id']}/schedule", token, json=schedule_kw)
+            assert r.status_code == 200, r.text
+            body = {**body, **r.json()}
+        return body
+
+    def _task(self, n, token):
+        n = dict(n)
+        key = n.pop("key")
+        deps = n.pop("dependsOn", [])
+        code = n.pop("code")
+        r = self.call("POST", "/tasks", token, json={"name": key, "config": {"code": code, **n}})
+        assert r.status_code == 201, r.text
+        return {"key": key, "taskId": r.json()["id"], "taskVersion": 1, "dependsOn": deps, "position": {"x": 0, "y": 0}}
 
 
 @pytest.fixture()
@@ -110,16 +124,16 @@ def world():
 
 
 def platform_task(key="write", **kw):
-    return task(key, "sink", ["src"], source=TASK_SRC, platformAccess=True, **kw)
+    return task(key, ["src"], source=TASK_SRC, platformAccess=True, **kw)
 
 
 def spec_with_platform(**kw):
-    return [task("src", "source"), platform_task(**kw)]
+    return [task("src"), platform_task(**kw)]
 
 
 def test_an_opted_in_task_reaches_storage_and_the_catalog_with_a_token_minted_for_this_run(world: World):
-    job = world.job(spec_with_platform())
-    run = world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    p = world.pipeline(spec_with_platform())
+    run = world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "succeeded", run
     assert "registered d-1" in world.logs(run["id"])
 
@@ -136,8 +150,8 @@ def test_an_opted_in_task_reaches_storage_and_the_catalog_with_a_token_minted_fo
 
 
 def test_the_minting_credential_never_reaches_the_runner_or_the_run_log(world: World):
-    job = world.job(spec_with_platform())
-    run = world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    p = world.pipeline(spec_with_platform())
+    run = world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "succeeded"
     assert world.runner.seen, "the runner should have received the task"
     for what in world.runner.seen:
@@ -150,33 +164,33 @@ def test_the_minting_credential_never_reaches_the_runner_or_the_run_log(world: W
 
 def test_a_task_that_never_opted_in_cannot_use_storage_and_costs_no_mint(world: World):
     src = "def run(ctx):\n    ctx.storage.backends()\n"
-    job = world.job([task("only", "source", source=src)])
-    run = world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    p = world.pipeline([task("only", source=src)])
+    run = world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "failed" and world.mints() == []
     assert "no platform access" in world.logs(run["id"])
 
 
 def test_the_role_ceiling_is_sent_and_it_can_be_lowered_to_viewer(world: World):
-    job = world.job(spec_with_platform(), roleCeiling="viewer")
-    assert job["roleCeiling"] == "viewer"
-    world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    p = world.pipeline(spec_with_platform(), schedule={"cron": "0 9 * * *"}, roleCeiling="viewer")
+    assert p["roleCeiling"] == "viewer"
+    world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert world.mints()[0].json()["roleCeiling"] == "viewer"
 
 
 def test_owner_can_never_be_a_ceiling(world: World):
-    p = world.call("POST", "/pipelines", json={"name": "x", "spec": {"tasks": [task("a", "source")]}}).json()
-    r = world.call("POST", "/jobs", json={"name": "j", "pipelineId": p["id"], "roleCeiling": "owner"})
+    p = world.pipeline([task("a")])
+    r = world.call("PUT", f"/pipelines/{p['id']}/schedule", json={"schedule": {"cron": "0 9 * * *"}, "roleCeiling": "owner"})
     assert r.status_code == 422  # nothing a pipeline does needs workspace administration
 
 
-def test_a_scheduled_run_is_owned_by_the_job_creator_not_by_whoever_last_touched_it(world: World):
-    job = world.job(spec_with_platform(), token="tok-owner", schedule={"cron": "0 * * * *"})  # created by olga (u-owner)
-    # an editor edits the job's name; ownership must not move (a moved owner would launder identity)
-    world.call("PUT", f"/jobs/{job['id']}", "tok-editor", json={"name": "renamed", "pipelineId": job["pipelineId"], "schedule": {"cron": "0 * * * *"}})
-    stored = world.store.get_job("acme", job["id"])
+def test_a_scheduled_run_is_owned_by_whoever_first_gave_the_pipeline_a_schedule(world: World):
+    p = world.pipeline(spec_with_platform(), token="tok-owner", schedule={"cron": "0 * * * *"})  # scheduled by olga (u-owner)
+    # an editor edits the schedule; ownership must not move (a moved owner would launder identity)
+    world.call("PUT", f"/pipelines/{p['id']}/schedule", "tok-editor", json={"schedule": {"cron": "0 * * * *"}})
+    stored = world.store.get_pipeline("acme", p["id"])
     assert stored.owner_sub == "u-owner"
     stored.next_run_at = datetime.now(UTC) - timedelta(minutes=1)
-    world.store.update_job(stored)
+    world.store.update_schedule(stored)
     (rid,) = world.app.state.scheduler.tick()
     run = world.wait_run(rid)
     assert run["status"] == "succeeded" and run["trigger"] == "schedule"
@@ -192,8 +206,8 @@ def refuse(world: World):
 
 def test_a_lapsed_owner_fails_the_run_with_a_clear_reason_in_status_and_log_and_is_not_retried(world: World):
     refuse(world)
-    job = world.job(spec_with_platform(retry={"maxRetries": 3}), retry={"maxRetries": 3})
-    run = world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])
+    p = world.pipeline(spec_with_platform(retry={"maxRetries": 3}))
+    run = world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "failed"
     # in the run's OWN status, where a person looks first...
     assert "signed in" in run["error"] and "recently enough" in run["error"] and "write:" in run["error"]
@@ -209,22 +223,22 @@ def test_a_lapsed_owner_fails_the_run_with_a_clear_reason_in_status_and_log_and_
 
 def test_a_pipeline_that_needs_no_platform_access_is_unaffected_by_a_lapsed_owner(world: World):
     refuse(world)
-    job = world.job([task("a", "source"), task("b", "sink", ["a"])])
-    assert world.wait_run(world.call("POST", f"/jobs/{job['id']}/run").json()["id"])["status"] == "succeeded"
+    p = world.pipeline([task("a"), task("b", ["a"])])
+    assert world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])["status"] == "succeeded"
     assert world.mints() == []
 
 
-def test_a_job_that_predates_workload_identity_says_how_to_fix_it(world: World):
-    job = world.job(spec_with_platform())
-    stored = world.store.get_job("acme", job["id"])
+def test_a_pipeline_that_predates_workload_identity_says_how_to_fix_it(world: World):
+    p = world.pipeline(spec_with_platform())
+    stored = world.store.get_pipeline("acme", p["id"])
     stored.owner_sub = ""  # as created before this feature existed
-    world.store.update_job(stored)
-    run_id = world.app.state.service.start_scheduled(world.store.get_job("acme", job["id"]))
+    world.store.update_schedule(stored)
+    run_id = world.app.state.service.start_scheduled(world.store.get_pipeline("acme", p["id"]))
     run = world.wait_run(run_id.id)
-    assert run["status"] == "failed" and "no recorded owner" in run["error"] and "save it again" in run["error"]
-    # saving it (by anyone active) adopts it
-    world.call("PUT", f"/jobs/{job['id']}", "tok-owner", json={"name": stored.name, "pipelineId": job["pipelineId"]})
-    assert world.store.get_job("acme", job["id"]).owner_sub == "u-owner"
+    assert run["status"] == "failed" and "no recorded owner" in run["error"] and "save its schedule again" in run["error"]
+    # saving a schedule (by anyone active) adopts it
+    world.call("PUT", f"/pipelines/{p['id']}/schedule", "tok-owner", json={"schedule": {"cron": "0 9 * * *"}})
+    assert world.store.get_pipeline("acme", p["id"]).owner_sub == "u-owner"
 
 
 def test_the_startup_guard_refuses_a_minting_credential_in_a_pod_that_runs_tasks(tmp_path):
@@ -237,5 +251,3 @@ def test_the_startup_guard_refuses_a_minting_credential_in_a_pod_that_runs_tasks
         Config(**base).validate()
     Config(**base, runner_url="http://runner:8080", runner_auth_token="s").validate()  # fine once tasks run elsewhere
     Config(**{**base, "workload_mint_dir": str(tmp_path / "absent")}).validate()  # fine when there is no credential at all
-
-

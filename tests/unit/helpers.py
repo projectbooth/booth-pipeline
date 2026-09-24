@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from booth_pipeline.model import PipelineSpec
+from booth_pipeline.model import PipelineSpec, TaskConfig
 
 
 def task_ref(key: str, task_id: str = "t1", version: int | str = 1, deps: list[str] | None = None, **kw: Any) -> dict[str, Any]:
@@ -31,6 +31,28 @@ def task_config(source: str = "def run(ctx):\n    return 1\n", **kw: Any) -> dic
     """A standalone Task's own versioned config (ADR 0071) — what ``TaskConfig`` holds,
     independent of any pipeline node that references it."""
     return {"code": {"type": "inline", "source": source}, **kw}
+
+
+def node(key: str, deps: list[str] | None = None, source: str = "def run(ctx):\n    return 1\n", code: dict[str, Any] | None = None, **cfg_kw: Any) -> dict[str, Any]:
+    """One test-only DAG node combining a ``TaskRef``'s wiring with its ``TaskConfig`` — the engine
+    layer (``engine.py``) never touches the store, so its own tests build both halves directly
+    rather than going through a real task-creation call. ``key`` doubles as the (fake) ``taskId``:
+    each node is its own one-off task, version 1, which is all the engine ever needs to resolve."""
+    return {"key": key, "dependsOn": deps or [], "code": code or {"type": "inline", "source": source}, **cfg_kw}
+
+
+def build(*nodes: dict[str, Any]) -> tuple[PipelineSpec, dict[str, TaskConfig]]:
+    """Turn ``node(...)`` dicts into a ``(PipelineSpec, {key: TaskConfig})`` pair — exactly the
+    shape ``engine.compile_job``/``engine.execute`` take post-ADR-0071, built without any store."""
+    refs, configs = [], {}
+    for n in nodes:
+        n = dict(n)
+        key = n.pop("key")
+        deps = n.pop("dependsOn", [])
+        code = n.pop("code")
+        refs.append(task_ref(key, task_id=key, version=1, deps=deps))
+        configs[key] = TaskConfig.model_validate({"code": code, **n})
+    return spec(*refs), configs
 
 
 class ListRecorder:
