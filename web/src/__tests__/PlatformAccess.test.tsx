@@ -2,15 +2,14 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelineApp } from "../PipelineApp";
-import { newTask } from "../graph";
-import { ETL, FakeBackend, getToken } from "./testUtils";
+import { FakeBackend, getToken } from "./testUtils";
 
 vi.mock("../components/DagCanvas", () => ({
-  DagCanvas: (props: { tasks: { key: string }[]; onSelect: (k: string | null) => void }) => (
+  DagCanvas: (props: { refs: { key: string }[]; onSelect: (k: string | null) => void }) => (
     <div data-testid="canvas">
-      {props.tasks.map((t) => (
-        <button key={t.key} type="button" data-testid={`node-${t.key}`} onClick={() => props.onSelect(t.key)}>
-          {t.key}
+      {props.refs.map((r) => (
+        <button key={r.key} type="button" data-testid={`node-${r.key}`} onClick={() => props.onSelect(r.key)}>
+          {r.key}
         </button>
       ))}
     </div>
@@ -27,108 +26,96 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function mount(path: string) {
+function mount(path: string, role: "owner" | "editor" | "viewer" = "editor") {
   window.history.replaceState({}, "", path);
-  return render(<PipelineApp workspace="acme" role="editor" theme="light" getAccessToken={getToken} />);
+  return render(<PipelineApp workspace="acme" role={role} theme="light" getAccessToken={getToken} />);
 }
 
-const job = (over: Record<string, unknown> = {}) => ({
-  id: "j1",
-  name: "nightly",
-  pipelineId: "p1",
-  pipelineVersion: null,
-  schedule: null,
-  retry: null,
-  allowConcurrentRuns: false,
-  roleCeiling: "editor" as const,
-  hasOwner: true,
-  createdBy: "e",
-  createdAt: "",
-  updatedAt: "",
-  nextRunAt: null,
-  ...over,
-});
-
 describe("platform access on a task", () => {
-  it("is off by default: a new task asks for no identity", () => {
-    expect(newTask([]).platformAccess).toBe(false);
-  });
-
-  it("is a per-task opt-in that explains itself and is saved in the spec", async () => {
+  it("is off by default and is a per-task opt-in that explains itself, saved as a new task version", async () => {
     const user = userEvent.setup();
-    be.addPipeline("etl", ETL());
-    mount("/pipeline/pipelines/p1");
+    const refs = [be.ref("extract"), be.ref("clean", ["extract"]), be.ref("load", ["clean"])];
+    const p = be.addPipeline("etl", refs);
+    mount(`/pipeline/pipelines/${p.id}`);
     await user.click(await screen.findByTestId("node-clean"));
-    const box = screen.getByRole("checkbox", { name: /Platform access/ });
+    const box = await screen.findByRole("checkbox", { name: /Platform access/ });
     expect(box).not.toBeChecked();
     expect(screen.getByText(/never asks for an identity, so it can't be blocked by one/)).toBeInTheDocument();
     expect(screen.getByText(/hasn't signed in to the platform recently/)).toBeInTheDocument();
     await user.click(box);
-    await user.click(screen.getByRole("button", { name: "Save as new version" }));
-    await waitFor(() => expect(be.called("POST", "/pipelines/p1/versions")).toHaveLength(1));
-    const sent = be.called("POST", "/pipelines/p1/versions")[0].body as { spec: { tasks: { key: string; platformAccess: boolean }[] } };
-    expect(Object.fromEntries(sent.spec.tasks.map((t) => [t.key, t.platformAccess]))).toEqual({ extract: false, clean: true, load: false });
+    await user.click(screen.getByRole("button", { name: "Save as new task version" }));
+    const cleanTaskId = refs[1].taskId;
+    await waitFor(() => expect(be.called("POST", `/tasks/${cleanTaskId}/versions`)).toHaveLength(1));
+    const sent = be.called("POST", `/tasks/${cleanTaskId}/versions`)[0].body as { config: { platformAccess: boolean } };
+    expect(sent.config.platformAccess).toBe(true);
+    // saving a task's config never touches the pipeline itself
+    expect(be.called("POST", `/pipelines/${p.id}/versions`)).toHaveLength(0);
   });
 
   it("only that task is changed, and a viewer cannot toggle it", async () => {
-    be.addPipeline("etl", ETL());
-    window.history.replaceState({}, "", "/pipeline/pipelines/p1");
-    render(<PipelineApp workspace="acme" role="viewer" theme="light" getAccessToken={getToken} />);
+    const refs = [be.ref("extract"), be.ref("clean", ["extract"]), be.ref("load", ["clean"])];
+    const p = be.addPipeline("etl", refs);
+    mount(`/pipeline/pipelines/${p.id}`, "viewer");
     await userEvent.setup().click(await screen.findByTestId("node-clean"));
-    expect(screen.getByRole("checkbox", { name: /Platform access/ })).toBeDisabled();
+    expect(await screen.findByRole("checkbox", { name: /Platform access/ })).toBeDisabled();
   });
 });
 
-describe("the job's role ceiling", () => {
+describe("a pipeline's role ceiling", () => {
+  async function openSchedule(user: ReturnType<typeof userEvent.setup>, path: string) {
+    mount(path);
+    await user.click(await screen.findByRole("button", { name: "Schedule" }));
+    return (await screen.findByLabelText(/Role ceiling for platform access/)) as HTMLSelectElement;
+  }
+
   it("defaults to editor, offers viewer, and there is no owner option", async () => {
     const user = userEvent.setup();
-    be.addPipeline("etl", ETL());
-    mount("/pipeline/jobs/new?pipeline=p1");
-    const sel = (await screen.findByLabelText(/Role ceiling for platform access/)) as HTMLSelectElement;
+    const p = be.addPipeline("etl", [be.ref("extract")]);
+    const sel = await openSchedule(user, `/pipeline/pipelines/${p.id}`);
     expect(sel).toHaveValue("editor");
     expect([...sel.options].map((o) => o.value)).toEqual(["editor", "viewer"]);
-    await user.type(screen.getByLabelText(/^Name/), "read-only");
     await user.selectOptions(sel, "viewer");
-    await user.click(screen.getByRole("button", { name: "Create job" }));
-    await waitFor(() => expect(be.called("POST", "/jobs")).toHaveLength(1));
-    expect((be.called("POST", "/jobs")[0].body as { roleCeiling: string }).roleCeiling).toBe("viewer");
+    await user.click(screen.getByRole("button", { name: "Save schedule" }));
+    await waitFor(() => expect(be.called("PUT", `/pipelines/${p.id}/schedule`)).toHaveLength(1));
+    expect((be.called("PUT", `/pipelines/${p.id}/schedule`)[0].body as { roleCeiling: string }).roleCeiling).toBe("viewer");
   });
 
-  it("an existing job shows its ceiling and saves a change to it", async () => {
+  it("an existing pipeline shows its ceiling and saves a change to it", async () => {
     const user = userEvent.setup();
-    be.addPipeline("etl", ETL());
-    be.jobs.push(job({ roleCeiling: "viewer" }) as never);
-    mount("/pipeline/jobs/j1");
-    const sel = await screen.findByLabelText(/Role ceiling for platform access/);
+    const p = be.addPipeline("etl", [be.ref("extract")]);
+    p.roleCeiling = "viewer";
+    const sel = await openSchedule(user, `/pipeline/pipelines/${p.id}`);
     expect(sel).toHaveValue("viewer");
     await user.selectOptions(sel, "editor");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(be.called("PUT", "/jobs/j1")).toHaveLength(1));
-    expect((be.called("PUT", "/jobs/j1")[0].body as { roleCeiling: string }).roleCeiling).toBe("editor");
+    await user.click(screen.getByRole("button", { name: "Save schedule" }));
+    await waitFor(() => expect(be.called("PUT", `/pipelines/${p.id}/schedule`)).toHaveLength(1));
+    expect((be.called("PUT", `/pipelines/${p.id}/schedule`)[0].body as { roleCeiling: string }).roleCeiling).toBe("editor");
   });
 
-  it("warns that a job from before workload identity has no owner, and says how to fix it", async () => {
-    be.addPipeline("etl", ETL());
-    be.jobs.push(job({ hasOwner: false }) as never);
-    mount("/pipeline/jobs/j1");
+  it("warns that a pipeline from before workload identity has no owner, once a schedule is set", async () => {
+    const user = userEvent.setup();
+    const p = be.addPipeline("etl", [be.ref("extract")]);
+    p.hasOwner = false;
+    mount(`/pipeline/pipelines/${p.id}`);
+    await user.click(await screen.findByRole("button", { name: "Schedule" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Run on a schedule" }));
     expect(await screen.findByText(/predates workload identity and has no owner/)).toBeInTheDocument();
-    expect(screen.getByText(/Saving it makes you its owner/)).toBeInTheDocument();
+    expect(screen.getByText(/Saving a schedule here makes you its owner/)).toBeInTheDocument();
   });
 
-  it("a job that has an owner shows no such warning", async () => {
-    be.addPipeline("etl", ETL());
-    be.jobs.push(job() as never);
-    mount("/pipeline/jobs/j1");
-    await screen.findByLabelText(/Role ceiling for platform access/);
+  it("a pipeline that has an owner shows no such warning", async () => {
+    const user = userEvent.setup();
+    const p = be.addPipeline("etl", [be.ref("extract")]);
+    p.hasOwner = true;
+    await openSchedule(user, `/pipeline/pipelines/${p.id}`);
     expect(screen.queryByText(/predates workload identity/)).not.toBeInTheDocument();
   });
 });
 
 describe("a run refused platform access", () => {
   it("shows the reason on the run and on the task, plainly", async () => {
-    be.addPipeline("etl", ETL());
-    be.jobs.push(job() as never);
-    const run = be.newRun("j1");
+    const p = be.addPipeline("etl", [be.ref("extract"), be.ref("clean", ["extract"]), be.ref("load", ["clean"])]);
+    const run = be.newRun(p.id);
     const reason = "not given platform access: the owner of this run hasn't signed in to the platform recently enough to authorize its access to storage and the catalog";
     run.status = "failed";
     run.finishedAt = "2026-09-21T12:00:01+00:00";

@@ -23,21 +23,21 @@ describe("request plumbing (ADR 0031/0033)", () => {
   });
 
   it("sets X-Workspace and the bearer token on every request", async () => {
-    await api.listJobs(ctx());
+    await api.listTasks(ctx());
     expect(lastCall().headers.get("X-Workspace")).toBe("acme");
     expect(lastCall().headers.get("Authorization")).toBe("Bearer tok-1");
   });
 
   it("omits Authorization entirely when there is no token — never the literal string 'null'", async () => {
-    await api.listJobs(ctx(null));
+    await api.listTasks(ctx(null));
     expect(lastCall().headers.has("Authorization")).toBe(false);
   });
 
   it("asks for the token freshly before every request (it can be silently renewed)", async () => {
     let n = 0;
     const c: ApiContext = { workspace: "acme", getAccessToken: () => `tok-${++n}` };
-    await api.listJobs(c);
-    await api.listJobs(c);
+    await api.listTasks(c);
+    await api.listTasks(c);
     expect(fetchMock.mock.calls.map(([, init]) => new Headers((init as RequestInit).headers).get("Authorization"))).toEqual(["Bearer tok-1", "Bearer tok-2"]);
   });
 
@@ -112,7 +112,7 @@ describe("endpoints", () => {
 
   it("204 resolves to undefined", async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
-    await expect(api.deleteJob(ctx(), "j")).resolves.toBeUndefined();
+    await expect(api.deleteTask(ctx(), "t")).resolves.toBeUndefined();
   });
 });
 

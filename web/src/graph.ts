@@ -1,11 +1,11 @@
 // Pure graph logic for the builder: converting between a PipelineSpec and what the canvas draws,
-// what a new node looks like, and which connections the canvas should allow. Kept free of React
-// and of @xyflow/react so it is trivially unit-testable — the canvas component is thin glue over
-// this. The SERVER remains the authority (src/booth_pipeline/model.py validate_structure): these
-// rules exist so the canvas never lets a user draw something that could not possibly be saved,
-// not to replace the server's check.
+// what a new reference looks like, and which connections the canvas should allow. Kept free of
+// React and of @xyflow/react so it is trivially unit-testable — the canvas component is thin glue
+// over this. The SERVER remains the authority (src/booth_pipeline/model.py validate_structure):
+// these rules exist so the canvas never lets a user draw something that could not possibly be
+// saved, not to replace the server's check.
 
-import type { Task, TaskKind, TaskStatus } from "./types";
+import type { TaskRef, TaskStatus } from "./types";
 
 export const NODE_WIDTH = 220;
 export const NODE_HEIGHT = 84;
@@ -16,7 +16,7 @@ export interface FlowNode {
   id: string;
   type: "task";
   position: { x: number; y: number };
-  data: { task: Task; status?: TaskStatus; error?: string };
+  data: { ref: TaskRef; taskName?: string; status?: TaskStatus; error?: string };
   selected?: boolean;
 }
 
@@ -31,17 +31,17 @@ export function edgeId(from: string, to: string): string {
 }
 
 export function toFlow(
-  tasks: Task[],
-  opts: { statuses?: Record<string, TaskStatus>; errors?: Record<string, string>; selected?: string | null } = {},
+  refs: TaskRef[],
+  opts: { taskNames?: Record<string, string>; statuses?: Record<string, TaskStatus>; errors?: Record<string, string>; selected?: string | null } = {},
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const nodes: FlowNode[] = tasks.map((t) => ({
-    id: t.key,
+  const nodes: FlowNode[] = refs.map((r) => ({
+    id: r.key,
     type: "task",
-    position: t.position,
-    selected: opts.selected === t.key,
-    data: { task: t, status: opts.statuses?.[t.key], error: opts.errors?.[t.key] },
+    position: r.position,
+    selected: opts.selected === r.key,
+    data: { ref: r, taskName: opts.taskNames?.[r.taskId], status: opts.statuses?.[r.key], error: opts.errors?.[r.key] },
   }));
-  const edges: FlowEdge[] = tasks.flatMap((t) => t.dependsOn.map((d) => ({ id: edgeId(d, t.key), source: d, target: t.key })));
+  const edges: FlowEdge[] = refs.flatMap((r) => r.dependsOn.map((d) => ({ id: edgeId(d, r.key), source: d, target: r.key })));
   return { nodes, edges };
 }
 
@@ -49,8 +49,8 @@ export function toFlow(
  *  points rightwards and independent branches stack vertically. Deterministic (input order breaks
  *  ties), and tolerant of a cyclic or dangling draft — it never throws, since it runs while the
  *  user is mid-edit. */
-export function autoLayout(tasks: Task[]): Task[] {
-  const byKey = new Map(tasks.map((t) => [t.key, t]));
+export function autoLayout(refs: TaskRef[]): TaskRef[] {
+  const byKey = new Map(refs.map((r) => [r.key, r]));
   const depth = new Map<string, number>();
   const visiting = new Set<string>();
   const depthOf = (key: string): number => {
@@ -58,18 +58,18 @@ export function autoLayout(tasks: Task[]): Task[] {
     if (known !== undefined) return known;
     if (visiting.has(key)) return 0; // a cycle: break it rather than recurse forever
     visiting.add(key);
-    const t = byKey.get(key);
-    const d = t ? Math.max(-1, ...t.dependsOn.filter((x) => byKey.has(x)).map(depthOf)) + 1 : 0;
+    const r = byKey.get(key);
+    const d = r ? Math.max(-1, ...r.dependsOn.filter((x) => byKey.has(x)).map(depthOf)) + 1 : 0;
     visiting.delete(key);
     depth.set(key, d);
     return d;
   };
   const rows = new Map<number, number>();
-  return tasks.map((t) => {
-    const col = depthOf(t.key);
+  return refs.map((r) => {
+    const col = depthOf(r.key);
     const row = rows.get(col) ?? 0;
     rows.set(col, row + 1);
-    return { ...t, position: { x: col * (NODE_WIDTH + COL_GAP), y: row * (NODE_HEIGHT + ROW_GAP) } };
+    return { ...r, position: { x: col * (NODE_WIDTH + COL_GAP), y: row * (NODE_HEIGHT + ROW_GAP) } };
   });
 }
 
@@ -81,66 +81,56 @@ export function uniqueKey(prefix: string, existing: Iterable<string>): string {
   }
 }
 
-/** A new task. `kind` is an optional hint (ADR 0062: purely decorative, never required) used only
- *  to pick a nicer starter key — omit it for the generic "+ Add task" action. Its code starts as
- *  an unresolved catalog reference (ADR 0063: the builder has no path to author new inline code
- *  any more), ready for the task panel's picker to fill in. */
-export function newTask(existing: Task[], kind: TaskKind | null = null, position?: { x: number; y: number }): Task {
-  const key = uniqueKey(kind ?? "task", existing.map((t) => t.key));
+/** A new DAG node referencing `taskId` at its latest version (ADR 0071: a reference, never an
+ *  embedded task definition — the task's own config lives and is edited separately). */
+export function newRef(taskId: string, existing: TaskRef[], position?: { x: number; y: number }): TaskRef {
   return {
-    key,
-    name: "",
-    kind,
-    code: { type: "catalog", entryId: "", version: "latest" },
-    runner: "base",
-    retry: null,
+    key: uniqueKey("task", existing.map((r) => r.key)),
+    taskId,
+    taskVersion: "latest",
     dependsOn: [],
-    params: {},
-    timeoutSeconds: 3600,
-    platformAccess: false, // opt-in: a task gets a platform token only if it asks (least privilege)
     position: position ?? nextFreePosition(existing),
   };
 }
 
-/** True when two or more tasks sit at the exact same position, so the canvas would draw them
+/** True when two or more references sit at the exact same position, so the canvas would draw them
  *  perfectly stacked — only the last one in the array is visible; the rest are in the DOM (not
  *  missing) but 100% hidden underneath it. Happens for a pipeline built directly against the API
- *  (e.g. a test fixture) whose tasks were never dragged in the builder: `position` defaults to
- *  `{x:0,y:0}` for every task server-side (`model.py`), so they all land in the same spot. */
-export function hasOverlappingPositions(tasks: Task[]): boolean {
+ *  (e.g. a test fixture) whose references were never dragged in the builder: `position` defaults
+ *  to `{x:0,y:0}` for every reference server-side (`model.py`), so they all land in the same spot. */
+export function hasOverlappingPositions(refs: TaskRef[]): boolean {
   const seen = new Set<string>();
-  for (const t of tasks) {
-    const key = `${t.position.x},${t.position.y}`;
+  for (const r of refs) {
+    const key = `${r.position.x},${r.position.y}`;
     if (seen.has(key)) return true;
     seen.add(key);
   }
   return false;
 }
 
-/** Somewhere sensible for a new node: the column matching its likely role, below what is there. */
-function nextFreePosition(existing: Task[]): { x: number; y: number } {
-  const maxY = existing.reduce((m, t) => Math.max(m, t.position.y), -(NODE_HEIGHT + ROW_GAP));
+/** Somewhere sensible for a new node: below whatever is already there. */
+function nextFreePosition(existing: TaskRef[]): { x: number; y: number } {
+  const maxY = existing.reduce((m, r) => Math.max(m, r.position.y), -(NODE_HEIGHT + ROW_GAP));
   return { x: 0, y: maxY + NODE_HEIGHT + ROW_GAP };
 }
 
 /** Whether the canvas should let a user draw an edge `from` -> `to` (from upstream to downstream).
- *  Mirrors the server's rules (ADR 0062: `kind` plays no part in this — it's a label, not a
- *  topology constraint): no self-loops, no duplicates, no cycles. Returns the reason when refused,
- *  so the UI can say why. */
-export function checkConnection(tasks: Task[], from: string, to: string): { ok: true } | { ok: false; reason: string } {
-  const src = tasks.find((t) => t.key === from);
-  const dst = tasks.find((t) => t.key === to);
+ *  Mirrors the server's rules: no self-loops, no duplicates, no cycles. Returns the reason when
+ *  refused, so the UI can say why. */
+export function checkConnection(refs: TaskRef[], from: string, to: string): { ok: true } | { ok: false; reason: string } {
+  const src = refs.find((r) => r.key === from);
+  const dst = refs.find((r) => r.key === to);
   if (!src || !dst) return { ok: false, reason: "unknown task" };
   if (from === to) return { ok: false, reason: "a task cannot depend on itself" };
   if (dst.dependsOn.includes(from)) return { ok: false, reason: "already connected" };
-  if (reaches(tasks, to, from)) return { ok: false, reason: "that would create a cycle" };
+  if (reaches(refs, to, from)) return { ok: false, reason: "that would create a cycle" };
   return { ok: true };
 }
 
 /** Is `target` downstream of (or equal to) `start`? */
-function reaches(tasks: Task[], start: string, target: string): boolean {
+function reaches(refs: TaskRef[], start: string, target: string): boolean {
   const down = new Map<string, string[]>();
-  for (const t of tasks) for (const d of t.dependsOn) down.set(d, [...(down.get(d) ?? []), t.key]);
+  for (const r of refs) for (const d of r.dependsOn) down.set(d, [...(down.get(d) ?? []), r.key]);
   const seen = new Set<string>();
   const stack = [start];
   while (stack.length) {
@@ -153,36 +143,33 @@ function reaches(tasks: Task[], start: string, target: string): boolean {
   return false;
 }
 
-export function connect(tasks: Task[], from: string, to: string): Task[] {
-  return tasks.map((t) => (t.key === to ? { ...t, dependsOn: [...t.dependsOn, from] } : t));
+export function connect(refs: TaskRef[], from: string, to: string): TaskRef[] {
+  return refs.map((r) => (r.key === to ? { ...r, dependsOn: [...r.dependsOn, from] } : r));
 }
 
-export function disconnect(tasks: Task[], from: string, to: string): Task[] {
-  return tasks.map((t) => (t.key === to ? { ...t, dependsOn: t.dependsOn.filter((d) => d !== from) } : t));
+export function disconnect(refs: TaskRef[], from: string, to: string): TaskRef[] {
+  return refs.map((r) => (r.key === to ? { ...r, dependsOn: r.dependsOn.filter((d) => d !== from) } : r));
 }
 
-export function removeTask(tasks: Task[], key: string): Task[] {
-  return tasks.filter((t) => t.key !== key).map((t) => ({ ...t, dependsOn: t.dependsOn.filter((d) => d !== key) }));
+export function removeRef(refs: TaskRef[], key: string): TaskRef[] {
+  return refs.filter((r) => r.key !== key).map((r) => ({ ...r, dependsOn: r.dependsOn.filter((d) => d !== key) }));
 }
 
-/** Rename a task's key everywhere it is referenced. Keys are identifiers user code reads
+/** Rename a reference's key everywhere it is referenced. Keys are identifiers user code reads
  *  (ctx.inputs["<key>"]), so a rename is a real change to behaviour — the panel warns about it. */
-export function renameKey(tasks: Task[], from: string, to: string): Task[] {
-  return tasks.map((t) => {
-    const dependsOn = t.dependsOn.map((d) => (d === from ? to : d));
-    return t.key === from ? { ...t, key: to, dependsOn } : { ...t, dependsOn };
+export function renameKey(refs: TaskRef[], from: string, to: string): TaskRef[] {
+  return refs.map((r) => {
+    const dependsOn = r.dependsOn.map((d) => (d === from ? to : d));
+    return r.key === from ? { ...r, key: to, dependsOn } : { ...r, dependsOn };
   });
 }
 
 /** A server error's `field` path, parsed relative to the task it names:
  *  "tasks[2].dependsOn" -> {index: 2, rest: "dependsOn"}
- *  "spec.tasks[0].code.catalog.entryId" -> {index: 0, rest: "code.catalog.entryId"}
+ *  "spec.tasks[0].taskId" -> {index: 0, rest: "taskId"}
  *  "tasks[1]" or "tasks" -> {index: 1, rest: null} / null (no field within the task, or no task at all)
  *
- *  `rest` keeps everything after "tasks[N]." verbatim, including a discriminated union's own tag
- *  when the backend's path includes one (a catalog/storage code error's path really is
- *  "code.catalog.entryId", not "code.entryId" — the same shape JobViews.tsx's schedule fields
- *  already match on, e.g. "schedule.interval.seconds") — so a caller matches against the same
+ *  `rest` keeps everything after "tasks[N]." verbatim, so a caller matches against the same
  *  literal strings the backend actually sends, not a guessed shorter form. */
 export function parseTaskField(field: string | null | undefined): { index: number; rest: string | null } | null {
   const m = /(?:^|\.)tasks\[(\d+)\]\.?(.*)$/.exec(field ?? "");

@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Job, Page, Pipeline, PipelineVersion, RunDetail, Task } from "../types";
+import type { Page, Pipeline, PipelineVersion, RunDetail, TaskConfig, TaskEntity, TaskRef, TaskVersion } from "../types";
 
 // A tiny in-memory stand-in for the pipeline backend + the catalog behind booth-core's gateway,
 // installed as the global `fetch`. Views are exercised against it exactly as against the real
@@ -12,32 +12,26 @@ export interface Call {
   headers: Headers;
 }
 
-export function task(key: string, kind: Task["kind"] = "transform", dependsOn: string[] = [], over: Partial<Task> = {}): Task {
+const now = "2026-09-21T12:00:00+00:00";
+
+function defaultConfig(over: Partial<TaskConfig> = {}): TaskConfig {
   return {
-    key,
-    name: "",
-    kind,
     code: { type: "inline", source: "def run(ctx):\n    return 1\n" },
     runner: "base",
     retry: null,
-    dependsOn,
     params: {},
     timeoutSeconds: 3600,
     platformAccess: false,
-    position: { x: 0, y: 0 },
     ...over,
   };
 }
-
-export const ETL = (): Task[] => [task("extract", "source"), task("clean", "transform", ["extract"]), task("load", "sink", ["clean"])];
-
-const now = "2026-09-21T12:00:00+00:00";
 
 export class FakeBackend {
   calls: Call[] = [];
   pipelines: Pipeline[] = [];
   versions = new Map<string, PipelineVersion[]>();
-  jobs: Job[] = [];
+  tasks: TaskEntity[] = [];
+  taskVersions = new Map<string, TaskVersion[]>();
   runs = new Map<string, RunDetail>();
   logs = new Map<string, { seq: number; taskKey: string | null; stream: string; message: string; attempt?: number }[]>();
   /** Errors to return for the next call whose "METHOD path" matches. */
@@ -52,19 +46,56 @@ export class FakeBackend {
     { id: "spark", displayName: "Spark", available: false, reason: "booth-spark does not yet define a compute-submission interface" },
   ];
 
-  addPipeline(name: string, tasks?: Task[]): Pipeline {
-    const p: Pipeline = { id: `p${this.pipelines.length + 1}`, name, description: "", createdBy: "eddie", createdAt: now, updatedAt: now, latestVersion: 0 };
+  addPipeline(name: string, refs?: TaskRef[]): Pipeline {
+    const p: Pipeline = {
+      id: `p${this.pipelines.length + 1}`,
+      name,
+      description: "",
+      createdBy: "eddie",
+      createdAt: now,
+      updatedAt: now,
+      latestVersion: 0,
+      schedule: null,
+      allowConcurrentRuns: false,
+      roleCeiling: "editor",
+      hasOwner: false,
+      nextRunAt: null,
+      pinnedVersion: null,
+    };
     this.pipelines.push(p);
     this.versions.set(p.id, []);
-    if (tasks) this.saveVersion(p.id, tasks);
+    if (refs) this.saveVersion(p.id, refs);
     return p;
   }
 
-  saveVersion(id: string, tasks: Task[], notes = ""): PipelineVersion {
+  saveVersion(id: string, tasks: TaskRef[], notes = ""): PipelineVersion {
     const list = this.versions.get(id)!;
     const v: PipelineVersion = { pipelineId: id, version: list.length + 1, notes, createdBy: "eddie", createdAt: now, taskCount: tasks.length, spec: { tasks } };
     list.push(v);
     this.pipelines.find((p) => p.id === id)!.latestVersion = v.version;
+    return v;
+  }
+
+  addTask(name: string, config?: TaskConfig, description = ""): TaskEntity {
+    const t: TaskEntity = { id: `t${this.tasks.length + 1}`, name, description, createdBy: "eddie", createdAt: now, updatedAt: now, latestVersion: 0 };
+    this.tasks.push(t);
+    this.taskVersions.set(t.id, []);
+    if (config) this.saveTaskVersion(t.id, config);
+    return t;
+  }
+
+  /** A DAG-node reference to a freshly created standalone task (ADR 0071) — the test-only
+   *  equivalent of the old embedded `task()` builder, split across a real task and its ref. */
+  ref(key: string, dependsOn: string[] = [], configOver: Partial<TaskConfig> = {}): TaskRef {
+    const t = this.addTask(key, defaultConfig(configOver));
+    return { key, taskId: t.id, taskVersion: 1, dependsOn, position: { x: 0, y: 0 } };
+  }
+
+  saveTaskVersion(id: string, config: TaskConfig, notes = ""): TaskVersion {
+    const list = this.taskVersions.get(id)!;
+    const v: TaskVersion = { taskId: id, version: list.length + 1, notes, createdBy: "eddie", createdAt: now, config };
+    list.push(v);
+    this.tasks.find((t) => t.id === id)!.latestVersion = v.version;
     return v;
   }
 
@@ -129,6 +160,15 @@ export class FakeBackend {
       const p = this.pipelines.find((x) => x.id === m![1]);
       return p ? this.json(p) : this.json({ error: "pipeline not found" }, 404);
     }
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/schedule$/)) && method === "PUT") {
+      const p = this.pipelines.find((x) => x.id === m![1])!;
+      Object.assign(p, body, { hasOwner: true, nextRunAt: body.schedule?.enabled ? now : null });
+      return this.json(p);
+    }
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/run$/)) && method === "POST") {
+      const r = this.newRun(m[1]);
+      return this.json(r, 202);
+    }
     if ((m = path.match(/^\/pipelines\/([^/]+)\/versions$/))) {
       if (method === "GET") return this.json(this.page((this.versions.get(m[1]) ?? []).slice().reverse().map((v) => ({ ...v, spec: undefined }))));
       if (method === "POST") return this.json(this.saveVersion(m[1], body.spec.tasks, body.notes), 201);
@@ -138,21 +178,30 @@ export class FakeBackend {
       const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
       return v ? this.json(v) : this.json({ error: "pipeline version not found" }, 404);
     }
-    if (method === "GET" && path === "/jobs") return this.json(this.page(this.jobs));
-    if (method === "POST" && path === "/jobs") {
-      const j: Job = { id: `j${this.jobs.length + 1}`, createdBy: "eddie", createdAt: now, updatedAt: now, nextRunAt: null, ...body };
-      this.jobs.push(j);
-      return this.json(j, 201);
+    if (method === "GET" && path === "/tasks") return this.json(this.page(this.tasks));
+    if (method === "POST" && path === "/tasks") {
+      const t = this.addTask(body.name, body.config, body.description ?? "");
+      const version = t.latestVersion > 0 ? this.taskVersions.get(t.id)!.at(-1) : null;
+      return this.json({ ...t, version }, 201);
     }
-    if ((m = path.match(/^\/jobs\/([^/]+)$/))) {
-      const j = this.jobs.find((x) => x.id === m![1]);
-      if (!j) return this.json({ error: "job not found" }, 404);
-      if (method === "GET") return this.json(j);
-      if (method === "PUT") return this.json(Object.assign(j, body));
+    if ((m = path.match(/^\/tasks\/([^/]+)$/))) {
+      const t = this.tasks.find((x) => x.id === m![1]);
+      if (!t) return this.json({ error: "task not found" }, 404);
+      if (method === "GET") return this.json(t);
+      if (method === "PUT") return this.json(Object.assign(t, { name: body.name, description: body.description }));
+      if (method === "DELETE") {
+        this.tasks = this.tasks.filter((x) => x.id !== t.id);
+        return this.json(undefined, 204);
+      }
     }
-    if ((m = path.match(/^\/jobs\/([^/]+)\/run$/)) && method === "POST") {
-      const r = this.newRun(m[1]);
-      return this.json(r, 202);
+    if ((m = path.match(/^\/tasks\/([^/]+)\/versions$/))) {
+      if (method === "GET") return this.json(this.page((this.taskVersions.get(m[1]) ?? []).slice().reverse().map((v) => ({ ...v, config: undefined }))));
+      if (method === "POST") return this.json(this.saveTaskVersion(m[1], body.config, body.notes), 201);
+    }
+    if ((m = path.match(/^\/tasks\/([^/]+)\/versions\/(.+)$/)) && method === "GET") {
+      const list = this.taskVersions.get(m[1]) ?? [];
+      const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
+      return v ? this.json(v) : this.json({ error: "task version not found" }, 404);
     }
     if (method === "GET" && path === "/runs") return this.json(this.page([...this.runs.values()]));
     if ((m = path.match(/^\/runs\/([^/]+)$/)) && method === "GET") {
@@ -175,13 +224,12 @@ export class FakeBackend {
     return this.json({ error: `fake backend: unhandled ${method} ${path}` }, 501);
   }
 
-  newRun(jobId: string): RunDetail {
-    const job = this.jobs.find((j) => j.id === jobId)!;
+  newRun(pipelineId: string): RunDetail {
+    const pipeline = this.pipelines.find((p) => p.id === pipelineId)!;
     const r: RunDetail = {
       id: `run-${this.runs.size + 1}-abcdef`,
-      jobId,
-      pipelineId: job.pipelineId,
-      pipelineVersion: job.pipelineVersion ?? this.pipelines.find((p) => p.id === job.pipelineId)!.latestVersion,
+      pipelineId,
+      pipelineVersion: pipeline.pinnedVersion ?? pipeline.latestVersion,
       status: "running",
       trigger: "manual",
       triggeredBy: "eddie",

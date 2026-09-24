@@ -5,10 +5,10 @@ import { Link } from "./components/ui";
 import type { ViewCtx } from "./context";
 import { DEFAULT_BASE_PATH, defaultNavigate, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
 import type { WorkspaceRole } from "./types";
-import { JobDetail, JobList, JobNew } from "./views/JobViews";
 import { PipelineEditor } from "./views/PipelineEditor";
 import { PipelineList } from "./views/PipelineList";
 import { RunView } from "./views/RunView";
+import { TaskDetail, TaskList } from "./views/TaskViews";
 
 /**
  * Props contract agreed with booth-design and pinned into contracts/ui-integration.md by ADR 0031
@@ -39,7 +39,7 @@ export interface PipelineAppProps {
 
 const SECTIONS: { section: Section; label: string; route: Route }[] = [
   { section: "pipelines", label: "Pipelines", route: { name: "pipelines" } },
-  { section: "jobs", label: "Jobs", route: { name: "jobs" } },
+  { section: "tasks", label: "Tasks", route: { name: "tasks" } },
 ];
 
 /**
@@ -99,12 +99,10 @@ function renderRoute(route: Route, v: ViewCtx) {
       return <PipelineList v={v} />;
     case "pipeline":
       return <PipelineEditor v={v} pipelineId={route.id} version={route.version} />;
-    case "jobs":
-      return <JobList v={v} />;
-    case "job-new":
-      return <JobNew v={v} pipelineId={route.pipelineId} />;
-    case "job":
-      return <JobDetail v={v} jobId={route.id} />;
+    case "tasks":
+      return <TaskList v={v} />;
+    case "task":
+      return <TaskDetail v={v} taskId={route.id} />;
     case "run":
       return <RunView v={v} runId={route.id} />;
   }

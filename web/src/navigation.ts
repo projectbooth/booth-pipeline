@@ -12,20 +12,19 @@ export const DEFAULT_BASE_PATH = "/pipeline";
 export type Route =
   | { name: "pipelines" }
   | { name: "pipeline"; id: string; version?: number }
-  | { name: "jobs" }
-  | { name: "job-new"; pipelineId?: string }
-  | { name: "job"; id: string }
+  | { name: "tasks" }
+  | { name: "task"; id: string }
   | { name: "run"; id: string };
 
-export type Section = "pipelines" | "jobs";
+export type Section = "pipelines" | "tasks";
 
 export function sectionOf(route: Route): Section {
-  return route.name.startsWith("job") || route.name === "run" ? "jobs" : "pipelines";
+  return route.name === "task" || route.name === "tasks" ? "tasks" : "pipelines";
 }
 
 /** Parses the address bar into a Route. Anything unrecognised is the pipeline list: a stale
  *  bookmark should land somewhere useful, not on an error. */
-export function parseRoute(pathname: string, search: string, basePath: string = DEFAULT_BASE_PATH): Route {
+export function parseRoute(pathname: string, _search: string, basePath: string = DEFAULT_BASE_PATH): Route {
   const rel = pathname === basePath ? "" : pathname.startsWith(basePath + "/") ? pathname.slice(basePath.length + 1) : "";
   const parts = rel.split("/").filter(Boolean).map(decodeURIComponent);
   const [area, second, third, fourth] = parts;
@@ -35,10 +34,9 @@ export function parseRoute(pathname: string, search: string, basePath: string = 
       if (second && third === "v" && fourth && /^\d+$/.test(fourth) && parts.length === 4) return { name: "pipeline", id: second, version: Number(fourth) };
       if (second && parts.length === 2) return { name: "pipeline", id: second };
       break;
-    case "jobs":
-      if (second === "new" && parts.length === 2) return { name: "job-new", pipelineId: new URLSearchParams(search).get("pipeline") ?? undefined };
-      if (second && parts.length === 2) return { name: "job", id: second };
-      if (parts.length === 1) return { name: "jobs" };
+    case "tasks":
+      if (second && parts.length === 2) return { name: "task", id: second };
+      if (parts.length === 1) return { name: "tasks" };
       break;
     case "runs":
       if (second && parts.length === 2) return { name: "run", id: second };
@@ -56,12 +54,10 @@ export function routePath(route: Route, basePath: string = DEFAULT_BASE_PATH): s
       return `${basePath}/pipelines`;
     case "pipeline":
       return route.version ? `${basePath}/pipelines/${e(route.id)}/v/${route.version}` : `${basePath}/pipelines/${e(route.id)}`;
-    case "jobs":
-      return `${basePath}/jobs`;
-    case "job-new":
-      return route.pipelineId ? `${basePath}/jobs/new?pipeline=${e(route.pipelineId)}` : `${basePath}/jobs/new`;
-    case "job":
-      return `${basePath}/jobs/${e(route.id)}`;
+    case "tasks":
+      return `${basePath}/tasks`;
+    case "task":
+      return `${basePath}/tasks/${e(route.id)}`;
     case "run":
       return `${basePath}/runs/${e(route.id)}`;
   }

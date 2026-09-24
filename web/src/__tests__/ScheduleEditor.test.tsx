@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ScheduleEditor, type TriggerShape } from "../components/ScheduleEditor";
 
 // A thin controlled wrapper so each test can read back what the editor last emitted, the same way
-// JobForm consumes it.
+// PipelineScheduleForm consumes it.
 function Harness({ initial }: { initial: TriggerShape }) {
   const [value, setValue] = useState<TriggerShape>(initial);
   return (

@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import { Banner, Button, EmptyState, Field, Link, Loaded, PageHeader, inputClass, linkClass, tdClass, thClass } from "../components/ui";
 import type { ViewCtx } from "../context";
-import { formatTime } from "../format";
+import { describeSchedule, formatTime } from "../format";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
 
 export function PipelineList({ v }: { v: ViewCtx }) {
@@ -23,11 +23,21 @@ export function PipelineList({ v }: { v: ViewCtx }) {
     }
   }
 
+  async function runNow(id: string) {
+    setActionError(null);
+    try {
+      const run = await api.runPipeline(v.api, id);
+      v.go({ name: "run", id: run.id });
+    } catch (err) {
+      setActionError(errorMessage(err));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Pipelines"
-        subtitle="A Pipeline is the DAG definition — the graph of tasks you draw here. It doesn't run on its own: turn it into a Job (in the Jobs tab) to schedule or trigger it."
+        subtitle="A Pipeline is a DAG of task references, drawn here. It owns its own schedule directly — open a pipeline and switch to its Schedule tab to run it on demand or on a timer."
         actions={v.canWrite && !creating ? <Button variant="primary" onClick={() => setCreating(true)}>New pipeline</Button> : undefined}
       />
       {creating && (
@@ -52,8 +62,9 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                   <tr>
                     <th className={thClass}>Name</th>
                     <th className={thClass}>Version</th>
+                    <th className={thClass}>Schedule</th>
+                    <th className={thClass}>Next run</th>
                     <th className={thClass}>Updated</th>
-                    <th className={thClass}>By</th>
                     <th className={thClass}>
                       <span className="sr-only">Actions</span>
                     </th>
@@ -69,13 +80,21 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                         {p.description && <p className="text-xs text-slate-500 dark:text-slate-400">{p.description}</p>}
                       </td>
                       <td className={tdClass}>{p.latestVersion === 0 ? "not saved yet" : `v${p.latestVersion}`}</td>
+                      <td className={tdClass}>{describeSchedule(p.schedule)}</td>
+                      <td className={tdClass}>{formatTime(p.nextRunAt)}</td>
                       <td className={tdClass}>{formatTime(p.updatedAt)}</td>
-                      <td className={tdClass}>{p.createdBy}</td>
                       <td className={`${tdClass} text-right`}>
                         {v.canWrite && (
-                          <Button variant="danger" onClick={() => remove(p.id, p.name)} aria-label={`Delete ${p.name}`}>
-                            Delete
-                          </Button>
+                          <div className="flex justify-end gap-2">
+                            {p.latestVersion > 0 && (
+                              <Button onClick={() => runNow(p.id)} aria-label={`Run ${p.name} now`}>
+                                Run now
+                              </Button>
+                            )}
+                            <Button variant="danger" onClick={() => remove(p.id, p.name)} aria-label={`Delete ${p.name}`}>
+                              Delete
+                            </Button>
+                          </div>
                         )}
                       </td>
                     </tr>

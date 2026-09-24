@@ -1,11 +1,10 @@
 import type {
   CatalogCodeEntry,
   CatalogVersionSummary,
-  Job,
-  JobInput,
   LogPage,
   Page,
   Pipeline,
+  PipelineScheduleUpdate,
   PipelineSpec,
   PipelineVersion,
   PipelineVersionSummary,
@@ -14,6 +13,10 @@ import type {
   RunnerInfo,
   StorageBackendSummary,
   StorageObjectSummary,
+  TaskConfig,
+  TaskEntity,
+  TaskVersion,
+  TaskVersionSummary,
   ValidateResult,
 } from "../types";
 
@@ -109,15 +112,24 @@ export const api = {
   saveVersion: (c: ApiContext, id: string, spec: PipelineSpec, notes = "") =>
     request<PipelineVersion>(c, PIPELINE, `/pipelines/${e(id)}/versions`, json("POST", { spec, notes })),
   validate: (c: ApiContext, spec: PipelineSpec) => request<ValidateResult>(c, PIPELINE, "/pipelines/validate", json("POST", { spec })),
+  updateSchedule: (c: ApiContext, id: string, body: PipelineScheduleUpdate) =>
+    request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/schedule`, json("PUT", body)),
+  runPipeline: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/pipelines/${e(id)}/run`, { method: "POST" }),
 
-  listJobs: (c: ApiContext, pipelineId?: string) => request<Page<Job>>(c, PIPELINE, `/jobs${qs({ pipelineId, limit: 200 })}`),
-  getJob: (c: ApiContext, id: string) => request<Job>(c, PIPELINE, `/jobs/${e(id)}`),
-  createJob: (c: ApiContext, body: JobInput) => request<Job>(c, PIPELINE, "/jobs", json("POST", body)),
-  updateJob: (c: ApiContext, id: string, body: JobInput) => request<Job>(c, PIPELINE, `/jobs/${e(id)}`, json("PUT", body)),
-  deleteJob: (c: ApiContext, id: string) => request<void>(c, PIPELINE, `/jobs/${e(id)}`, { method: "DELETE" }),
-  runJob: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/jobs/${e(id)}/run`, { method: "POST" }),
+  listTasks: (c: ApiContext, q = "") => request<Page<TaskEntity>>(c, PIPELINE, `/tasks${qs({ q, limit: 200 })}`),
+  getTask: (c: ApiContext, id: string) => request<TaskEntity>(c, PIPELINE, `/tasks/${e(id)}`),
+  createTask: (c: ApiContext, name: string, description: string, config?: TaskConfig) =>
+    request<TaskEntity & { version: TaskVersion | null }>(c, PIPELINE, "/tasks", json("POST", { name, description, config })),
+  updateTask: (c: ApiContext, id: string, name: string, description: string) =>
+    request<TaskEntity>(c, PIPELINE, `/tasks/${e(id)}`, json("PUT", { name, description })),
+  deleteTask: (c: ApiContext, id: string) => request<void>(c, PIPELINE, `/tasks/${e(id)}`, { method: "DELETE" }),
+  listTaskVersions: (c: ApiContext, id: string) => request<Page<TaskVersionSummary>>(c, PIPELINE, `/tasks/${e(id)}/versions?limit=200`),
+  getTaskVersion: (c: ApiContext, id: string, version: number | "latest") =>
+    request<TaskVersion>(c, PIPELINE, `/tasks/${e(id)}/versions/${version}`),
+  saveTaskVersion: (c: ApiContext, id: string, config: TaskConfig, notes = "") =>
+    request<TaskVersion>(c, PIPELINE, `/tasks/${e(id)}/versions`, json("POST", { config, notes })),
 
-  listRuns: (c: ApiContext, jobId?: string) => request<Page<Run>>(c, PIPELINE, `/runs${qs({ jobId, limit: 50 })}`),
+  listRuns: (c: ApiContext, pipelineId?: string) => request<Page<Run>>(c, PIPELINE, `/runs${qs({ pipelineId, limit: 50 })}`),
   getRun: (c: ApiContext, id: string) => request<RunDetail>(c, PIPELINE, `/runs/${e(id)}`),
   cancelRun: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/runs/${e(id)}/cancel`, { method: "POST" }),
   runLogs: (c: ApiContext, id: string, opts: { task?: string; after?: number } = {}) =>

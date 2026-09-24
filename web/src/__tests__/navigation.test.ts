@@ -6,10 +6,8 @@ describe("parseRoute / routePath", () => {
     { name: "pipelines" },
     { name: "pipeline", id: "p1" },
     { name: "pipeline", id: "p1", version: 3 },
-    { name: "jobs" },
-    { name: "job-new" },
-    { name: "job-new", pipelineId: "p1" },
-    { name: "job", id: "j1" },
+    { name: "tasks" },
+    { name: "task", id: "t1" },
     { name: "run", id: "r1" },
   ];
 
@@ -25,9 +23,9 @@ describe("parseRoute / routePath", () => {
   });
 
   it("encodes and decodes ids safely", () => {
-    const p = routePath({ name: "job", id: "a/b c" });
-    expect(p).toBe("/pipeline/jobs/a%2Fb%20c");
-    expect(parseRoute(p, "")).toEqual({ name: "job", id: "a/b c" });
+    const p = routePath({ name: "task", id: "a/b c" });
+    expect(p).toBe("/pipeline/tasks/a%2Fb%20c");
+    expect(parseRoute(p, "")).toEqual({ name: "task", id: "a/b c" });
   });
 
   it.each(["/", "/pipeline", "/pipeline/nonsense", "/pipeline/pipelines/p1/v/notanumber", "/pipeline/pipelines/p1/extra/parts", "/other/pipelines"])(
@@ -39,12 +37,11 @@ describe("parseRoute / routePath", () => {
 });
 
 describe("sectionOf", () => {
-  it("groups jobs and runs under Jobs, everything else under Pipelines", () => {
+  it("groups tasks under Tasks, everything else (including runs) under Pipelines", () => {
     expect(sectionOf({ name: "pipelines" })).toBe("pipelines");
     expect(sectionOf({ name: "pipeline", id: "x" })).toBe("pipelines");
-    expect(sectionOf({ name: "jobs" })).toBe("jobs");
-    expect(sectionOf({ name: "job", id: "x" })).toBe("jobs");
-    expect(sectionOf({ name: "job-new" })).toBe("jobs");
-    expect(sectionOf({ name: "run", id: "x" })).toBe("jobs");
+    expect(sectionOf({ name: "run", id: "x" })).toBe("pipelines");
+    expect(sectionOf({ name: "tasks" })).toBe("tasks");
+    expect(sectionOf({ name: "task", id: "x" })).toBe("tasks");
   });
 });

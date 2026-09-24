@@ -6,7 +6,7 @@ import { Banner, Button, Link, Loaded, PageHeader, StatusChip, linkClass, tdClas
 import type { ViewCtx } from "../context";
 import { formatDuration, formatTime } from "../format";
 import { errorMessage, useInterval, useLoad, type LoadState } from "../hooks";
-import type { PipelineVersion, RunDetail, TaskStatus } from "../types";
+import type { PipelineVersion, RunDetail, TaskEntity, TaskStatus } from "../types";
 
 // One Run: the DAG coloured by each Task's live status, a per-task table, and logs for the whole
 // run or a single Task. While the run is active everything refreshes; once it ends it settles.
@@ -15,10 +15,15 @@ const ACTIVE = ["queued", "running"];
 
 export function RunView({ v, runId }: { v: ViewCtx; runId: string }) {
   const load = useLoad(() => api.getRun(v.api, runId), [v.api, runId]);
-  // The run's pipeline version supplies the graph the statuses are drawn on. Immutable, so fetched once.
+  // The run's pipeline version supplies the graph the statuses are drawn on. Immutable, so fetched
+  // once, along with each referenced task's name (bulk, not per-node — the run view is read-only
+  // and never needs a task's own config, only what to label its node).
   const spec = useLoad(async () => {
     const run = await api.getRun(v.api, runId);
-    return api.getVersion(v.api, run.pipelineId, run.pipelineVersion);
+    const version = await api.getVersion(v.api, run.pipelineId, run.pipelineVersion);
+    const tasks = await Promise.all(version.spec.tasks.map((t) => api.getTask(v.api, t.taskId).catch((): TaskEntity | null => null)));
+    const taskNames = Object.fromEntries(tasks.filter((t): t is TaskEntity => t !== null).map((t) => [t.id, t.name]));
+    return { version, taskNames };
   }, [v.api, runId]);
   const [selected, setSelected] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -54,8 +59,8 @@ export function RunView({ v, runId }: { v: ViewCtx; runId: string }) {
                 <StatusChip status={r.status} />
                 {v.canWrite && ACTIVE.includes(r.status) && !r.cancelRequested && <Button onClick={cancel}>Cancel run</Button>}
                 {r.cancelRequested && ACTIVE.includes(r.status) && <span className="text-xs text-slate-500">Cancelling…</span>}
-                <Link href={v.href({ name: "job", id: r.jobId })} onNavigate={v.goPath} className={linkClass}>
-                  Back to job
+                <Link href={v.href({ name: "pipeline", id: r.pipelineId })} onNavigate={v.goPath} className={linkClass}>
+                  Back to pipeline
                 </Link>
               </>
             }
@@ -125,7 +130,7 @@ function Graph({
 }: {
   v: ViewCtx;
   run: RunDetail;
-  spec: { state: LoadState<PipelineVersion> };
+  spec: { state: LoadState<{ version: PipelineVersion; taskNames: Record<string, string> }> };
   selected: string | null;
   setSelected: (k: string | null) => void;
 }) {
@@ -134,7 +139,14 @@ function Graph({
   if (spec.state.status === "error") return <Banner tone="warn">The pipeline graph could not be loaded ({spec.state.error}); the task table below is still accurate.</Banner>;
   return (
     <div className="h-80 overflow-hidden rounded-md border border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
-      <DagCanvas tasks={spec.state.data.spec.tasks} selected={selected} onSelect={setSelected} statuses={statuses} theme={v.theme} />
+      <DagCanvas
+        refs={spec.state.data.version.spec.tasks}
+        taskNames={spec.state.data.taskNames}
+        selected={selected}
+        onSelect={setSelected}
+        statuses={statuses}
+        theme={v.theme}
+      />
     </div>
   );
 }

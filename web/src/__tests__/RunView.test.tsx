@@ -3,14 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelineApp } from "../PipelineApp";
 import type { RunDetail, WorkspaceRole } from "../types";
-import { ETL, FakeBackend, getToken } from "./testUtils";
+import { FakeBackend, getToken } from "./testUtils";
 
 vi.mock("../components/DagCanvas", () => ({
-  DagCanvas: (props: { tasks: { key: string }[]; statuses?: Record<string, string>; onSelect: (k: string | null) => void }) => (
+  DagCanvas: (props: { refs: { key: string }[]; statuses?: Record<string, string>; onSelect: (k: string | null) => void }) => (
     <div data-testid="canvas">
-      {props.tasks.map((t) => (
-        <button key={t.key} type="button" data-testid={`node-${t.key}`} onClick={() => props.onSelect(t.key)}>
-          {t.key} [{props.statuses?.[t.key] ?? "-"}]
+      {props.refs.map((r) => (
+        <button key={r.key} type="button" data-testid={`node-${r.key}`} onClick={() => props.onSelect(r.key)}>
+          {r.key} [{props.statuses?.[r.key] ?? "-"}]
         </button>
       ))}
     </div>
@@ -34,9 +34,8 @@ const tr = (taskKey: string, status: RunDetail["tasks"][number]["status"], extra
 beforeEach(() => {
   be = new FakeBackend();
   be.install();
-  be.addPipeline("etl", ETL());
-  be.jobs.push({ id: "j1", name: "nightly", pipelineId: "p1", pipelineVersion: null, schedule: null, retry: null, allowConcurrentRuns: false, roleCeiling: "editor", hasOwner: true, createdBy: "e", createdAt: at, updatedAt: at, nextRunAt: null });
-  run = be.newRun("j1");
+  const p = be.addPipeline("etl", [be.ref("extract"), be.ref("clean", ["extract"]), be.ref("load", ["clean"])]);
+  run = be.newRun(p.id);
   run.tasks = [tr("extract", "succeeded"), tr("clean", "running"), tr("load", "pending")];
   be.logs.set(run.id, [
     { seq: 1, taskKey: null, stream: "system", message: "run started" },
