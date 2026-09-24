@@ -44,6 +44,10 @@ class PipelineScheduleUpdate(Wire):
     # The most a run's platform token (for tasks that opt in) may be granted; capped again by the
     # owner's live role. Never "owner".
     role_ceiling: Literal["viewer", "editor"] = "editor"
+    # None: every run tracks the latest saved version (the default). An explicit version pins every
+    # scheduled/manual run to it, mirroring the old Job's `pipeline_version` pin (ADR 0071's second
+    # "Open question, ruled 2026-09-24").
+    pinned_version: int | None = Field(None, ge=1)
 
 
 class TaskCreate(Wire):

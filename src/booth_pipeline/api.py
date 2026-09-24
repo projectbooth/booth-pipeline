@@ -71,6 +71,7 @@ def pipeline_json(p: Pipeline) -> dict[str, Any]:
         "roleCeiling": p.role_ceiling,
         "hasOwner": bool(p.owner_sub),
         "nextRunAt": _iso(p.next_run_at),
+        "pinnedVersion": p.pinned_version,
     }
 
 
@@ -222,7 +223,7 @@ def delete_pipeline(request: Request, pipeline_id: str, ident: Identity = Depend
 
 @router.put("/pipelines/{pipeline_id}/schedule")
 def update_schedule(request: Request, pipeline_id: str, body: PipelineScheduleUpdate, ident: Identity = Depends(require_write)):
-    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling))
+    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling, body.pinned_version))
 
 
 @router.post("/pipelines/{pipeline_id}/run", status_code=202)

@@ -132,7 +132,7 @@ def test_deleting_a_pipeline_removes_its_runs_task_runs_and_logs(store):
 
 def test_update_schedule_persists_schedule_and_ownership_fields(store):
     p = store.create_pipeline(WS, "etl", "", "a")
-    assert p.schedule is None and p.owner_sub == "" and p.role_ceiling == "editor"
+    assert p.schedule is None and p.owner_sub == "" and p.role_ceiling == "editor" and p.pinned_version is None
     saved = scheduled(store, p, schedule=Schedule(cron="0 9 * * *", timezone="America/Toronto"), owner_sub="sub-1", role_ceiling="viewer", allow_concurrent_runs=True)
     assert saved.schedule.cron == "0 9 * * *" and saved.schedule.timezone == "America/Toronto"
     assert saved.owner_sub == "sub-1" and saved.role_ceiling == "viewer" and saved.allow_concurrent_runs is True
@@ -143,6 +143,19 @@ def test_update_schedule_persists_schedule_and_ownership_fields(store):
     assert scheduled(store, other) is None
     ghost = Pipeline(str(uuid4()), WS, "x", "", "a", T0, T0)
     assert scheduled(store, ghost) is None
+
+
+def test_pinned_version_is_persisted_and_can_be_cleared(store):
+    """ADR 0071's second "Open question, ruled 2026-09-24": a pipeline can pin every run to a
+    specific saved version, independent of what is saved on top of it later."""
+    p = store.create_pipeline(WS, "etl", "", "a")
+    store.add_version(WS, p.id, linear(), "", "a")
+    store.add_version(WS, p.id, linear(), "", "a")
+    pinned = scheduled(store, p, pinned_version=1)
+    assert pinned.pinned_version == 1
+    assert store.get_pipeline(WS, p.id).pinned_version == 1
+    cleared = scheduled(store, p, pinned_version=None)
+    assert cleared.pinned_version is None
 
 
 def test_claim_due_pipelines_claims_each_fire_once_and_advances_the_schedule(store):

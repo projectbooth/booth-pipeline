@@ -170,13 +170,18 @@ class PipelineService:
         return PipelineSpec(tasks=out)
 
     # ---- pipeline scheduling (folded from the retired Job entity, ADR 0071) ----
-    def update_schedule(self, ident: Identity, pipeline_id: str, schedule: Trigger | None, allow_concurrent_runs: bool, role_ceiling: str) -> Pipeline:
+    def update_schedule(
+        self, ident: Identity, pipeline_id: str, schedule: Trigger | None, allow_concurrent_runs: bool, role_ceiling: str, pinned_version: int | None
+    ) -> Pipeline:
         p = self.get_pipeline(ident, pipeline_id)
         if schedule is not None and schedule.enabled and p.latest_version == 0:
             raise ModelError("the pipeline has no saved version to run — save it in the builder first", "schedule")
+        if pinned_version is not None and self.store.get_version(ident.workspace, pipeline_id, pinned_version) is None:
+            raise ModelError(f"version {pinned_version} does not exist", "pinnedVersion")
         p.schedule = schedule
         p.allow_concurrent_runs = allow_concurrent_runs
         p.role_ceiling = role_ceiling
+        p.pinned_version = pinned_version
         p.next_run_at = _next(schedule, datetime.now(UTC))
         # The owner stays whoever first gave the pipeline a schedule. One saved before workload
         # identity existed has none, and the first person to save a schedule onto it takes it over.
@@ -289,11 +294,10 @@ class PipelineService:
     def start_run(self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str) -> Run:
         """The single implementation of "start a run": used by Run-now and by the scheduler.
 
-        Always runs the pipeline's latest saved version: ADR 0071 gives a pipeline exactly one
-        schedule, owned by the pipeline itself, not a separate versioned Job instance that could
-        pin an older version independently — draw a new pipeline to keep an old version scheduled.
+        Runs the pipeline's `pinned_version` if it has one, otherwise the latest saved version —
+        mirrors the old Job's `pipeline_version` pin, now living on Pipeline directly (ADR 0071).
         """
-        version = self.store.get_version(workspace, pipeline.id, None)
+        version = self.store.get_version(workspace, pipeline.id, pipeline.pinned_version)
         if version is None:
             raise ModelError("the pipeline has no saved version to run", "pipeline")
         run = Run(

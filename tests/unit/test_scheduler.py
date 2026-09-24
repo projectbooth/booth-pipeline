@@ -113,7 +113,7 @@ def test_an_interval_below_the_minimum_is_rejected(env):
     assert r.status_code == 422 and r.json()["field"] == "schedule.interval.seconds"
 
 
-def test_a_scheduled_run_always_uses_the_latest_saved_version(env):
+def test_a_scheduled_run_follows_latest_by_default(env):
     p, _ = scheduled_pipeline(env)
     make_due(env, p["id"], T0)
     (rid,) = env.app.state.scheduler.tick(T0)

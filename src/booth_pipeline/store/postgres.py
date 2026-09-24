@@ -98,6 +98,7 @@ class PostgresStore:
             next_run_at=r["next_run_at"],
             owner_sub=r["owner_sub"],
             role_ceiling=r["role_ceiling"],
+            pinned_version=r["pinned_version"],
         )  # fmt: skip
 
     @staticmethod
@@ -181,7 +182,7 @@ class PostgresStore:
     def update_schedule(self, pipeline: Pipeline):
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, role_ceiling=%s, updated_at=%s"
+                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, role_ceiling=%s, pinned_version=%s, updated_at=%s"
                 " WHERE workspace=%s AND id=%s",
                 (
                     Jsonb(pipeline.schedule.model_dump(by_alias=True)) if pipeline.schedule else None,
@@ -189,6 +190,7 @@ class PostgresStore:
                     pipeline.next_run_at,
                     pipeline.owner_sub,
                     pipeline.role_ceiling,
+                    pipeline.pinned_version,
                     datetime.now(UTC),
                     pipeline.workspace,
                     pipeline.id,

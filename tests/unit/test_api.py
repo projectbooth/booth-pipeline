@@ -554,9 +554,7 @@ def test_a_running_run_can_be_canceled(env):
     assert env.call("POST", f"/runs/{run_id}/cancel").json()["status"] == "canceled"
 
 
-def test_a_scheduled_run_always_runs_the_pipelines_latest_saved_version(env):
-    """ADR 0071: there is no more separate Job instance that could pin an older version
-    independently of the pipeline itself — a run (scheduled or manual) always uses the latest."""
+def test_a_run_follows_latest_by_default(env):
     p = new_pipeline(env, spec={"tasks": [task("a", source="print('v1')\n")]})
     run1 = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run1["pipelineVersion"] == 1
@@ -565,3 +563,26 @@ def test_a_scheduled_run_always_runs_the_pipelines_latest_saved_version(env):
     assert run2["pipelineVersion"] == 2
     msgs = [ln["message"] for ln in env.call("GET", f"/runs/{run2['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"]
     assert msgs == ["v2"]
+
+
+def test_a_pinned_version_stays_pinned_even_as_newer_versions_are_saved(env):
+    """ADR 0071's second "Open question, ruled 2026-09-24": mirrors the old Job's
+    pipeline_version pin, now living on Pipeline directly."""
+    p = new_pipeline(env, spec={"tasks": [task("a", source="print('v1')\n")]})
+    sched = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"pinnedVersion": 1})
+    assert sched.status_code == 200 and sched.json()["pinnedVersion"] == 1
+    env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": {"tasks": [task("a", source="print('v2')\n")]}})
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run["pipelineVersion"] == 1  # still pinned, despite v2 now being latest
+    msgs = [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"]
+    assert msgs == ["v1"]
+    # unpinning goes back to following latest
+    env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"pinnedVersion": None})
+    run2 = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run2["pipelineVersion"] == 2
+
+
+def test_pinning_a_version_that_does_not_exist_is_422(env):
+    p = new_pipeline(env)
+    r = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"pinnedVersion": 9})
+    assert r.status_code == 422 and r.json()["field"] == "pinnedVersion"

@@ -114,6 +114,7 @@ class MemoryStore:
             p.next_run_at = pipeline.next_run_at
             p.owner_sub = pipeline.owner_sub
             p.role_ceiling = pipeline.role_ceiling
+            p.pinned_version = pipeline.pinned_version
             p.updated_at = _now()
             return self._with_latest(p)
 

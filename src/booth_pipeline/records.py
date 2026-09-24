@@ -53,6 +53,10 @@ class Pipeline:
     owner_sub: str = ""
     # The most a run's token may be granted, whatever the owner holds (least privilege).
     role_ceiling: str = "editor"
+    # None: every run (scheduled or manual) uses the latest saved version. Set: every run targets
+    # exactly this version, regardless of what is saved on top of it later — mirrors the old Job's
+    # `pipeline_version` pin (ADR 0071 "Open question, ruled 2026-09-24", second one).
+    pinned_version: int | None = None
 
 
 @dataclass

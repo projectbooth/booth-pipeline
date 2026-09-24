@@ -47,8 +47,10 @@ class Store(Protocol):
         ...
 
     def update_schedule(self, pipeline: Pipeline) -> Pipeline | None:
-        """Persist `pipeline`'s schedule/allowConcurrentRuns/nextRunAt/owner/roleCeiling fields —
-        everything folded on from the retired Job entity. None if the pipeline is absent."""
+        """Persist `pipeline`'s schedule/allowConcurrentRuns/nextRunAt/owner/roleCeiling/
+        pinnedVersion fields — everything folded on from the retired Job entity, plus
+        pinnedVersion (ADR 0071's second "Open question, ruled 2026-09-24"). None if the pipeline
+        is absent."""
         ...
 
     def add_version(self, workspace: str, pipeline_id: str, spec: PipelineSpec, notes: str, by: str) -> PipelineVersion | None:
