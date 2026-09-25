@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "booth-pipeline"
 version = "0.1.0"
-description = "Project Booth's pipeline module: a graphical DAG builder (Pipeline -> Task -> Job) backed by Dagster, with a base runner that needs no other module."
+description = "Project Booth's pipeline module: a graphical DAG builder for Tasks (standalone, independently versioned units of code) referenced by Pipelines, backed by Dagster, with a base runner that needs no other module."
 requires-python = ">=3.11,<3.15"
 dependencies = [
   "dagster>=1.12,<2",
@@ -18,10 +18,11 @@ dependencies = [
   "pydantic>=2.8",
   "tzdata",            # zoneinfo has no IANA database on Windows or slim images without it
   "duckdb>=1.0",       # the base runner's SQL language strategy (ADR 0064); embedded, no server to reach
+  "pyyaml>=6",         # a pipeline version's YAML export (ADR 0071 phase 4)
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "pyyaml>=6"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 booth-pipeline = "booth_pipeline.__main__:main"

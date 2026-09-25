@@ -149,6 +149,16 @@ def page_json(items: list[Any], total: int, fn) -> dict[str, Any]:
     return {"items": [fn(i) for i in items], "total": total}
 
 
+def _version_or_404(version: str, what: str) -> int | None:
+    """``version`` is a number, or ``latest`` (None)."""
+    if version == "latest":
+        return None
+    try:
+        return int(version)
+    except ValueError:
+        raise HTTPException(404, f"{what} not found") from None
+
+
 Limit = Query(50, ge=1, le=MAX_PAGE)
 Offset = Query(0, ge=0)
 
@@ -245,15 +255,16 @@ def save_version(request: Request, pipeline_id: str, body: VersionCreate, ident:
 
 @router.get("/pipelines/{pipeline_id}/versions/{version}")
 def get_version(request: Request, pipeline_id: str, version: str, ident: Identity = Depends(require_read)):
-    """``version`` is a number, or ``latest``."""
-    if version == "latest":
-        n = None
-    else:
-        try:
-            n = int(version)
-        except ValueError:
-            raise HTTPException(404, "pipeline version not found") from None
-    return version_json(svc(request).get_version(ident, pipeline_id, n))
+    return version_json(svc(request).get_version(ident, pipeline_id, _version_or_404(version, "pipeline version")))
+
+
+@router.get("/pipelines/{pipeline_id}/versions/{version}/export")
+def export_version(request: Request, pipeline_id: str, version: str, ident: Identity = Depends(require_read)):
+    """The version as a YAML document — export-only (ADR 0071 phase 4), but a complete, faithful
+    structure (every referenced task resolved to its own config), shaped as the intended future
+    import format too."""
+    text = svc(request).export_version(ident, pipeline_id, _version_or_404(version, "pipeline version"))
+    return Response(content=text, media_type="application/yaml")
 
 
 # ---- tasks (ADR 0071: standalone, versioned, reusable — mirrors booth-catalog's own code versioning) ---
@@ -300,15 +311,7 @@ def save_task_version(request: Request, task_id: str, body: TaskVersionCreate, i
 
 @router.get("/tasks/{task_id}/versions/{version}")
 def get_task_version(request: Request, task_id: str, version: str, ident: Identity = Depends(require_read)):
-    """``version`` is a number, or ``latest``."""
-    if version == "latest":
-        n = None
-    else:
-        try:
-            n = int(version)
-        except ValueError:
-            raise HTTPException(404, "task version not found") from None
-    return task_version_json(svc(request).get_task_version(ident, task_id, n))
+    return task_version_json(svc(request).get_task_version(ident, task_id, _version_or_404(version, "task version")))
 
 
 # ---- runs ---------------------------------------------------------------------------------

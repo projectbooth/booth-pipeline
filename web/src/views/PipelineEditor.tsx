@@ -116,6 +116,8 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
   const [live, setLive] = useState<ValidateResult | null>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const dirty = JSON.stringify(refs) !== baseline;
   const readOnly = !v.canWrite;
@@ -195,6 +197,25 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
     }
   }
 
+  async function exportYaml() {
+    if (!current) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const text = await api.exportVersion(v.api, pipeline.id, current.version);
+      const url = URL.createObjectURL(new Blob([text], { type: "application/yaml" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${pipeline.name}-v${current.version}.yaml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(errorMessage(err));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const selectedRef = refs.find((r) => r.key === selected) ?? null;
   // The bit of `problem` that is about the SELECTED node specifically, with the field path kept
   // relative to it (the "tasks[N]." prefix stripped) — ReferencePanel maps `field` onto its own
@@ -240,6 +261,9 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
             </option>
           ))}
         </select>
+        <Button onClick={exportYaml} disabled={!current || exporting}>
+          {exporting ? "Exporting…" : "Export as YAML"}
+        </Button>
         {!readOnly && (
           <>
             <input
@@ -258,6 +282,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       </div>
 
       {addError && <Banner tone="error">{addError}</Banner>}
+      {exportError && <Banner tone="error">{exportError}</Banner>}
       {viewingOld && (
         <Banner tone="info">
           You are viewing version {current?.version} of {latest}. Saving creates version {latest + 1} from this one; nothing pinned to an older version changes.

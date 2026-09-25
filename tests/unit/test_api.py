@@ -133,6 +133,44 @@ def test_pipeline_versions_lifecycle(env):
     assert env.call("GET", f"/pipelines/{p['id']}").json()["latestVersion"] == 2
 
 
+# ---- YAML export (ADR 0071 phase 4) ----------------------------------------------------------
+
+
+def test_export_is_a_faithful_yaml_snapshot_of_one_version(env):
+    import yaml
+
+    p = new_pipeline(env)
+    scheduled(env, p["id"], cron="0 9 * * *")
+    r = env.call("GET", f"/pipelines/{p['id']}/versions/1/export")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/yaml")
+    doc = yaml.safe_load(r.text)
+    assert doc["apiVersion"] == "booth-pipeline/v1" and doc["kind"] == "Pipeline"
+    assert doc["metadata"]["id"] == p["id"] and doc["metadata"]["version"] == 1
+    assert doc["spec"]["schedule"] == {"type": "cron", "cron": "0 9 * * *", "timezone": "UTC", "enabled": True}
+    assert [t["key"] for t in doc["spec"]["tasks"]] == ["extract", "clean", "load"]
+    clean = next(t for t in doc["spec"]["tasks"] if t["key"] == "clean")
+    assert clean["dependsOn"] == ["extract"]
+    assert clean["task"]["name"] == "clean" and clean["task"]["version"] == 1
+    assert clean["task"]["config"]["code"]["type"] == "inline"  # the task's real, resolved config — not just a reference
+
+
+def test_export_an_old_version_is_immutable_even_after_a_newer_save(env):
+    import yaml
+
+    p = new_pipeline(env)
+    spec2 = etl_spec()
+    spec2["tasks"].append(task("audit", ["clean"]))
+    env.call("POST", f"/pipelines/{p['id']}/versions", json={"spec": spec2})
+    doc1 = yaml.safe_load(env.call("GET", f"/pipelines/{p['id']}/versions/1/export").text)
+    doc2 = yaml.safe_load(env.call("GET", f"/pipelines/{p['id']}/versions/latest/export").text)
+    assert len(doc1["spec"]["tasks"]) == 3 and len(doc2["spec"]["tasks"]) == 4
+
+
+def test_export_of_an_unknown_version_is_404(env):
+    p = new_pipeline(env)
+    assert env.call("GET", f"/pipelines/{p['id']}/versions/9/export").status_code == 404
+
+
 def test_empty_pipeline_can_be_created_then_drawn(env):
     r = env.call("POST", "/pipelines", json={"name": "blank"})
     p = r.json()

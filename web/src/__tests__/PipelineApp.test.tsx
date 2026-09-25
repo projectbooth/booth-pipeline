@@ -136,6 +136,30 @@ describe("pipeline list", () => {
 });
 
 describe("builder", () => {
+  it("exports the current version as a downloadable YAML file", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("etl", etl());
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-extract");
+
+    const createObjectURL = vi.fn(() => "blob:mock-url");
+    const revokeObjectURL = vi.fn();
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    await user.click(screen.getByRole("button", { name: "Export as YAML" }));
+
+    await waitFor(() => expect(be.called("GET", "/pipelines/p1/versions/1/export")).toHaveLength(1));
+    expect(createObjectURL).toHaveBeenCalled();
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("application/yaml");
+    expect(clickSpy).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+
+    clickSpy.mockRestore();
+  });
+
   it("loads the latest version onto the canvas", async () => {
     be.addPipeline("etl", etl());
     mount("editor", "/pipeline/pipelines/p1");

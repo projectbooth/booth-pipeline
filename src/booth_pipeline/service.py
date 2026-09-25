@@ -15,6 +15,7 @@ from uuid import uuid4
 from .auth import Identity
 from .catalog_client import CatalogClient, CatalogDenied, CatalogNotFound, CatalogUnavailable
 from .engine import compile_job
+from .export import export_pipeline_version
 from .model import (
     BASE_RUNNER,
     CatalogCode,
@@ -128,6 +129,14 @@ class PipelineService:
     def list_versions(self, ident: Identity, pipeline_id: str, limit: int, offset: int) -> Page:
         self.get_pipeline(ident, pipeline_id)
         return self.store.list_versions(ident.workspace, pipeline_id, limit, offset)
+
+    def export_version(self, ident: Identity, pipeline_id: str, version: int | None) -> str:
+        """A pipeline version as YAML text (ADR 0071 phase 4) — export-only, but a faithful,
+        complete structure (every referenced task resolved to its own name/description/version/
+        config), shaped as the intended future import format too."""
+        pipeline = self.get_pipeline(ident, pipeline_id)
+        v = self.get_version(ident, pipeline_id, version)
+        return export_pipeline_version(self.store, ident.workspace, pipeline, v)
 
     def validate_draft(self, ident: Identity, spec: PipelineSpec) -> None:
         """The canvas's live check: DAG structure, that every referenced task version exists, and

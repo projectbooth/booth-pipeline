@@ -83,6 +83,13 @@ async function request<T>(ctx: ApiContext, base: string, path: string, init?: Re
   return (await res.json()) as T;
 }
 
+// Like `request`, but for an endpoint whose body is not JSON (the YAML export).
+async function requestText(ctx: ApiContext, base: string, path: string, init?: RequestInit): Promise<string> {
+  const res = await fetch(base + path, { ...init, headers: buildHeaders(ctx, init) });
+  if (!res.ok) throw await toApiError(res);
+  return res.text();
+}
+
 function json(method: string, body?: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) };
 }
@@ -112,6 +119,8 @@ export const api = {
   saveVersion: (c: ApiContext, id: string, spec: PipelineSpec, notes = "") =>
     request<PipelineVersion>(c, PIPELINE, `/pipelines/${e(id)}/versions`, json("POST", { spec, notes })),
   validate: (c: ApiContext, spec: PipelineSpec) => request<ValidateResult>(c, PIPELINE, "/pipelines/validate", json("POST", { spec })),
+  exportVersion: (c: ApiContext, id: string, version: number | "latest") =>
+    requestText(c, PIPELINE, `/pipelines/${e(id)}/versions/${version}/export`),
   updateSchedule: (c: ApiContext, id: string, body: PipelineScheduleUpdate) =>
     request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/schedule`, json("PUT", body)),
   runPipeline: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/pipelines/${e(id)}/run`, { method: "POST" }),

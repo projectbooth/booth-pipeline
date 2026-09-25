@@ -173,6 +173,13 @@ export class FakeBackend {
       if (method === "GET") return this.json(this.page((this.versions.get(m[1]) ?? []).slice().reverse().map((v) => ({ ...v, spec: undefined }))));
       if (method === "POST") return this.json(this.saveVersion(m[1], body.spec.tasks, body.notes), 201);
     }
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/versions\/(.+)\/export$/)) && method === "GET") {
+      const list = this.versions.get(m[1]) ?? [];
+      const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
+      if (!v) return this.json({ error: "pipeline version not found" }, 404);
+      const yamlText = `apiVersion: booth-pipeline/v1\nkind: Pipeline\nmetadata:\n  id: ${m[1]}\n  version: ${v.version}\n`;
+      return new Response(yamlText, { status: 200, headers: { "Content-Type": "application/yaml" } });
+    }
     if ((m = path.match(/^\/pipelines\/([^/]+)\/versions\/(.+)$/)) && method === "GET") {
       const list = this.versions.get(m[1]) ?? [];
       const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
