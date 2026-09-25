@@ -4,6 +4,7 @@ import type {
   LogPage,
   Page,
   Pipeline,
+  PipelineDraft,
   PipelineScheduleUpdate,
   PipelineSpec,
   PipelineVersion,
@@ -14,6 +15,7 @@ import type {
   StorageBackendSummary,
   StorageObjectSummary,
   TaskConfig,
+  TaskDraft,
   TaskEntity,
   TaskVersion,
   TaskVersionSummary,
@@ -118,6 +120,9 @@ export const api = {
     request<PipelineVersion>(c, PIPELINE, `/pipelines/${e(id)}/versions/${version}`),
   saveVersion: (c: ApiContext, id: string, spec: PipelineSpec, notes = "") =>
     request<PipelineVersion>(c, PIPELINE, `/pipelines/${e(id)}/versions`, json("POST", { spec, notes })),
+  getPipelineDraft: (c: ApiContext, id: string) => request<PipelineDraft>(c, PIPELINE, `/pipelines/${e(id)}/draft`),
+  savePipelineDraft: (c: ApiContext, id: string, spec: PipelineSpec) =>
+    request<PipelineDraft>(c, PIPELINE, `/pipelines/${e(id)}/draft`, json("PUT", { spec })),
   validate: (c: ApiContext, spec: PipelineSpec) => request<ValidateResult>(c, PIPELINE, "/pipelines/validate", json("POST", { spec })),
   exportVersion: (c: ApiContext, id: string, version: number | "latest") =>
     requestText(c, PIPELINE, `/pipelines/${e(id)}/versions/${version}/export`),
@@ -137,6 +142,8 @@ export const api = {
     request<TaskVersion>(c, PIPELINE, `/tasks/${e(id)}/versions/${version}`),
   saveTaskVersion: (c: ApiContext, id: string, config: TaskConfig, notes = "") =>
     request<TaskVersion>(c, PIPELINE, `/tasks/${e(id)}/versions`, json("POST", { config, notes })),
+  getTaskDraft: (c: ApiContext, id: string) => request<TaskDraft>(c, PIPELINE, `/tasks/${e(id)}/draft`),
+  saveTaskDraft: (c: ApiContext, id: string, config: TaskConfig) => request<TaskDraft>(c, PIPELINE, `/tasks/${e(id)}/draft`, json("PUT", { config })),
 
   listRuns: (c: ApiContext, pipelineId?: string) => request<Page<Run>>(c, PIPELINE, `/runs${qs({ pipelineId, limit: 50 })}`),
   getRun: (c: ApiContext, id: string) => request<RunDetail>(c, PIPELINE, `/runs/${e(id)}`),

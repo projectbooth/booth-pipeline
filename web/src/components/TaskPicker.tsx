@@ -13,10 +13,11 @@ export interface TaskPickerProps {
 
 /** Search existing tasks, or create a new one — shared between the canvas's "+ Add task" (picking
  *  fresh) and `ReferencePanel`'s "Change" (repointing an existing node). Unconfigured tasks (no
- *  saved version yet) are hidden by default: referencing one reproduces "has no saved version yet"
- *  the moment the pipeline is saved, and most of the time an unconfigured task sitting in the
- *  library is a throwaway orphan left behind by an earlier pick, not a deliberate choice. A toggle
- *  reveals them for the real case — picking a task someone else is still mid-configuring. */
+ *  saved version AND no draft — ADR 0073) are hidden by default: referencing one reproduces "has
+ *  no saved version or draft yet" the moment the pipeline is saved, and most of the time an
+ *  unconfigured task sitting in the library is a throwaway orphan left behind by an earlier pick,
+ *  not a deliberate choice. A toggle reveals them for the real case — picking a task someone else
+ *  is still mid-configuring. */
 export function TaskPicker({ api: apiCtx, onPick, onCancel, autoFocus = true }: TaskPickerProps) {
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query, 250);
@@ -49,8 +50,10 @@ export function TaskPicker({ api: apiCtx, onPick, onCancel, autoFocus = true }: 
     }
   }
 
-  const configured = matches.filter((t) => t.latestVersion > 0);
-  const unconfigured = matches.filter((t) => t.latestVersion === 0);
+  // "Configured" means real, runnable code exists (ADR 0073): either a saved version, or a draft
+  // that was never promoted to one — a task can be fully usable via its draft alone.
+  const configured = matches.filter((t) => t.latestVersion > 0 || t.hasDraft);
+  const unconfigured = matches.filter((t) => t.latestVersion === 0 && !t.hasDraft);
   const visible = showUnconfigured ? matches : configured;
 
   return (
@@ -72,7 +75,7 @@ export function TaskPicker({ api: apiCtx, onPick, onCancel, autoFocus = true }: 
           >
             <span className="inline-flex items-center gap-1.5">
               <span>{t.name}</span>
-              {t.latestVersion === 0 && (
+              {t.latestVersion === 0 && !t.hasDraft && (
                 <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-800 dark:bg-amber-950 dark:text-amber-300">
                   no saved version yet
                 </span>

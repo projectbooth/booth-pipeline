@@ -56,14 +56,17 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<{ message: string; field: string | null } | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<"version" | "draft" | null>(null);
 
   // A different node was selected, or its reference was repointed at a different task/version:
   // (re)load the task entity, its versions, and the config for whichever version this node names.
+  // "Always follow latest" loads the task's current DRAFT when it has one (ADR 0073) — always at
+  // least as fresh as its latest saved version, since both kinds of save write it — falling back
+  // to the latest version, then a blank default for a task that has never been configured at all.
   useEffect(() => {
     setKeyDraft(taskRef.key);
     setSaveError(null);
-    setSaved(false);
+    setSaved(null);
     let alive = true;
     setTask(null);
     setVersions([]);
@@ -76,6 +79,13 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
         setTask(t);
         setVersions(vs.items);
         onTaskNameKnown(t.id, t.name);
+        if (taskRef.taskVersion === "latest" && t.hasDraft) {
+          const d = await api.getTaskDraft(apiCtx, taskRef.taskId);
+          if (!alive) return;
+          setConfig(d.config);
+          setBaseline(JSON.stringify(d.config));
+          return;
+        }
         const resolved = taskRef.taskVersion === "latest" ? t.latestVersion : taskRef.taskVersion;
         if (resolved > 0) {
           const v = await api.getTaskVersion(apiCtx, taskRef.taskId, resolved);
@@ -112,15 +122,32 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
     if (!config) return;
     setSaving(true);
     setSaveError(null);
-    setSaved(false);
+    setSaved(null);
     try {
       const v = await api.saveTaskVersion(apiCtx, taskRef.taskId, config);
       setBaseline(JSON.stringify(config));
       setVersions((vs) => [{ taskId: v.taskId, version: v.version, notes: v.notes, createdBy: v.createdBy, createdAt: v.createdAt }, ...vs]);
-      setTask((t) => (t ? { ...t, latestVersion: v.version } : t));
+      setTask((t) => (t ? { ...t, latestVersion: v.version, hasDraft: true } : t));
       // The edit just made takes effect on this node immediately, whatever it was pinned to before.
       onChangeRef({ ...taskRef, taskVersion: v.version });
-      setSaved(true);
+      setSaved("version");
+    } catch (err) {
+      setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? (err.field ?? null) : null });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveTaskDraft() {
+    if (!config) return;
+    setSaving(true);
+    setSaveError(null);
+    setSaved(null);
+    try {
+      const d = await api.saveTaskDraft(apiCtx, taskRef.taskId, config);
+      setBaseline(JSON.stringify(d.config));
+      setTask((t) => (t ? { ...t, hasDraft: true } : t));
+      setSaved("draft");
     } catch (err) {
       setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? (err.field ?? null) : null });
     } finally {
@@ -238,7 +265,7 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
       {config && (
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Task configuration {task && task.latestVersion === 0 ? "(new)" : ""}</h3>
+            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Task configuration {task && task.latestVersion === 0 && !task.hasDraft ? "(new)" : ""}</h3>
             {configDirty && <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Unsaved</span>}
           </div>
           <TaskConfigForm
@@ -249,9 +276,15 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
             error={saveError ?? undefined}
             onChange={setConfig}
           />
-          {saved && <Banner tone="success">Saved as a new task version.</Banner>}
+          {saved === "draft" && (
+            <Banner tone="success">Saved. "Always follow latest" references pick this up immediately; nothing pinned to a specific version is affected.</Banner>
+          )}
+          {saved === "version" && <Banner tone="success">Saved as a new task version.</Banner>}
           {!readOnly && (
-            <div>
+            <div className="flex gap-2">
+              <Button onClick={saveTaskDraft} disabled={saving || !configDirty}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
               <Button variant="primary" onClick={saveTaskVersion} disabled={saving || !configDirty}>
                 {saving ? "Saving…" : "Save as new task version"}
               </Button>

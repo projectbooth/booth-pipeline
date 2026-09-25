@@ -64,6 +64,19 @@ export interface TaskEntity {
   createdAt: string;
   updatedAt: string;
   latestVersion: number;
+  /** Whether a mutable draft (ADR 0073) has ever been saved onto this task — separate from
+   *  latestVersion: a task can be "configured" via its draft alone, never promoted to a version. */
+  hasDraft: boolean;
+  draftUpdatedAt: string | null;
+}
+
+/** A task's mutable, unversioned "current" state (ADR 0073) — what plain "Save" writes to,
+ *  distinct from the immutable version list. "Always follow latest" resolves here first. */
+export interface TaskDraft {
+  taskId: string;
+  config: TaskConfig;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface TaskVersionSummary {
@@ -136,6 +149,18 @@ export interface Pipeline {
   /** null: every run tracks the latest saved version. Set: every run targets exactly this
    *  version, regardless of what is saved on top of it later. */
   pinnedVersion: number | null;
+  /** Whether a mutable draft (ADR 0073) has ever been saved onto this pipeline. */
+  hasDraft: boolean;
+  draftUpdatedAt: string | null;
+}
+
+/** A pipeline's mutable, unversioned "current" state (ADR 0073) — the direct counterpart of
+ *  TaskDraft. What plain "Save" writes to, distinct from the immutable version list. */
+export interface PipelineDraft {
+  pipelineId: string;
+  spec: PipelineSpec;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface PipelineVersionSummary {

@@ -280,6 +280,20 @@ describe("builder", () => {
     expect(screen.getByText("no saved version yet")).toBeInTheDocument();
   });
 
+  it("the add-task picker treats a task with only a draft (never promoted to a version) as configured", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("etl", etl());
+    const t = be.addTask("draft-only-task"); // no version...
+    be.saveTaskDraft(t.id, { code: { type: "inline", source: "x=1" }, runner: "base", retry: null, params: {}, timeoutSeconds: 3600, platformAccess: false }); // ...but a real draft
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-extract");
+    const [addButton] = await screen.findAllByRole("button", { name: /\+ Add task/ });
+    await user.click(addButton);
+    await user.type(await screen.findByPlaceholderText(/Search tasks/), "draft-only-task");
+    expect(await screen.findByText("draft-only-task")).toBeInTheDocument(); // visible without the toggle
+    expect(screen.queryByText("no saved version yet")).not.toBeInTheDocument();
+  });
+
   it("a viewer sees the graph but every editing control is gone", async () => {
     be.addPipeline("etl", etl());
     mount("viewer", "/pipeline/pipelines/p1");
@@ -309,6 +323,33 @@ describe("builder", () => {
     mount("editor", "/pipeline/pipelines/p1");
     const option = (await screen.findByRole("option", { name: /^v1/ })) as HTMLOptionElement;
     expect(option.text).toContain(formatTime(version.createdAt));
+  });
+
+  // ---- ADR 0073: plain "Save" writes a mutable draft; "Save as new version" stays explicit -----
+
+  it("plain Save writes a pipeline draft without creating a version, and stays on the canvas", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("blank");
+    mount("editor", "/pipeline/pipelines/p1");
+    await addNewTask(user, "task_1");
+    await screen.findByTestId("node-task_1");
+    const toolbar = screen.getByRole("toolbar", { name: "Pipeline builder" });
+    await user.click(within(toolbar).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(be.called("PUT", "/pipelines/p1/draft")).toHaveLength(1));
+    expect(be.called("POST", "/pipelines/p1/versions")).toHaveLength(0); // no version was created
+    expect(await screen.findByText(/"Always follow latest" references pick this up immediately/)).toBeInTheDocument();
+    expect(screen.getByText("Draft ahead of the latest saved version")).toBeInTheDocument();
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    // still on the same screen — no navigation/remount, unlike "Save as new version"
+    expect(screen.getByTestId("node-task_1")).toBeInTheDocument();
+  });
+
+  it("loads the pipeline's draft onto the canvas in preference to its latest saved version", async () => {
+    const p = be.addPipeline("etl", [be.ref("only")]);
+    be.savePipelineDraft(p.id, [be.ref("only"), be.ref("added-since")]);
+    mount("editor", "/pipeline/pipelines/p1");
+    expect(await screen.findByTestId("node-added-since")).toBeInTheDocument();
+    expect(screen.getByText("Draft ahead of the latest saved version")).toBeInTheDocument();
   });
 });
 
@@ -423,6 +464,32 @@ describe("task settings", () => {
     await user.click(screen.getByRole("button", { name: /Create new task "brand-new-task"/ }));
     await waitFor(() => expect(be.called("POST", "/tasks").some((c) => (c.body as { name: string }).name === "brand-new-task")).toBe(true));
     expect(await screen.findByText("brand-new-task")).toBeInTheDocument();
+  });
+
+  // ---- ADR 0073: plain "Save" writes a mutable draft; "Save as new version" stays explicit -----
+
+  it("plain Save writes a task draft without creating a version", async () => {
+    const { user } = await open();
+    const max = screen.getByLabelText("Max retries");
+    await user.clear(max);
+    await user.type(max, "3");
+    const form = screen.getByRole("form", { name: /Configure task/ });
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(be.called("PUT", "/tasks/t2/draft")).toHaveLength(1));
+    expect(be.called("POST", "/tasks/t2/versions")).toHaveLength(0); // no version was created
+    const sent = be.called("PUT", "/tasks/t2/draft")[0].body as { config: { retry: { maxRetries: number } } };
+    expect(sent.config.retry.maxRetries).toBe(3);
+    expect(await screen.findByText(/"Always follow latest" references pick this up immediately/)).toBeInTheDocument();
+  });
+
+  it("a node referencing a task by 'latest' loads that task's current draft, not just its latest version", async () => {
+    const t = be.addTask("loader", { code: { type: "inline", source: "x=1" }, runner: "base", retry: null, params: {}, timeoutSeconds: 3600, platformAccess: false });
+    be.addPipeline("etl", [{ key: "a", taskId: t.id, taskVersion: "latest", dependsOn: [], position: { x: 0, y: 0 } }]);
+    // A plain Save on the task, after the pipeline was wired to it — never promoted to a version.
+    be.saveTaskDraft(t.id, { code: { type: "inline", source: "x=1" }, runner: "base", retry: { maxRetries: 7, delaySeconds: 0, backoff: "fixed" }, params: {}, timeoutSeconds: 3600, platformAccess: false });
+    mount("editor", "/pipeline/pipelines/p1");
+    await userEvent.setup().click(await screen.findByTestId("node-a"));
+    expect(await screen.findByLabelText("Max retries")).toHaveValue(7); // the draft's value, not v1's
   });
 });
 

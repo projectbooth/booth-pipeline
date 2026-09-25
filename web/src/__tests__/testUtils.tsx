@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Page, Pipeline, PipelineVersion, RunDetail, TaskConfig, TaskEntity, TaskRef, TaskVersion } from "../types";
+import type { Page, Pipeline, PipelineDraft, PipelineVersion, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
 
 // A tiny in-memory stand-in for the pipeline backend + the catalog behind booth-core's gateway,
 // installed as the global `fetch`. Views are exercised against it exactly as against the real
@@ -30,8 +30,10 @@ export class FakeBackend {
   calls: Call[] = [];
   pipelines: Pipeline[] = [];
   versions = new Map<string, PipelineVersion[]>();
+  pipelineDrafts = new Map<string, PipelineDraft>();
   tasks: TaskEntity[] = [];
   taskVersions = new Map<string, TaskVersion[]>();
+  taskDrafts = new Map<string, TaskDraft>();
   runs = new Map<string, RunDetail>();
   logs = new Map<string, { seq: number; taskKey: string | null; stream: string; message: string; attempt?: number }[]>();
   /** Errors to return for the next call whose "METHOD path" matches. */
@@ -61,6 +63,8 @@ export class FakeBackend {
       hasOwner: false,
       nextRunAt: null,
       pinnedVersion: null,
+      hasDraft: false,
+      draftUpdatedAt: null,
     };
     this.pipelines.push(p);
     this.versions.set(p.id, []);
@@ -73,11 +77,19 @@ export class FakeBackend {
     const v: PipelineVersion = { pipelineId: id, version: list.length + 1, notes, createdBy: "eddie", createdAt: now, taskCount: tasks.length, spec: { tasks } };
     list.push(v);
     this.pipelines.find((p) => p.id === id)!.latestVersion = v.version;
+    this.savePipelineDraft(id, tasks); // ADR 0073: a version-save also refreshes the draft
     return v;
   }
 
+  savePipelineDraft(id: string, tasks: TaskRef[]): PipelineDraft {
+    const d: PipelineDraft = { pipelineId: id, spec: { tasks }, updatedBy: "eddie", updatedAt: now };
+    this.pipelineDrafts.set(id, d);
+    this.pipelines.find((p) => p.id === id)!.hasDraft = true;
+    return d;
+  }
+
   addTask(name: string, config?: TaskConfig, description = ""): TaskEntity {
-    const t: TaskEntity = { id: `t${this.tasks.length + 1}`, name, description, createdBy: "eddie", createdAt: now, updatedAt: now, latestVersion: 0 };
+    const t: TaskEntity = { id: `t${this.tasks.length + 1}`, name, description, createdBy: "eddie", createdAt: now, updatedAt: now, latestVersion: 0, hasDraft: false, draftUpdatedAt: null };
     this.tasks.push(t);
     this.taskVersions.set(t.id, []);
     if (config) this.saveTaskVersion(t.id, config);
@@ -96,7 +108,15 @@ export class FakeBackend {
     const v: TaskVersion = { taskId: id, version: list.length + 1, notes, createdBy: "eddie", createdAt: now, config };
     list.push(v);
     this.tasks.find((t) => t.id === id)!.latestVersion = v.version;
+    this.saveTaskDraft(id, config); // ADR 0073: a version-save also refreshes the draft
     return v;
+  }
+
+  saveTaskDraft(id: string, config: TaskConfig): TaskDraft {
+    const d: TaskDraft = { taskId: id, config, updatedBy: "eddie", updatedAt: now };
+    this.taskDrafts.set(id, d);
+    this.tasks.find((t) => t.id === id)!.hasDraft = true;
+    return d;
   }
 
   install(): void {
@@ -173,6 +193,13 @@ export class FakeBackend {
       if (method === "GET") return this.json(this.page((this.versions.get(m[1]) ?? []).slice().reverse().map((v) => ({ ...v, spec: undefined }))));
       if (method === "POST") return this.json(this.saveVersion(m[1], body.spec.tasks, body.notes), 201);
     }
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/draft$/))) {
+      if (method === "GET") {
+        const d = this.pipelineDrafts.get(m[1]);
+        return d ? this.json(d) : this.json({ error: "no draft saved for this pipeline" }, 404);
+      }
+      if (method === "PUT") return this.json(this.savePipelineDraft(m[1], body.spec.tasks));
+    }
     if ((m = path.match(/^\/pipelines\/([^/]+)\/versions\/(.+)\/export$/)) && method === "GET") {
       const list = this.versions.get(m[1]) ?? [];
       const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
@@ -213,6 +240,13 @@ export class FakeBackend {
       const list = this.taskVersions.get(m[1]) ?? [];
       const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
       return v ? this.json(v) : this.json({ error: "task version not found" }, 404);
+    }
+    if ((m = path.match(/^\/tasks\/([^/]+)\/draft$/))) {
+      if (method === "GET") {
+        const d = this.taskDrafts.get(m[1]);
+        return d ? this.json(d) : this.json({ error: "no draft saved for this task" }, 404);
+      }
+      if (method === "PUT") return this.json(this.saveTaskDraft(m[1], body.config));
     }
     if (method === "GET" && path === "/runs") return this.json(this.page([...this.runs.values()]));
     if ((m = path.match(/^\/runs\/([^/]+)$/)) && method === "GET") {

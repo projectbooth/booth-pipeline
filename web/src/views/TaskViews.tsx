@@ -77,7 +77,7 @@ export function TaskList({ v }: { v: ViewCtx }) {
                         </Link>
                         {t.description && <p className="text-xs text-slate-500 dark:text-slate-400">{t.description}</p>}
                       </td>
-                      <td className={tdClass}>{t.latestVersion === 0 ? "not configured yet" : `v${t.latestVersion}`}</td>
+                      <td className={tdClass}>{t.latestVersion === 0 ? (t.hasDraft ? "draft only, no saved version" : "not configured yet") : `v${t.latestVersion}`}</td>
                       <td className={tdClass}>{formatTime(t.updatedAt)}</td>
                       <td className={tdClass}>{t.createdBy}</td>
                       <td className={`${tdClass} text-right`}>
@@ -142,13 +142,15 @@ function CreateTask({ v, onCancel, onCreated }: { v: ViewCtx; onCancel: () => vo
 export function TaskDetail({ v, taskId }: { v: ViewCtx; taskId: string }) {
   const load = useLoad(async () => {
     const [task, versions, runners] = await Promise.all([api.getTask(v.api, taskId), api.listTaskVersions(v.api, taskId), api.runners(v.api)]);
-    const current = task.latestVersion === 0 ? null : await api.getTaskVersion(v.api, taskId, "latest");
-    return { task, versions: versions.items, runners, current };
+    // The current draft if there is one (ADR 0073 — always at least as fresh as the latest saved
+    // version, since both kinds of save write it), else the latest saved version, else blank.
+    const config = task.hasDraft ? (await api.getTaskDraft(v.api, taskId)).config : task.latestVersion === 0 ? null : (await api.getTaskVersion(v.api, taskId, "latest")).config;
+    return { task, versions: versions.items, runners, config };
   }, [v.api, taskId]);
 
   return (
     <Loaded state={load.state} retry={load.reload}>
-      {(d) => <Detail key={`${taskId}:${d.current?.version ?? 0}`} v={v} {...d} reload={load.reload} />}
+      {(d) => <Detail key={`${taskId}:${d.task.latestVersion}:${d.task.draftUpdatedAt ?? ""}`} v={v} {...d} reload={load.reload} />}
     </Loaded>
   );
 }
@@ -158,14 +160,14 @@ function Detail({
   task,
   versions,
   runners,
-  current,
+  config: loadedConfig,
   reload,
 }: {
   v: ViewCtx;
   task: { id: string; name: string; description: string; createdBy: string };
   versions: { version: number; notes: string; createdBy: string; createdAt: string }[];
   runners: import("../types").RunnerInfo[];
-  current: import("../types").TaskVersion | null;
+  config: TaskConfig | null;
   reload: () => void;
 }) {
   const readOnly = !v.canWrite;
@@ -175,12 +177,12 @@ function Detail({
   const [metaError, setMetaError] = useState<{ message: string; field?: string } | null>(null);
   const [metaSaved, setMetaSaved] = useState(false);
 
-  const [config, setConfig] = useState<TaskConfig>(current?.config ?? DEFAULT_CONFIG);
-  const [baseline] = useState(() => JSON.stringify(current?.config ?? DEFAULT_CONFIG));
+  const [config, setConfig] = useState<TaskConfig>(loadedConfig ?? DEFAULT_CONFIG);
+  const [baseline] = useState(() => JSON.stringify(loadedConfig ?? DEFAULT_CONFIG));
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<{ message: string; field?: string } | null>(null);
-  const [savedAs, setSavedAs] = useState<number | null>(null);
+  const [savedAs, setSavedAs] = useState<number | "draft" | null>(null);
 
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -208,6 +210,20 @@ function Detail({
       const v2 = await api.saveTaskVersion(v.api, task.id, config, notes.trim());
       setSavedAs(v2.version);
       setNotes("");
+      reload();
+    } catch (err) {
+      setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? err.field : undefined });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveDraft() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api.saveTaskDraft(v.api, task.id, config);
+      setSavedAs("draft");
       reload();
     } catch (err) {
       setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? err.field : undefined });
@@ -298,7 +314,10 @@ function Detail({
           onChange={setConfig}
         />
         {saveError && !saveError.field && <Banner tone="error">{saveError.message}</Banner>}
-        {savedAs !== null && <Banner tone="success">Saved as version {savedAs}. Pipelines set to follow the latest version will use it from their next save.</Banner>}
+        {savedAs === "draft" && (
+          <Banner tone="success">Saved. "Always follow latest" references pick this up immediately; nothing pinned to a specific version is affected.</Banner>
+        )}
+        {typeof savedAs === "number" && <Banner tone="success">Saved as version {savedAs}. Pipelines set to follow the latest version will use it from their next save.</Banner>}
         {!readOnly && (
           <>
             <input
@@ -309,7 +328,10 @@ function Detail({
               maxLength={200}
               onChange={(e) => setNotes(e.target.value)}
             />
-            <div>
+            <div className="flex gap-2">
+              <Button onClick={saveDraft} disabled={saving || !dirty}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
               <Button variant="primary" onClick={saveVersion} disabled={saving || !dirty}>
                 {saving ? "Saving…" : "Save as new version"}
               </Button>

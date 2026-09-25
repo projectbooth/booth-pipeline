@@ -9,7 +9,7 @@ import type { ViewCtx } from "../context";
 import { formatTime } from "../format";
 import { autoLayout, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey } from "../graph";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
-import type { Pipeline, PipelineVersion, RunnerInfo, TaskEntity, TaskRef, ValidateResult } from "../types";
+import type { Pipeline, PipelineDraft, PipelineVersion, RunnerInfo, TaskEntity, TaskRef, ValidateResult } from "../types";
 
 // The graphical DAG builder: draw a Pipeline as references to standalone Tasks (ADR 0071), wire
 // their dependencies, and save. Every save is a NEW immutable version — the canvas edits a draft,
@@ -30,7 +30,12 @@ export function PipelineEditor({ v, pipelineId, version }: { v: ViewCtx; pipelin
       // A pipeline that has never been saved has no version to load: it starts as a blank canvas.
       const current: PipelineVersion | null =
         pipeline.latestVersion === 0 ? null : await api.getVersion(v.api, pipelineId, version ?? "latest");
-      return { pipeline, versions: versions.items, runners, current };
+      // Viewing an explicit older version (a `version` route param) never loads the draft — that
+      // view is exactly what was saved, on purpose. Viewing "current" prefers the draft when there
+      // is one (ADR 0073 — always at least as fresh as `current` above, which stays around for the
+      // version-switcher's selected value, the "viewing an old version" banner, and Export).
+      const draft: PipelineDraft | null = version === undefined && pipeline.hasDraft ? await api.getPipelineDraft(v.api, pipelineId) : null;
+      return { pipeline, versions: versions.items, runners, current, draft };
     },
     [v.api, pipelineId, version],
   );
@@ -64,12 +69,13 @@ export function PipelineEditor({ v, pipelineId, version }: { v: ViewCtx; pipelin
           />
           {tab === "builder" ? (
             <Editor
-              key={`${pipelineId}:${d.current?.version ?? 0}`}
+              key={`${pipelineId}:${d.current?.version ?? 0}:${d.draft?.updatedAt ?? ""}`}
               v={v}
               pipeline={d.pipeline}
               versions={d.versions}
               runners={d.runners}
               current={d.current}
+              draft={d.draft}
               reload={load.reload}
               savedAs={savedAs}
               setSavedAs={setSavedAs}
@@ -89,6 +95,7 @@ interface EditorProps {
   versions: { version: number; notes: string; createdBy: string; createdAt: string; taskCount: number }[];
   runners: RunnerInfo[];
   current: PipelineVersion | null;
+  draft: PipelineDraft | null;
   reload: () => void;
   savedAs: number | null;
   setSavedAs: (n: number | null) => void;
@@ -96,25 +103,32 @@ interface EditorProps {
 
 const spec = (tasks: TaskRef[]) => ({ tasks });
 
-function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setSavedAs }: EditorProps) {
-  // A version loaded straight from the server: if two or more references share the exact same
-  // position (the shared {0,0} default for anything built directly against the API, never
-  // dragged in the builder — see graph.ts's hasOverlappingPositions), lay it out once on open
-  // rather than showing what looks like an empty or broken canvas. Baseline is set from the SAME
-  // laid-out array, so this never shows as an unsaved change — only actually editing does.
-  // `Editor` remounts (its key includes the version) whenever `current` changes, so computing
-  // this once at mount — rather than depending on `current` — is deliberate, not an oversight.
+function Editor({ v, pipeline, versions, runners, current, draft, reload, savedAs, setSavedAs }: EditorProps) {
+  // The draft if there is one (ADR 0073 — always at least as fresh as `current`, since both plain
+  // Save and "Save as new version" write it), else the loaded version, else a blank canvas. If two
+  // or more references share the exact same position (the shared {0,0} default for anything built
+  // directly against the API, never dragged in the builder — see graph.ts's
+  // hasOverlappingPositions), lay it out once on open rather than showing what looks like an empty
+  // or broken canvas. Baseline is set from the SAME laid-out array, so this never shows as an
+  // unsaved change — only actually editing does. `Editor` remounts (its key includes the version
+  // and the draft's own timestamp) whenever either changes, so computing this once at mount —
+  // rather than depending on `current`/`draft` — is deliberate, not an oversight.
   const initialRefs = useMemo(() => {
-    const loaded = current?.spec.tasks ?? [];
+    const loaded = draft ? draft.spec.tasks : (current?.spec.tasks ?? []);
     return hasOverlappingPositions(loaded) ? autoLayout(loaded) : loaded;
   }, []);
   const [refs, setRefs] = useState<TaskRef[]>(initialRefs);
   const [baseline, setBaseline] = useState(() => JSON.stringify(initialRefs));
+  // Whether the loaded draft actually holds something different from the latest saved version —
+  // not just "a draft row exists", since a version-save also writes the draft to match it exactly
+  // (see `save` below), so most of the time they agree and calling that out would be noise.
+  const [draftDiffers] = useState(() => draft !== null && JSON.stringify(draft.spec.tasks) !== JSON.stringify(current?.spec.tasks ?? []));
   const [selected, setSelected] = useState<string | null>(null);
   const [taskNames, setTaskNames] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<{ message: string; field?: string } | null>(null);
+  const [savedDraft, setSavedDraft] = useState(false);
   const [live, setLive] = useState<ValidateResult | null>(null);
   const [addingTask, setAddingTask] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -159,6 +173,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
     setRefs(next);
     setSaveError(null);
     setSavedAs(null);
+    setSavedDraft(false);
   }, [setSavedAs]);
 
   function openTaskPicker() {
@@ -185,6 +200,26 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       setBaseline(JSON.stringify(saved.spec.tasks));
       v.goPath(v.href({ name: "pipeline", id: pipeline.id }));
       reload();
+    } catch (err) {
+      setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? err.field : undefined });
+      const parsed = err instanceof ApiError ? parseTaskField(err.field) : null;
+      if (parsed && refs[parsed.index]) setSelected(refs[parsed.index].key);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Plain "Save" (ADR 0073): writes the draft in place, no version created, no navigation or
+  // remount — unlike `save` above, this stays on the same screen so it is as low-friction as the
+  // user asked for ("I don't want to save a new version every time I make a change").
+  async function saveDraft() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const d = await api.savePipelineDraft(v.api, pipeline.id, spec(refs));
+      setRefs(d.spec.tasks);
+      setBaseline(JSON.stringify(d.spec.tasks));
+      setSavedDraft(true);
     } catch (err) {
       setSaveError({ message: errorMessage(err), field: err instanceof ApiError ? err.field : undefined });
       const parsed = err instanceof ApiError ? parseTaskField(err.field) : null;
@@ -236,6 +271,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
           </>
         )}
         {dirty && <Chip tone="amber">Unsaved changes</Chip>}
+        {!dirty && (draftDiffers || savedDraft) && <Chip tone="sky">Draft ahead of the latest saved version</Chip>}
         <span className="flex-1" />
         <label htmlFor="version-select" className="text-xs text-slate-500 dark:text-slate-400">
           Version
@@ -263,6 +299,9 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
         </Button>
         {!readOnly && (
           <>
+            <Button onClick={saveDraft} disabled={saving || refs.length === 0 || !dirty}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
             <input
               aria-label="Version note"
               className={`${inputClass} w-56`}
@@ -283,6 +322,9 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
         <Banner tone="info">
           You are viewing version {current?.version} of {latest}. Saving creates version {latest + 1} from this one; nothing pinned to an older version changes.
         </Banner>
+      )}
+      {savedDraft && (
+        <Banner tone="success">Saved. "Always follow latest" references pick this up immediately; nothing pinned to a specific version is affected.</Banner>
       )}
       {savedAs !== null && <Banner tone="success">Saved as version {savedAs}. Pipelines set to follow the latest version will use it from their next run.</Banner>}
       {saveError && <Banner tone="error">{saveError.message}</Banner>}
