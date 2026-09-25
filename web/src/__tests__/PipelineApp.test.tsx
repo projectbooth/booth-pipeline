@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelineApp } from "../PipelineApp";
+import { formatTime } from "../format";
 import type { WorkspaceRole } from "../types";
 import { FakeBackend, getToken } from "./testUtils";
 
@@ -192,13 +193,21 @@ describe("builder", () => {
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 
+  // "+ Add task" opens a picker (search existing tasks, or create a new one) rather than always
+  // silently creating one — clicks the first "+ Add task" match (an empty pipeline offers it twice:
+  // once in the toolbar, once in the empty-state itself), then creates and picks a fresh task named `name`.
+  async function addNewTask(user: ReturnType<typeof userEvent.setup>, name: string) {
+    const [addButton] = await screen.findAllByRole("button", { name: /\+ Add task/ });
+    await user.click(addButton);
+    await user.type(await screen.findByPlaceholderText(/Search tasks/), name);
+    await user.click(screen.getByRole("button", { name: `+ Create new task "${name}"` }));
+  }
+
   it("adding a task creates a standalone task and references it, and it is valid to save", async () => {
     const user = userEvent.setup();
     be.addPipeline("blank");
     mount("editor", "/pipeline/pipelines/p1");
-    // an empty pipeline offers "+ Add task" twice: once in the toolbar, once in the empty-state itself
-    const [addButton] = await screen.findAllByRole("button", { name: /\+ Add task/ });
-    await user.click(addButton);
+    await addNewTask(user, "task_1");
     expect(await screen.findByTestId("node-task_1")).toBeInTheDocument();
     expect(be.called("POST", "/tasks").map((c) => (c.body as { name: string }).name)).toEqual(["task_1"]);
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
@@ -215,7 +224,7 @@ describe("builder", () => {
     be.addPipeline("etl", etl());
     mount("editor", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
-    await user.click(screen.getByRole("button", { name: /\+ Add task/ }));
+    await addNewTask(user, "task_1");
     expect(await screen.findByTestId("node-task_1")).toBeInTheDocument();
     expect(await screen.findByRole("form", { name: /Configure task task_1/ })).toBeInTheDocument();
     await user.click(screen.getByTestId("node-clean"));
@@ -228,7 +237,7 @@ describe("builder", () => {
     be.failNext.set("POST /pipelines/p1/versions", { status: 422, error: "'clean' depends on 'ghost', which is not a task in this pipeline", field: "tasks[1].dependsOn" });
     mount("editor", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
-    await user.click(screen.getByRole("button", { name: /\+ Add task/ })); // make it dirty so save is enabled
+    await addNewTask(user, "task_1"); // make it dirty so save is enabled
     await screen.findByTestId("node-task_1");
     await user.click(screen.getByRole("button", { name: "Save as new version" }));
     // shown in the page banner AND on the offending task's own panel (it is auto-selected)
@@ -238,6 +247,37 @@ describe("builder", () => {
     expect(screen.getByTestId("node-clean")).toHaveTextContent("[ERROR:");
     expect(screen.getByTestId("node-task_1")).toBeInTheDocument(); // the draft survived
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
+  it("+ Add task can wire a node to an existing, already-configured task instead of always creating a new one", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("etl", etl());
+    be.addTask("shared-loader", { code: { type: "inline", source: "x=1" }, runner: "base", retry: null, params: {}, timeoutSeconds: 3600, platformAccess: false });
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-extract");
+    const before = be.called("POST", "/tasks").length;
+    const [addButton] = await screen.findAllByRole("button", { name: /\+ Add task/ });
+    await user.click(addButton);
+    await user.type(await screen.findByPlaceholderText(/Search tasks/), "shared-loader");
+    await user.click(await screen.findByRole("button", { name: /^shared-loader$/ }));
+    expect(be.called("POST", "/tasks")).toHaveLength(before); // no new task was created
+    expect(await screen.findByTestId("node-task_1")).toHaveTextContent("task_1");
+  });
+
+  it("the add-task picker hides unconfigured tasks by default, badges and reveals them via a toggle", async () => {
+    const user = userEvent.setup();
+    be.addPipeline("etl", etl());
+    be.addTask("orphan-task"); // created with no config, e.g. from an earlier "+ Add task" click
+    mount("editor", "/pipeline/pipelines/p1");
+    await screen.findByTestId("node-extract");
+    const [addButton] = await screen.findAllByRole("button", { name: /\+ Add task/ });
+    await user.click(addButton);
+    await user.type(await screen.findByPlaceholderText(/Search tasks/), "orphan-task");
+    expect(await screen.findByText("No configured tasks match — try the toggle below.")).toBeInTheDocument();
+    expect(screen.queryByText("orphan-task")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Show 1 unconfigured task too/ }));
+    expect(await screen.findByText("orphan-task")).toBeInTheDocument();
+    expect(screen.getByText("no saved version yet")).toBeInTheDocument();
   });
 
   it("a viewer sees the graph but every editing control is gone", async () => {
@@ -262,6 +302,14 @@ describe("builder", () => {
     expect(screen.getByText(/Saving creates version 3/)).toBeInTheDocument();
     expect(screen.getByTestId("node-extract")).toBeInTheDocument();
   });
+
+  it("shows when each version was saved in the version switcher", async () => {
+    const p = be.addPipeline("etl", etl());
+    const version = be.versions.get(p.id)![0];
+    mount("editor", "/pipeline/pipelines/p1");
+    const option = (await screen.findByRole("option", { name: /^v1/ })) as HTMLOptionElement;
+    expect(option.text).toContain(formatTime(version.createdAt));
+  });
 });
 
 describe("task settings", () => {
@@ -274,6 +322,16 @@ describe("task settings", () => {
     await screen.findByLabelText("Runs on");
     return { user };
   }
+
+  it("shows when each version was saved in the reference panel's task-version dropdown", async () => {
+    const refs = etl();
+    be.addPipeline("etl", refs);
+    const version = be.taskVersions.get(refs[1].taskId)![0]; // "clean"
+    mount("editor", "/pipeline/pipelines/p1");
+    await userEvent.setup().click(await screen.findByTestId("node-clean"));
+    const option = (await screen.findByRole("option", { name: /^Pin to v1/ })) as HTMLOptionElement;
+    expect(option.text).toContain(formatTime(version.createdAt));
+  });
 
   it("shows an old task's inline code read-only, with no path to edit it, and lets it be replaced via a picker (ADR 0063)", async () => {
     const { user } = await open();
@@ -498,6 +556,14 @@ describe("pipeline scheduling (ADR 0071 — owned directly by Pipeline, no more 
     await user.click(screen.getByRole("button", { name: "Save schedule" }));
     await waitFor(() => expect(be.called("PUT", "/pipelines/p1/schedule")).toHaveLength(1));
     expect((be.called("PUT", "/pipelines/p1/schedule")[0].body as { pinnedVersion: number }).pinnedVersion).toBe(1);
+  });
+
+  it("shows when each version was saved in the schedule tab's version-pin dropdown", async () => {
+    const p = be.addPipeline("etl", etl());
+    const version = be.versions.get(p.id)![0];
+    await openSchedule();
+    const option = (await screen.findByRole("option", { name: /^Pin to v1/ })) as HTMLOptionElement;
+    expect(option.text).toContain(formatTime(version.createdAt));
   });
 
   it("maps a bad-schedule error onto the cron field", async () => {

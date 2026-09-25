@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { ViewCtx } from "../context";
-import { localTimezone } from "../format";
+import { formatTime, localTimezone } from "../format";
 import { errorMessage } from "../hooks";
 import type { Pipeline, PipelineScheduleUpdate, Trigger } from "../types";
 import { ScheduleEditor, type TriggerShape } from "./ScheduleEditor";
@@ -20,7 +20,7 @@ export function PipelineScheduleForm({
 }: {
   v: ViewCtx;
   pipeline: Pipeline;
-  versions: { version: number }[];
+  versions: { version: number; createdAt: string }[];
   onSaved: (p: Pipeline) => void;
 }) {
   const readOnly = !v.canWrite;
@@ -71,7 +71,7 @@ export function PipelineScheduleForm({
               <option value="">Always the latest saved version</option>
               {versions.map((ver) => (
                 <option key={ver.version} value={ver.version}>
-                  Pin to v{ver.version}
+                  Pin to v{ver.version} — {formatTime(ver.createdAt)}
                 </option>
               ))}
             </select>

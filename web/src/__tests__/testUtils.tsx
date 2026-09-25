@@ -185,7 +185,11 @@ export class FakeBackend {
       const v = m[2] === "latest" ? list.at(-1) : list[Number(m[2]) - 1];
       return v ? this.json(v) : this.json({ error: "pipeline version not found" }, 404);
     }
-    if (method === "GET" && path === "/tasks") return this.json(this.page(this.tasks));
+    if (method === "GET" && path === "/tasks") {
+      const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+      const items = q ? this.tasks.filter((t) => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)) : this.tasks;
+      return this.json(this.page(items));
+    }
     if (method === "POST" && path === "/tasks") {
       const t = this.addTask(body.name, body.config, body.description ?? "");
       const version = t.latestVersion > 0 ? this.taskVersions.get(t.id)!.at(-1) : null;

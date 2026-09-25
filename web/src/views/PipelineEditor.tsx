@@ -3,11 +3,13 @@ import { api, ApiError } from "../api/client";
 import { DagCanvas } from "../components/DagCanvas";
 import { PipelineScheduleForm } from "../components/PipelineScheduleForm";
 import { ReferencePanel } from "../components/ReferencePanel";
+import { TaskPicker } from "../components/TaskPicker";
 import { Banner, Button, Chip, Loaded, PageHeader, inputClass } from "../components/ui";
 import type { ViewCtx } from "../context";
-import { autoLayout, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey, uniqueKey } from "../graph";
+import { formatTime } from "../format";
+import { autoLayout, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey } from "../graph";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
-import type { Pipeline, PipelineVersion, RunnerInfo, TaskRef, ValidateResult } from "../types";
+import type { Pipeline, PipelineVersion, RunnerInfo, TaskEntity, TaskRef, ValidateResult } from "../types";
 
 // The graphical DAG builder: draw a Pipeline as references to standalone Tasks (ADR 0071), wire
 // their dependencies, and save. Every save is a NEW immutable version — the canvas edits a draft,
@@ -114,8 +116,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<{ message: string; field?: string } | null>(null);
   const [live, setLive] = useState<ValidateResult | null>(null);
-  const [addBusy, setAddBusy] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  const [addingTask, setAddingTask] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -160,21 +161,17 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
     setSavedAs(null);
   }, [setSavedAs]);
 
-  async function add() {
-    setAddBusy(true);
-    setAddError(null);
-    try {
-      const key = uniqueKey("task", refs.map((r) => r.key));
-      const t = await api.createTask(v.api, key, "");
-      setTaskNames((n) => ({ ...n, [t.id]: t.name }));
-      const r = newRef(t.id, refs);
-      change([...refs, r]);
-      setSelected(r.key);
-    } catch (err) {
-      setAddError(errorMessage(err));
-    } finally {
-      setAddBusy(false);
-    }
+  function openTaskPicker() {
+    setSelected(null);
+    setAddingTask(true);
+  }
+
+  function pickTaskRef(task: TaskEntity) {
+    setTaskNames((n) => (n[task.id] === task.name ? n : { ...n, [task.id]: task.name }));
+    const r = newRef(task.id, refs);
+    change([...refs, r]);
+    setAddingTask(false);
+    setSelected(r.key);
   }
 
   async function save() {
@@ -230,8 +227,8 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       <div className="flex flex-wrap items-center gap-2" role="toolbar" aria-label="Pipeline builder">
         {!readOnly && (
           <>
-            <Button variant="primary" onClick={add} disabled={addBusy}>
-              {addBusy ? "Adding…" : "+ Add task"}
+            <Button variant="primary" onClick={openTaskPicker}>
+              + Add task
             </Button>
             <Button onClick={() => change(autoLayout(refs))} disabled={refs.length === 0}>
               Tidy layout
@@ -257,7 +254,7 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
           {versions.map((ver) => (
             <option key={ver.version} value={ver.version}>
               v{ver.version}
-              {ver.version === latest ? " (latest)" : ""} — {ver.taskCount} tasks{ver.notes ? ` — ${ver.notes}` : ""}
+              {ver.version === latest ? " (latest)" : ""} — {formatTime(ver.createdAt)} — {ver.taskCount} tasks{ver.notes ? ` — ${ver.notes}` : ""}
             </option>
           ))}
         </select>
@@ -281,7 +278,6 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
         )}
       </div>
 
-      {addError && <Banner tone="error">{addError}</Banner>}
       {exportError && <Banner tone="error">{exportError}</Banner>}
       {viewingOld && (
         <Banner tone="info">
@@ -294,11 +290,14 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
       {readOnly && <Banner tone="info">Your role in this workspace is read-only, so the builder is view-only.</Banner>}
 
       <div className="flex min-h-[32rem] flex-col gap-3 lg:flex-row">
-        <div className="relative h-[32rem] min-w-0 flex-1 overflow-hidden rounded-md border border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+        <div className="relative h-[32rem] min-w-0 shrink-0 overflow-hidden rounded-md border border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-950 lg:flex-1">
           <DagCanvas
             refs={refs}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={(key) => {
+              setSelected(key);
+              if (key) setAddingTask(false);
+            }}
             onChange={readOnly ? undefined : change}
             taskNames={taskNames}
             errors={refErrors}
@@ -311,8 +310,8 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
                 <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Add a task to get started, or drag one in from the canvas handles once you have more than one.</p>
                 {!readOnly && (
                   <div className="mt-3">
-                    <Button variant="primary" onClick={add} disabled={addBusy}>
-                      {addBusy ? "Adding…" : "+ Add task"}
+                    <Button variant="primary" onClick={openTaskPicker}>
+                      + Add task
                     </Button>
                   </div>
                 )}
@@ -343,6 +342,11 @@ function Editor({ v, pipeline, versions, runners, current, reload, savedAs, setS
                 setSelected(null);
               }}
             />
+          ) : addingTask ? (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Add a task</h3>
+              <TaskPicker api={v.api} onPick={pickTaskRef} onCancel={() => setAddingTask(false)} />
+            </div>
           ) : (
             <p className="text-sm text-slate-500 dark:text-slate-400">
               Select a task to configure which version it references, its dependencies, and its own code and settings.

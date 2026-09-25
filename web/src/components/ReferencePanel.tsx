@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, type ApiContext } from "../api/client";
 import type { ViewCtx } from "../context";
+import { formatTime } from "../format";
 import { KEY_RE, checkConnection } from "../graph";
-import { errorMessage, useDebounced } from "../hooks";
+import { errorMessage } from "../hooks";
 import type { RunnerInfo, TaskConfig, TaskEntity, TaskRef, TaskVersionSummary } from "../types";
 import { TaskConfigForm } from "./TaskConfigForm";
+import { TaskPicker } from "./TaskPicker";
 import { Banner, Button, Field, Link, Spinner, inputClass, linkClass } from "./ui";
 
 // Configures ONE DAG node (ADR 0071): which task it references, at which version, its
@@ -157,8 +159,8 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
           )}
         </Field>
 
-        <TaskPicker
-          api={apiCtx}
+        <ReferenceTaskField
+          apiCtx={apiCtx}
           taskId={taskRef.taskId}
           currentName={task?.name}
           disabled={readOnly}
@@ -178,7 +180,7 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
                 <option value="latest">Always the latest saved version</option>
                 {versions.map((ver) => (
                   <option key={ver.version} value={ver.version}>
-                    Pin to v{ver.version}
+                    Pin to v{ver.version} — {formatTime(ver.createdAt)}
                   </option>
                 ))}
               </select>
@@ -261,58 +263,26 @@ export function ReferencePanel({ taskRef, refs, runners, api: apiCtx, v, readOnl
   );
 }
 
-function TaskPicker({
-  api: apiCtx,
+function ReferenceTaskField({
+  apiCtx,
   taskId,
   currentName,
   disabled,
   error,
   onPick,
 }: {
-  api: ApiContext;
+  apiCtx: ApiContext;
   taskId: string;
   currentName?: string;
   disabled?: boolean;
   error?: string;
   onPick: (taskId: string) => void;
 }) {
-  const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const debounced = useDebounced(query, 250);
-  const [matches, setMatches] = useState<TaskEntity[]>([]);
-  const [creating, setCreating] = useState(false);
-  const [pickError, setPickError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    api.listTasks(apiCtx, debounced).then(
-      (page) => alive && setMatches(page.items),
-      () => alive && setMatches([]),
-    );
-    return () => {
-      alive = false;
-    };
-  }, [apiCtx, debounced, open]);
-
-  async function createAndPick(name: string) {
-    setCreating(true);
-    setPickError(null);
-    try {
-      const t = await api.createTask(apiCtx, name, "");
-      onPick(t.id);
-      setOpen(false);
-      setQuery("");
-    } catch (err) {
-      setPickError(errorMessage(err));
-    } finally {
-      setCreating(false);
-    }
-  }
 
   return (
     <Field id="task-picker" label="References task" error={error}>
-      {(p) => (
+      {() => (
         <div className="flex flex-col gap-1.5">
           {!open ? (
             <div className="flex items-center gap-2">
@@ -324,41 +294,14 @@ function TaskPicker({
               )}
             </div>
           ) : (
-            <div className="flex flex-col gap-1.5 rounded-md border border-slate-200 p-2 dark:border-slate-700">
-              <input
-                {...p}
-                autoFocus
-                className={inputClass}
-                placeholder="Search tasks, or type a name to create one"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <div className="flex max-h-40 flex-col gap-0.5 overflow-auto">
-                {matches.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    className="rounded px-2 py-1 text-left text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                    onClick={() => {
-                      onPick(t.id);
-                      setOpen(false);
-                      setQuery("");
-                    }}
-                  >
-                    {t.name}
-                    {t.description && <span className="ml-1 text-xs text-slate-500 dark:text-slate-400">— {t.description}</span>}
-                  </button>
-                ))}
-                {matches.length === 0 && <p className="px-2 py-1 text-xs text-slate-500 dark:text-slate-400">No matching tasks.</p>}
-              </div>
-              {query.trim() !== "" && (
-                <Button onClick={() => createAndPick(query.trim())} disabled={creating}>
-                  {creating ? "Creating…" : `+ Create new task "${query.trim()}"`}
-                </Button>
-              )}
-              {pickError && <Banner tone="error">{pickError}</Banner>}
-              <Button onClick={() => setOpen(false)}>Cancel</Button>
-            </div>
+            <TaskPicker
+              api={apiCtx}
+              onPick={(t) => {
+                onPick(t.id);
+                setOpen(false);
+              }}
+              onCancel={() => setOpen(false)}
+            />
           )}
         </div>
       )}
