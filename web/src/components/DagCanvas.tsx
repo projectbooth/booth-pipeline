@@ -133,7 +133,12 @@ export function DagCanvas({ refs, selected, onSelect, onChange, taskNames, statu
   );
 
   return (
-    <div className="h-full w-full" data-testid="dag-canvas">
+    // A fixed height, not `h-full`: React Flow's own root (and this div) need a size that's
+    // correct on the very first layout pass, not one that depends on resolving a percentage
+    // against the parent's own flex-computed height — see agent-briefs/pipeline.md's live-test
+    // discrepancy (worked in some sessions, reproducibly blank in another) for why this isn't
+    // hypothetical. Matches the canvas wrapper's own `h-[32rem]` in PipelineEditor.tsx exactly.
+    <div className="h-[32rem] w-full" data-testid="dag-canvas">
       <ReactFlow
         nodes={nodes}
         edges={edges}
