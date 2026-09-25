@@ -292,6 +292,89 @@ def test_task_names_need_not_be_unique(env):
     assert r.status_code == 201  # unlike a pipeline's name, a task's is a browsable label, not an identity
 
 
+# ---- ADR 0073: plain "Save" writes a mutable draft; "Save as new version" stays explicit --------
+
+
+def test_plain_save_writes_a_task_draft_without_creating_a_version(env):
+    t = env.call("POST", "/tasks", json={"name": "a"}).json()
+    assert t["hasDraft"] is False and t["latestVersion"] == 0
+    assert env.call("GET", f"/tasks/{t['id']}/draft").status_code == 404
+    r = env.call("PUT", f"/tasks/{t['id']}/draft", json={"config": {"code": {"type": "inline", "source": "x=1"}}})
+    assert r.status_code == 200 and r.json()["config"]["code"]["source"] == "x=1"
+    again = env.call("GET", f"/tasks/{t['id']}").json()
+    assert again["hasDraft"] is True and again["latestVersion"] == 0  # no version was created
+    assert env.call("GET", f"/tasks/{t['id']}/versions").json()["total"] == 0
+    got = env.call("GET", f"/tasks/{t['id']}/draft").json()
+    assert got["config"]["code"]["source"] == "x=1"
+
+
+def test_plain_save_writes_a_pipeline_draft_without_creating_a_version(env):
+    p = env.call("POST", "/pipelines", json={"name": "etl"}).json()
+    assert p["hasDraft"] is False and p["latestVersion"] == 0
+    assert env.call("GET", f"/pipelines/{p['id']}/draft").status_code == 404
+    r = env.call("PUT", f"/pipelines/{p['id']}/draft", json={"spec": etl_spec()})
+    assert r.status_code == 200 and len(r.json()["spec"]["tasks"]) == 3
+    again = env.call("GET", f"/pipelines/{p['id']}").json()
+    assert again["hasDraft"] is True and again["latestVersion"] == 0
+    assert env.call("GET", f"/pipelines/{p['id']}/versions").json()["total"] == 0
+
+
+def test_save_as_new_version_also_refreshes_the_draft_so_it_is_never_behind(env):
+    t = new_task(env, "a", config={"code": {"type": "inline", "source": "x=1"}})
+    env.call("PUT", f"/tasks/{t['id']}/draft", json={"config": {"code": {"type": "inline", "source": "x=99"}}})
+    r = env.call("POST", f"/tasks/{t['id']}/versions", json={"config": {"code": {"type": "inline", "source": "x=2"}}})
+    assert r.status_code == 201 and r.json()["version"] == 2
+    draft = env.call("GET", f"/tasks/{t['id']}/draft").json()
+    assert draft["config"]["code"]["source"] == "x=2"  # the version-save's content, not the earlier draft
+
+
+def test_a_latest_task_reference_runs_the_referenced_tasks_current_draft(env):
+    """ADR 0073's central behaviour change: "Always follow latest" now means the task's current
+    draft (which a plain Save may have updated since the pipeline was last saved), not just its
+    latest immutable version — matching what the UI already promised ("follow the latest to pick
+    up every save on this task")."""
+    t = new_task(env, "a", config={"code": {"type": "inline", "source": "print('v1')\n"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": "latest", "dependsOn": [], "position": {"x": 0, "y": 0}}]})
+    # A plain Save on the task — never promoted to a version — must still be what "latest" runs.
+    r = env.call("PUT", f"/tasks/{t['id']}/draft", json={"config": {"code": {"type": "inline", "source": "print('draft, never versioned')\n"}}})
+    assert r.status_code == 200
+    assert env.call("GET", f"/tasks/{t['id']}").json()["latestVersion"] == 1  # still just the one version
+    run = env.call("POST", f"/pipelines/{p['id']}/run").json()
+    env.wait_run(run["id"])
+    msgs = [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"]
+    assert msgs == ["draft, never versioned"]
+
+
+def test_a_pinned_task_reference_is_unaffected_by_a_later_draft(env):
+    """ADR 0063's reproducibility guarantee, explicitly preserved by ADR 0073: "Pin to vN" always
+    resolves to that exact immutable snapshot, never a draft."""
+    t = new_task(env, "a", config={"code": {"type": "inline", "source": "print('v1')\n"}})
+    p = new_pipeline(env, spec={"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": 1, "dependsOn": [], "position": {"x": 0, "y": 0}}]})
+    env.call("PUT", f"/tasks/{t['id']}/draft", json={"config": {"code": {"type": "inline", "source": "print('draft, ignored')\n"}}})
+    run = env.call("POST", f"/pipelines/{p['id']}/run").json()
+    env.wait_run(run["id"])
+    msgs = [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs?task=a").json()["items"] if ln["stream"] == "stdout"]
+    assert msgs == ["v1"]
+
+
+def test_a_latest_reference_to_a_task_with_no_draft_and_no_version_is_422(env):
+    t = env.call("POST", "/tasks", json={"name": "a"}).json()
+    p = env.call("POST", "/pipelines", json={"name": "etl"}).json()
+    r = env.call(
+        "POST",
+        f"/pipelines/{p['id']}/versions",
+        json={"spec": {"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": "latest", "dependsOn": [], "position": {"x": 0, "y": 0}}]}},
+    )
+    assert r.status_code == 422 and r.json()["field"] == "tasks[0].taskId" and "no saved version or draft" in r.json()["error"]
+    # A plain Save on the PIPELINE goes through the same check, and is refused the same way.
+    r2 = env.call(
+        "PUT",
+        f"/pipelines/{p['id']}/draft",
+        json={"spec": {"tasks": [{"key": "a", "taskId": t["id"], "taskVersion": "latest", "dependsOn": [], "position": {"x": 0, "y": 0}}]}},
+    )
+    assert r2.status_code == 422
+
+
 def test_a_runner_that_is_not_available_is_refused_at_task_save(env):
     r = env.call("POST", "/tasks", json={"name": "t", "config": {"code": {"type": "inline", "source": "x=1"}, "runner": "spark"}})
     assert r.status_code == 422 and r.json()["field"] == "runner" and "not available" in r.json()["error"]

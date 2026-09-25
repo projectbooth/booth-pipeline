@@ -117,6 +117,23 @@ def test_spec_round_trips_exactly_including_task_refs(store):
     assert store.get_version(WS, p.id, 1).spec == spec
 
 
+def test_pipeline_draft_is_separate_from_and_survives_independently_of_versions(store):
+    """ADR 0073: a mutable draft, distinct from the immutable version list — plain "Save" writes
+    only this, no version created."""
+    p = store.create_pipeline(WS, "etl", "", "a")
+    assert store.get_pipeline_draft(WS, p.id) is None and store.get_pipeline(WS, p.id).has_draft is False
+    d1 = store.save_pipeline_draft(WS, p.id, linear(), "alice")
+    assert d1.pipeline_id == p.id and [t.key for t in d1.spec.tasks] == ["extract", "clean", "load"]
+    assert store.get_pipeline(WS, p.id).has_draft is True
+    assert store.get_pipeline(WS, p.id).latest_version == 0  # no version was created
+    got = store.get_pipeline_draft(WS, p.id)
+    assert got.updated_by == "alice" and [t.key for t in got.spec.tasks] == ["extract", "clean", "load"]
+    d2 = store.save_pipeline_draft(WS, p.id, linear(), "bob")
+    assert d2.updated_by == "bob"  # overwritten in place, not accumulated
+    assert store.save_pipeline_draft(OTHER, p.id, linear(), "x") is None  # wrong workspace
+    assert store.get_pipeline_draft(OTHER, p.id) is None
+
+
 def test_deleting_a_pipeline_removes_its_runs_task_runs_and_logs(store):
     """ADR 0071: Pipeline owns its run history directly now — deleting it cascades, the same way
     pipeline_versions already did (there is no more separate Job to block or survive deletion)."""
@@ -233,6 +250,23 @@ def test_task_versions_are_sequential_immutable_and_latest_is_reported(store):
     assert store.add_task_version(OTHER, t.id, cfg, "", "x") is None
     assert store.get_task_version(OTHER, t.id, 1) is None
     assert store.list_task_versions(OTHER, t.id, 10, 0).total == 0
+
+
+def test_task_draft_is_separate_from_and_survives_independently_of_versions(store):
+    """ADR 0073: a task can be "configured" via its draft alone, with zero saved versions."""
+    t = store.create_task(WS, "loader", "", "a")
+    assert store.get_task_draft(WS, t.id) is None and store.get_task(WS, t.id).has_draft is False
+    cfg = TaskConfig.model_validate(task_config())
+    d1 = store.save_task_draft(WS, t.id, cfg, "alice")
+    assert d1.task_id == t.id and d1.config == cfg
+    assert store.get_task(WS, t.id).has_draft is True
+    assert store.get_task(WS, t.id).latest_version == 0  # no version was created
+    got = store.get_task_draft(WS, t.id)
+    assert got.updated_by == "alice" and got.config == cfg
+    d2 = store.save_task_draft(WS, t.id, cfg, "bob")
+    assert d2.updated_by == "bob"  # overwritten in place, not accumulated
+    assert store.save_task_draft(OTHER, t.id, cfg, "x") is None  # wrong workspace
+    assert store.get_task_draft(OTHER, t.id) is None
 
 
 def test_task_config_round_trips_exactly_including_snapshotted_code(store):

@@ -21,8 +21,10 @@ from ..records import (
     LogLine,
     Page,
     Pipeline,
+    PipelineDraft,
     PipelineVersion,
     Run,
+    TaskDraft,
     TaskEntity,
     TaskRun,
     TaskVersionRecord,
@@ -44,6 +46,8 @@ class MemoryStore:
         self._versions: dict[str, list[PipelineVersion]] = {}
         self._tasks: dict[str, TaskEntity] = {}
         self._task_versions: dict[str, list[TaskVersionRecord]] = {}
+        self._pipeline_drafts: dict[str, PipelineDraft] = {}
+        self._task_drafts: dict[str, TaskDraft] = {}
         self._runs: dict[str, Run] = {}
         self._task_runs: dict[str, dict[str, TaskRun]] = {}
         self._logs: dict[str, list[LogLine]] = {}
@@ -66,6 +70,9 @@ class MemoryStore:
     def _with_latest(self, p: Pipeline) -> Pipeline:
         out = copy.deepcopy(p)
         out.latest_version = len(self._versions.get(p.id, []))
+        draft = self._pipeline_drafts.get(p.id)
+        out.has_draft = draft is not None
+        out.draft_updated_at = draft.updated_at if draft else None
         return out
 
     def get_pipeline(self, workspace, pipeline_id):
@@ -96,6 +103,7 @@ class MemoryStore:
                 return False
             del self._pipelines[p.id]
             self._versions.pop(p.id, None)
+            self._pipeline_drafts.pop(p.id, None)
             # Pipeline now owns its run history directly (ADR 0071: no more Job to block or
             # survive this) — deleting it cascades, the same way pipeline_versions already did.
             for rid in [r.id for r in self._runs.values() if r.pipeline_id == p.id]:
@@ -149,6 +157,22 @@ class MemoryStore:
             items = list(reversed(self._versions[p.id]))
             return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
 
+    def get_pipeline_draft(self, workspace, pipeline_id):
+        with self._lock:
+            p = self._pipeline(workspace, pipeline_id)
+            if not p:
+                return None
+            return copy.deepcopy(self._pipeline_drafts.get(p.id))
+
+    def save_pipeline_draft(self, workspace, pipeline_id, spec: PipelineSpec, by):
+        with self._lock:
+            p = self._pipeline(workspace, pipeline_id)
+            if not p:
+                return None
+            d = PipelineDraft(p.id, spec.model_copy(deep=True), by, _now())
+            self._pipeline_drafts[p.id] = d
+            return copy.deepcopy(d)
+
     # ---- tasks (ADR 0071) ----
     def create_task(self, workspace, name, description, by):
         with self._lock:
@@ -165,6 +189,9 @@ class MemoryStore:
     def _task_with_latest(self, t: TaskEntity) -> TaskEntity:
         out = copy.deepcopy(t)
         out.latest_version = len(self._task_versions.get(t.id, []))
+        draft = self._task_drafts.get(t.id)
+        out.has_draft = draft is not None
+        out.draft_updated_at = draft.updated_at if draft else None
         return out
 
     def get_task(self, workspace, task_id):
@@ -195,6 +222,7 @@ class MemoryStore:
                 raise InUse("this task is still referenced by a pipeline version; it cannot be removed")
             del self._tasks[task_id]
             self._task_versions.pop(task_id, None)
+            self._task_drafts.pop(task_id, None)
             return True
 
     def add_task_version(self, workspace, task_id, config: TaskConfig, notes, by):
@@ -227,6 +255,22 @@ class MemoryStore:
                 return Page([], 0)
             items = list(reversed(self._task_versions[t.id]))
             return Page(copy.deepcopy(items[offset : offset + limit]), len(items))
+
+    def get_task_draft(self, workspace, task_id):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
+                return None
+            return copy.deepcopy(self._task_drafts.get(t.id))
+
+    def save_task_draft(self, workspace, task_id, config: TaskConfig, by):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
+                return None
+            d = TaskDraft(t.id, config.model_copy(deep=True), by, _now())
+            self._task_drafts[t.id] = d
+            return copy.deepcopy(d)
 
     # ---- scheduling ----
     def claim_due_pipelines(self, now, limit):

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Protocol
 
 from ..model import PipelineSpec, TaskConfig
-from ..records import LogLine, Page, Pipeline, PipelineVersion, Run, TaskEntity, TaskRun, TaskVersionRecord
+from ..records import LogLine, Page, Pipeline, PipelineDraft, PipelineVersion, Run, TaskDraft, TaskEntity, TaskRun, TaskVersionRecord
 
 
 class Conflict(Exception):
@@ -65,6 +65,17 @@ class Store(Protocol):
         """Newest first."""
         ...
 
+    def get_pipeline_draft(self, workspace: str, pipeline_id: str) -> PipelineDraft | None:
+        """None if the pipeline is absent, or if nothing has ever been saved onto it (neither a
+        plain Save nor a "Save as new version" — ADR 0073)."""
+        ...
+
+    def save_pipeline_draft(self, workspace: str, pipeline_id: str, spec: PipelineSpec, by: str) -> PipelineDraft | None:
+        """Overwrite the draft in place. Called by plain Save directly, and by ``add_version`` too
+        (a "Save as new version" also updates the draft, so it is never behind the latest
+        immutable version — ADR 0073). None if the pipeline is absent."""
+        ...
+
     # ---- tasks (ADR 0071) ----
     # The direct counterpart of pipelines/versions above: a standalone, versioned, reusable
     # resource, referenced by `(id, version)` from any number of pipelines.
@@ -86,6 +97,15 @@ class Store(Protocol):
 
     def list_task_versions(self, workspace: str, task_id: str, limit: int, offset: int) -> Page:
         """Newest first."""
+        ...
+
+    def get_task_draft(self, workspace: str, task_id: str) -> TaskDraft | None:
+        """None if the task is absent, or if nothing has ever been saved onto it (ADR 0073)."""
+        ...
+
+    def save_task_draft(self, workspace: str, task_id: str, config: TaskConfig, by: str) -> TaskDraft | None:
+        """Overwrite the draft in place. Called by plain Save directly, and by ``add_task_version``
+        too, so the draft is never behind the latest immutable version. None if absent."""
         ...
 
     # ---- scheduling ----

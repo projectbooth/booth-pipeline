@@ -27,8 +27,10 @@ from ..records import (
     LogLine,
     Page,
     Pipeline,
+    PipelineDraft,
     PipelineVersion,
     Run,
+    TaskDraft,
     TaskEntity,
     TaskRun,
     TaskVersionRecord,
@@ -99,6 +101,8 @@ class PostgresStore:
             owner_sub=r["owner_sub"],
             role_ceiling=r["role_ceiling"],
             pinned_version=r["pinned_version"],
+            has_draft=r["draft_spec"] is not None,
+            draft_updated_at=r["draft_updated_at"],
         )  # fmt: skip
 
     @staticmethod
@@ -107,11 +111,26 @@ class PostgresStore:
 
     @staticmethod
     def _task(r: dict[str, Any]) -> TaskEntity:
-        return TaskEntity(r["id"], r["workspace"], r["name"], r["description"], r["created_by"], r["created_at"], r["updated_at"], r.get("latest_version") or 0)
+        return TaskEntity(
+            r["id"], r["workspace"], r["name"], r["description"], r["created_by"], r["created_at"], r["updated_at"],
+            r.get("latest_version") or 0, has_draft=r["draft_config"] is not None, draft_updated_at=r["draft_updated_at"],
+        )  # fmt: skip
 
     @staticmethod
     def _task_version(r: dict[str, Any]) -> TaskVersionRecord:
         return TaskVersionRecord(r["task_id"], r["version"], TaskConfig.model_validate(r["config"]), r["notes"], r["created_by"], r["created_at"])
+
+    @staticmethod
+    def _pipeline_draft(r: dict[str, Any]) -> PipelineDraft | None:
+        if r["draft_spec"] is None:
+            return None
+        return PipelineDraft(r["id"], PipelineSpec.model_validate(r["draft_spec"]), r["draft_updated_by"], r["draft_updated_at"])
+
+    @staticmethod
+    def _task_draft(r: dict[str, Any]) -> TaskDraft | None:
+        if r["draft_config"] is None:
+            return None
+        return TaskDraft(r["id"], TaskConfig.model_validate(r["draft_config"]), r["draft_updated_by"], r["draft_updated_at"])
 
     @staticmethod
     def _run(r: dict[str, Any]) -> Run:
@@ -234,6 +253,22 @@ class PostgresStore:
             rows = conn.execute(f"SELECT v.* {base} ORDER BY v.version DESC LIMIT %s OFFSET %s", (workspace, pipeline_id, limit, offset)).fetchall()
         return Page([self._version(r) for r in rows], total)
 
+    def get_pipeline_draft(self, workspace, pipeline_id):
+        with self._pool.connection() as conn:
+            r = conn.execute(self._PIPELINE_SELECT + " WHERE p.workspace = %s AND p.id = %s", (workspace, pipeline_id)).fetchone()
+        return self._pipeline_draft(r) if r else None
+
+    def save_pipeline_draft(self, workspace, pipeline_id, spec: PipelineSpec, by):
+        now = datetime.now(UTC)
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE pipelines SET draft_spec=%s, draft_updated_at=%s, draft_updated_by=%s WHERE workspace=%s AND id=%s",
+                (Jsonb(spec.model_dump(by_alias=True, mode="json")), now, by, workspace, pipeline_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return PipelineDraft(pipeline_id, spec, by, now)
+
     # ---- tasks (ADR 0071) ----
     _TASK_SELECT = """
         SELECT t.*, COALESCE((SELECT max(version) FROM task_versions v WHERE v.task_id = t.id), 0) AS latest_version
@@ -325,6 +360,22 @@ class PostgresStore:
             total = conn.execute(f"SELECT count(*) AS n {base}", (workspace, task_id)).fetchone()["n"]
             rows = conn.execute(f"SELECT v.* {base} ORDER BY v.version DESC LIMIT %s OFFSET %s", (workspace, task_id, limit, offset)).fetchall()
         return Page([self._task_version(r) for r in rows], total)
+
+    def get_task_draft(self, workspace, task_id):
+        with self._pool.connection() as conn:
+            r = conn.execute(self._TASK_SELECT + " WHERE t.workspace = %s AND t.id = %s", (workspace, task_id)).fetchone()
+        return self._task_draft(r) if r else None
+
+    def save_task_draft(self, workspace, task_id, config: TaskConfig, by):
+        now = datetime.now(UTC)
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET draft_config=%s, draft_updated_at=%s, draft_updated_by=%s WHERE workspace=%s AND id=%s",
+                (Jsonb(config.model_dump(by_alias=True, mode="json")), now, by, workspace, task_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return TaskDraft(task_id, config, by, now)
 
     # ---- scheduling ----
     def claim_due_pipelines(self, now, limit):

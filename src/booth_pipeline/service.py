@@ -38,13 +38,15 @@ from .records import (
     LogLine,
     Page,
     Pipeline,
+    PipelineDraft,
     PipelineVersion,
     Run,
+    TaskDraft,
     TaskEntity,
     TaskRun,
     TaskVersionRecord,
 )
-from .resolve import resolve_task_configs
+from .resolve import resolve_task_configs, resolve_task_ref
 from .runners import languages
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
@@ -92,6 +94,8 @@ class PipelineService:
             spec = self._prepare(ident, spec)
         p = self.store.create_pipeline(ident.workspace, name.strip(), description.strip(), ident.display_name)
         v = self.store.add_version(ident.workspace, p.id, spec, notes, ident.display_name) if spec is not None else None
+        if spec is not None:
+            self.store.save_pipeline_draft(ident.workspace, p.id, spec, ident.display_name)
         return (self.store.get_pipeline(ident.workspace, p.id) or p), v
 
     def get_pipeline(self, ident: Identity, pipeline_id: str) -> Pipeline:
@@ -121,7 +125,24 @@ class PipelineService:
     def save_version(self, ident: Identity, pipeline_id: str, spec: PipelineSpec, notes: str) -> PipelineVersion:
         self.get_pipeline(ident, pipeline_id)
         prepared = self._prepare(ident, spec)
-        return self._need(self.store.add_version(ident.workspace, pipeline_id, prepared, notes, ident.display_name), "pipeline")
+        v = self._need(self.store.add_version(ident.workspace, pipeline_id, prepared, notes, ident.display_name), "pipeline")
+        # ADR 0073: a version-save also refreshes the draft, so it is never behind the latest
+        # immutable version — a plain Save right after "Save as new version" starts from it, not
+        # from something older.
+        self.store.save_pipeline_draft(ident.workspace, pipeline_id, prepared, ident.display_name)
+        return v
+
+    def save_pipeline_draft(self, ident: Identity, pipeline_id: str, spec: PipelineSpec) -> PipelineDraft:
+        """Plain "Save" (ADR 0073): persists the draft in place, no version created. Goes through
+        the same validate -> check-refs -> compile gate as "Save as new version" — a broken draft
+        would also break anything resolving an "Always follow latest" reference to it live."""
+        self.get_pipeline(ident, pipeline_id)
+        prepared = self._prepare(ident, spec)
+        return self._need(self.store.save_pipeline_draft(ident.workspace, pipeline_id, prepared, ident.display_name), "pipeline")
+
+    def get_pipeline_draft(self, ident: Identity, pipeline_id: str) -> PipelineDraft | None:
+        self.get_pipeline(ident, pipeline_id)
+        return self.store.get_pipeline_draft(ident.workspace, pipeline_id)
 
     def get_version(self, ident: Identity, pipeline_id: str, version: int | None) -> PipelineVersion:
         return self._need(self.store.get_version(ident.workspace, pipeline_id, version), "pipeline version")
@@ -144,39 +165,30 @@ class PipelineService:
         version's code is already snapshotted at its own save time (ADR 0071), so resolving a
         reference to it is a pure store read. Raises ``ModelError``."""
         validate_structure(spec)
-        pinned = self._pin_task_versions(ident, spec)
-        configs = resolve_task_configs(self.store, ident.workspace, pinned)
-        compile_job(pinned, configs, run_id="validate", registry=self.registry, recorder=_NullRecorder(), cancel=Cancellation())
+        self._check_task_refs(ident, spec)
+        configs = resolve_task_configs(self.store, ident.workspace, spec)
+        compile_job(spec, configs, run_id="validate", registry=self.registry, recorder=_NullRecorder(), cancel=Cancellation())
 
-    # ---- the save pipeline: validate structure -> pin task versions -> compile ----
+    # ---- the save pipeline: validate structure -> check task refs resolve -> compile ----
     def _prepare(self, ident: Identity, spec: PipelineSpec) -> PipelineSpec:
         validate_structure(spec)
-        pinned = self._pin_task_versions(ident, spec)
-        configs = resolve_task_configs(self.store, ident.workspace, pinned)
+        self._check_task_refs(ident, spec)
+        configs = resolve_task_configs(self.store, ident.workspace, spec)
         # Compile now, not at run time: a structural problem must surface when the user saves,
         # not at 3am when the scheduler fires. (Nothing executes.)
-        compile_job(pinned, configs, run_id="validate", registry=self.registry, recorder=_NullRecorder(), cancel=Cancellation())
-        return pinned
+        compile_job(spec, configs, run_id="validate", registry=self.registry, recorder=_NullRecorder(), cancel=Cancellation())
+        return spec
 
-    def _pin_task_versions(self, ident: Identity, spec: PipelineSpec) -> PipelineSpec:
-        """Resolve every ``"latest"`` reference to the concrete version it means right now, and
-        confirm every reference (already-pinned or not) actually points at something that exists —
-        a real store lookup ``validate_structure`` cannot do on its own (ADR 0071)."""
-        out = []
+    def _check_task_refs(self, ident: Identity, spec: PipelineSpec) -> None:
+        """Confirm every reference (pinned or "latest") actually resolves to something right now —
+        a real store lookup ``validate_structure`` cannot do on its own (ADR 0071). Unlike before
+        ADR 0073, this never rewrites ``"latest"`` into a concrete version number: a saved spec —
+        draft or immutable version alike — keeps a literal ``"latest"`` forever, so it keeps
+        picking up whatever the referenced task's draft or latest version is at USE time (validate,
+        save-time compile-check here, and run start in ``runs.py``), not frozen at save time. A
+        version pin is completely unaffected either way."""
         for i, ref in enumerate(spec.tasks):
-            field = f"tasks[{i}]"
-            task = self.store.get_task(ident.workspace, ref.task_id)
-            if task is None:
-                raise ModelError(f"{field} references task {ref.task_id!r}, which does not exist", f"{field}.taskId")
-            version = ref.task_version
-            if version == "latest":
-                if task.latest_version == 0:
-                    raise ModelError(f"{field} references task {ref.task_id!r}, which has no saved version yet", f"{field}.taskId")
-                version = task.latest_version
-            elif self.store.get_task_version(ident.workspace, ref.task_id, version) is None:
-                raise ModelError(f"{field} references task {ref.task_id!r} version {version}, which does not exist", f"{field}.taskVersion")
-            out.append(ref.model_copy(update={"task_version": version}))
-        return PipelineSpec(tasks=out)
+            resolve_task_ref(self.store, ident.workspace, ref, f"tasks[{i}]")
 
     # ---- pipeline scheduling (folded from the retired Job entity, ADR 0071) ----
     def update_schedule(
@@ -203,6 +215,8 @@ class PipelineService:
             config = self._prepare_task_config(ident, config, previous=None)
         t = self.store.create_task(ident.workspace, name.strip(), description.strip(), ident.display_name)
         v = self.store.add_task_version(ident.workspace, t.id, config, notes, ident.display_name) if config is not None else None
+        if config is not None:
+            self.store.save_task_draft(ident.workspace, t.id, config, ident.display_name)
         return (self.store.get_task(ident.workspace, t.id) or t), v
 
     def get_task(self, ident: Identity, task_id: str) -> TaskEntity:
@@ -220,9 +234,34 @@ class PipelineService:
 
     def save_task_version(self, ident: Identity, task_id: str, config: TaskConfig, notes: str) -> TaskVersionRecord:
         self.get_task(ident, task_id)
-        previous = self.store.get_task_version(ident.workspace, task_id, None)
-        prepared = self._prepare_task_config(ident, config, previous.config if previous else None)
-        return self._need(self.store.add_task_version(ident.workspace, task_id, prepared, notes, ident.display_name), "task")
+        previous = self._latest_task_config(ident, task_id)
+        prepared = self._prepare_task_config(ident, config, previous)
+        v = self._need(self.store.add_task_version(ident.workspace, task_id, prepared, notes, ident.display_name), "task")
+        # ADR 0073: also refreshes the draft, so it is never behind the latest immutable version.
+        self.store.save_task_draft(ident.workspace, task_id, prepared, ident.display_name)
+        return v
+
+    def save_task_draft(self, ident: Identity, task_id: str, config: TaskConfig) -> TaskDraft:
+        """Plain "Save" (ADR 0073): persists the draft in place, no version created."""
+        self.get_task(ident, task_id)
+        previous = self._latest_task_config(ident, task_id)
+        prepared = self._prepare_task_config(ident, config, previous)
+        return self._need(self.store.save_task_draft(ident.workspace, task_id, prepared, ident.display_name), "task")
+
+    def get_task_draft(self, ident: Identity, task_id: str) -> TaskDraft | None:
+        self.get_task(ident, task_id)
+        return self.store.get_task_draft(ident.workspace, task_id)
+
+    def _latest_task_config(self, ident: Identity, task_id: str) -> TaskConfig | None:
+        """The baseline a code reference is reused against without re-fetching (ADR 0063's "reuse
+        rule" — see ``_resolve_task_code``): the current draft if there is one (ADR 0073 — it is
+        always at least as fresh as the latest version), else the latest saved version, else None
+        for a task that has never been configured at all."""
+        draft = self.store.get_task_draft(ident.workspace, task_id)
+        if draft is not None:
+            return draft.config
+        v = self.store.get_task_version(ident.workspace, task_id, None)
+        return v.config if v else None
 
     def get_task_version(self, ident: Identity, task_id: str, version: int | None) -> TaskVersionRecord:
         return self._need(self.store.get_task_version(ident.workspace, task_id, version), "task version")

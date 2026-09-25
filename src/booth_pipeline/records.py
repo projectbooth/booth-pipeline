@@ -57,6 +57,10 @@ class Pipeline:
     # exactly this version, regardless of what is saved on top of it later — mirrors the old Job's
     # `pipeline_version` pin (ADR 0071 "Open question, ruled 2026-09-24", second one).
     pinned_version: int | None = None
+    # Derived on read: whether a mutable draft (ADR 0073) has ever been saved — separate from
+    # latest_version above, since a draft can exist without ever having been promoted to a version.
+    has_draft: bool = False
+    draft_updated_at: datetime | None = None
 
 
 @dataclass
@@ -67,6 +71,18 @@ class PipelineVersion:
     notes: str
     created_by: str
     created_at: datetime
+
+
+@dataclass
+class PipelineDraft:
+    """A pipeline's mutable, unversioned "current" state (ADR 0073): what plain "Save" writes to,
+    distinct from the immutable ``PipelineVersion`` history. "Save as new version" also writes
+    here, so the draft is never behind the latest version — it is always at least as fresh."""
+
+    pipeline_id: str
+    spec: PipelineSpec
+    updated_by: str
+    updated_at: datetime
 
 
 @dataclass
@@ -84,6 +100,10 @@ class TaskEntity:
     updated_at: datetime
     # Derived on read: the highest saved version number, 0 if none has been saved yet.
     latest_version: int = 0
+    # Derived on read: whether a mutable draft (ADR 0073) has ever been saved — a task can be
+    # "configured" (have real, runnable code) via its draft alone, without any saved version.
+    has_draft: bool = False
+    draft_updated_at: datetime | None = None
 
 
 @dataclass
@@ -97,6 +117,18 @@ class TaskVersionRecord:
     notes: str
     created_by: str
     created_at: datetime
+
+
+@dataclass
+class TaskDraft:
+    """A task's mutable, unversioned "current" state (ADR 0073) — the direct counterpart of
+    ``PipelineDraft``. What plain "Save" writes to; "Save as new version" also writes here, so the
+    draft is never behind the latest version."""
+
+    task_id: str
+    config: TaskConfig
+    updated_by: str
+    updated_at: datetime
 
 
 @dataclass

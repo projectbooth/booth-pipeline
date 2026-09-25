@@ -35,6 +35,12 @@ class ValidateRequest(Wire):
     spec: PipelineSpec
 
 
+class PipelineDraftSave(Wire):
+    """Plain "Save" (ADR 0073): writes the draft in place, no version created."""
+
+    spec: PipelineSpec
+
+
 class PipelineScheduleUpdate(Wire):
     """Sets a pipeline's own trigger and unattended-run settings directly (ADR 0071 folds these
     onto Pipeline; there is no more separate Job to hold them)."""
@@ -66,3 +72,9 @@ class TaskUpdate(Wire):
 class TaskVersionCreate(Wire):
     config: TaskConfig
     notes: str = Field("", max_length=MAX_NOTES)
+
+
+class TaskDraftSave(Wire):
+    """Plain "Save" (ADR 0073): writes the draft in place, no version created."""
+
+    config: TaskConfig

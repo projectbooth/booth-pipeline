@@ -15,34 +15,34 @@ from typing import Any
 
 import yaml
 
-from .model import ModelError
 from .records import Pipeline, PipelineVersion
+from .resolve import resolve_task_ref
 from .store.base import Store
 
 API_VERSION = "booth-pipeline/v1"
 
 
 def export_pipeline_version(store: Store, workspace: str, pipeline: Pipeline, version: PipelineVersion) -> str:
-    """Render one immutable pipeline version as a YAML document (text)."""
+    """Render one immutable pipeline version as a YAML document (text). A reference still saying
+    "latest" (ADR 0073 — no longer pinned to a concrete version at pipeline-save time) resolves
+    live, the same as validation and a run do: the referenced task's current draft if it has one,
+    else its latest saved version. ``resolve_task_ref`` raises if that fails to resolve (should not
+    happen: ``delete_task`` is refused while any version still references it, and a "latest"
+    reference always resolves as long as the task itself still exists)."""
     tasks: list[dict[str, Any]] = []
     for i, ref in enumerate(version.spec.tasks):
-        entity = store.get_task(workspace, ref.task_id)
-        tv = store.get_task_version(workspace, ref.task_id, ref.task_version)
-        if entity is None or tv is None:
-            # Should not happen (delete_task is refused while any version still references it) —
-            # surfaced as a clear error rather than a silently incomplete export.
-            raise ModelError(f"tasks[{i}] references task {ref.task_id!r} version {ref.task_version!r}, which no longer exists", f"tasks[{i}]")
+        resolved = resolve_task_ref(store, workspace, ref, f"tasks[{i}]")
         tasks.append(
             {
                 "key": ref.key,
                 "dependsOn": list(ref.depends_on),
                 "position": {"x": ref.position.x, "y": ref.position.y},
                 "task": {
-                    "id": entity.id,
-                    "name": entity.name,
-                    "description": entity.description,
-                    "version": tv.version,
-                    "config": tv.config.model_dump(by_alias=True, mode="json"),
+                    "id": resolved.entity.id,
+                    "name": resolved.entity.name,
+                    "description": resolved.entity.description,
+                    "version": resolved.version if resolved.version is not None else "draft",
+                    "config": resolved.config.model_dump(by_alias=True, mode="json"),
                 },
             }
         )

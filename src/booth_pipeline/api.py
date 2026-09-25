@@ -21,17 +21,21 @@ from .records import (
     RUN_TERMINAL,
     LogLine,
     Pipeline,
+    PipelineDraft,
     PipelineVersion,
     Run,
+    TaskDraft,
     TaskEntity,
     TaskRun,
     TaskVersionRecord,
 )
 from .schemas import (
     PipelineCreate,
+    PipelineDraftSave,
     PipelineScheduleUpdate,
     PipelineUpdate,
     TaskCreate,
+    TaskDraftSave,
     TaskUpdate,
     TaskVersionCreate,
     ValidateRequest,
@@ -72,6 +76,10 @@ def pipeline_json(p: Pipeline) -> dict[str, Any]:
         "hasOwner": bool(p.owner_sub),
         "nextRunAt": _iso(p.next_run_at),
         "pinnedVersion": p.pinned_version,
+        # ADR 0073: whether a mutable draft has ever been saved (plain Save, or "Save as new
+        # version", which also refreshes it) — separate from latestVersion above.
+        "hasDraft": p.has_draft,
+        "draftUpdatedAt": _iso(p.draft_updated_at),
     }
 
 
@@ -98,6 +106,9 @@ def task_json(t: TaskEntity) -> dict[str, Any]:
         "createdAt": _iso(t.created_at),
         "updatedAt": _iso(t.updated_at),
         "latestVersion": t.latest_version,
+        # ADR 0073: see pipeline_json's own hasDraft/draftUpdatedAt.
+        "hasDraft": t.has_draft,
+        "draftUpdatedAt": _iso(t.draft_updated_at),
     }
 
 
@@ -112,6 +123,14 @@ def task_version_json(v: TaskVersionRecord, with_config: bool = True) -> dict[st
     if with_config:
         out["config"] = v.config.model_dump(by_alias=True, mode="json")
     return out
+
+
+def pipeline_draft_json(d: PipelineDraft) -> dict[str, Any]:
+    return {"pipelineId": d.pipeline_id, "spec": d.spec.model_dump(by_alias=True, mode="json"), "updatedBy": d.updated_by, "updatedAt": _iso(d.updated_at)}
+
+
+def task_draft_json(d: TaskDraft) -> dict[str, Any]:
+    return {"taskId": d.task_id, "config": d.config.model_dump(by_alias=True, mode="json"), "updatedBy": d.updated_by, "updatedAt": _iso(d.updated_at)}
 
 
 def run_json(r: Run) -> dict[str, Any]:
@@ -258,6 +277,20 @@ def get_version(request: Request, pipeline_id: str, version: str, ident: Identit
     return version_json(svc(request).get_version(ident, pipeline_id, _version_or_404(version, "pipeline version")))
 
 
+@router.get("/pipelines/{pipeline_id}/draft")
+def get_pipeline_draft(request: Request, pipeline_id: str, ident: Identity = Depends(require_read)):
+    d = svc(request).get_pipeline_draft(ident, pipeline_id)
+    if d is None:
+        raise HTTPException(404, "no draft saved for this pipeline")
+    return pipeline_draft_json(d)
+
+
+@router.put("/pipelines/{pipeline_id}/draft")
+def save_pipeline_draft(request: Request, pipeline_id: str, body: PipelineDraftSave, ident: Identity = Depends(require_write)):
+    """Plain "Save" (ADR 0073): writes the draft in place — no version created."""
+    return pipeline_draft_json(svc(request).save_pipeline_draft(ident, pipeline_id, body.spec))
+
+
 @router.get("/pipelines/{pipeline_id}/versions/{version}/export")
 def export_version(request: Request, pipeline_id: str, version: str, ident: Identity = Depends(require_read)):
     """The version as a YAML document — export-only (ADR 0071 phase 4), but a complete, faithful
@@ -312,6 +345,20 @@ def save_task_version(request: Request, task_id: str, body: TaskVersionCreate, i
 @router.get("/tasks/{task_id}/versions/{version}")
 def get_task_version(request: Request, task_id: str, version: str, ident: Identity = Depends(require_read)):
     return task_version_json(svc(request).get_task_version(ident, task_id, _version_or_404(version, "task version")))
+
+
+@router.get("/tasks/{task_id}/draft")
+def get_task_draft(request: Request, task_id: str, ident: Identity = Depends(require_read)):
+    d = svc(request).get_task_draft(ident, task_id)
+    if d is None:
+        raise HTTPException(404, "no draft saved for this task")
+    return task_draft_json(d)
+
+
+@router.put("/tasks/{task_id}/draft")
+def save_task_draft(request: Request, task_id: str, body: TaskDraftSave, ident: Identity = Depends(require_write)):
+    """Plain "Save" (ADR 0073): writes the draft in place — no version created."""
+    return task_draft_json(svc(request).save_task_draft(ident, task_id, body.config))
 
 
 # ---- runs ---------------------------------------------------------------------------------
