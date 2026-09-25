@@ -142,7 +142,7 @@ describe("builder", () => {
     mount("editor", "/pipeline/pipelines/p1");
     await screen.findByTestId("node-extract");
 
-    const createObjectURL = vi.fn(() => "blob:mock-url");
+    const createObjectURL = vi.fn<(blob: Blob) => string>(() => "blob:mock-url");
     const revokeObjectURL = vi.fn();
     URL.createObjectURL = createObjectURL;
     URL.revokeObjectURL = revokeObjectURL;
