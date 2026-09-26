@@ -1,7 +1,8 @@
 # 0016: Adopting ADR 0074, phase 0 — the screens-first design pass for the `web/` rebuild
 
-Status: **design pass done, no implementation code yet.** This document is the spec the rebuild is
-built against. Implementation starts after the open questions at the bottom are answered.
+Status: **design pass done and ruled on (2026-09-25).** This document is the spec the rebuild is
+built against. The user's rulings on the four open questions are in §10. Q2 changed the DAG tab
+from a view/edit toggle to an always-editable canvas, and §4 reflects that.
 
 Inputs: ADR 0074; `agent-briefs/pipeline.md` (the design-review section and everything after it);
 the Figma reference at `examples/pipeline` (all nine `screens/` and the `PipelineView.tsx` /
@@ -53,7 +54,7 @@ visit each one directly. Old URLs keep working: `/pipelines/:id` lands on the DA
 | Route (under `basePath`)            | Screen                                   |
 |-------------------------------------|------------------------------------------|
 | `/pipelines`                        | S1 Pipelines list                        |
-| `/pipelines/:id`                    | S2a Pipeline, DAG tab (view)             |
+| `/pipelines/:id`                    | S2a Pipeline, DAG tab                    |
 | `/pipelines/:id/v/:n`               | S2a, showing an old immutable version    |
 | `/pipelines/:id/runs`               | S2c Runs tab                             |
 | `/pipelines/:id/schedule`           | S2d Schedule & Triggers tab              |
@@ -65,8 +66,8 @@ visit each one directly. Old URLs keep working: `/pipelines/:id` lands on the DA
 | `/tasks/:id/config`                 | S5b Task, Configuration tab              |
 | `/tasks/:id/versions`               | S5c Task, Versions tab                   |
 
-Edit mode (S2b, S5d) is component state, not a route. It holds unsaved work, and a URL that
-reopened an empty editor would be misleading.
+The task's Edit mode (S5d) is component state, not a route. It holds unsaved work, and a URL
+that reopened an empty editor would be misleading.
 
 ---
 
@@ -88,7 +89,7 @@ reopened an empty editor would be misleading.
 | Task list Status / Duration / Last run          | No per-task run endpoint. `TaskRun` is keyed by the pipeline's node key, not the task id, and no endpoint says which pipelines reference a task                                                                        | **Drop** (Q1) |
 | Task Runs tab                                   | Same gap                                                                                                                                                                                                               | **Replace with a Versions tab** (Q1) |
 | "Run Task" button                               | No single-task run endpoint                                                                                                                                                                                            | **Drop** (Q1) |
-| "Edit" button                                   | Decorative in the Figma                                                                                                                                                                                                | Build as a real edit mode (§4 S2b, S5d) |
+| "Edit" button                                   | Decorative in the Figma                                                                                                                                                                                                | Pipelines: none, the canvas is always editable (Q2). Tasks: a real edit mode (S5d) |
 
 ---
 
@@ -124,7 +125,7 @@ Ad-hoc export           ○ Never run  Manual only       —                 —
 - `⋯` → **Delete pipeline…** opens an inline confirm row (never `window.confirm`), then `DELETE`.
   The backend cancels active runs, and the confirm text says so.
 - **+ New pipeline** expands an inline card above the table (Name*, Description,
-  [Create] [Cancel]) → `createPipeline` → S2b (edit mode on an empty canvas).
+  [Create] [Cancel]) → `createPipeline` → S2a (an empty canvas, ready to add tasks).
 - Empty: "No pipelines yet", with a Create button for writers or "Someone with edit access needs
   to create one" for viewers. With no search matches: "No pipelines match 'x'".
 - Auto-refresh every 10 s while any visible pipeline's latest run is queued or running.
@@ -133,7 +134,7 @@ Ad-hoc export           ○ Never run  Manual only       —                 —
 
 ```
 ← Pipelines / Daily ETL
-Daily ETL  ● Running   Draft ahead of v4                          [Edit]  [▶ Run now]  [⋯]
+Daily ETL  ● Running   Draft ahead of v4                                  [▶ Run now]  [⋯]
 End-to-end ingestion from raw S3 events to warehouse-ready Gold tables.
 Run now runs v4 (latest saved version)          ← one line of small print under the button row
 ┌──────────────┬──────────┬──────────────────┬──────────────────┬────────┬───────┐
@@ -155,59 +156,34 @@ Run now runs v4 (latest saved version)          ← one line of small print unde
   aren't in a saved version, so this run won't include them." If there is no saved version,
   the button is disabled and says why. A 409 (already running, concurrency off) shows as an inline
   banner with a link to the active run.
-  In edit mode with unsaved changes, Run now stays enabled (it runs a saved version regardless),
-  and the small print makes that explicit.
-- **Edit** switches to the DAG tab in edit mode (S2b). Writers only.
+  With unsaved canvas changes, Run now stays enabled (it runs a saved version regardless), and
+  the small print makes that explicit.
 - **⋯** → Export YAML (the version shown), Edit details (name/description via
   `updatePipeline`, which the API has but the old UI never offered), Delete pipeline.
 - **Status badge** = latest run status. **Draft chip** appears only when the draft's spec
   actually differs from the latest version's spec, not merely because a draft row exists.
 
-### S2a — DAG tab, view mode  (Figma screen 3, canvas)
+### S2a — DAG tab: the builder, always editable for writers  (Figma screen 3 canvas + old builder)
+
+Ruled Q2: there is no view/edit toggle. Writers see the toolbar and an editable canvas the moment
+the tab opens. Viewers see the same canvas, read-only, with no toolbar.
 
 ```
-Showing current draft  ▾(Current draft | v4 · 2026-09-24 14:02 · 6 tasks | v3 · …)   Status from run 7f3a… (v4, 2h ago)
+[+ Add task] [Tidy layout]  ● Unsaved changes      Version ▾(Current draft | v4 · 2026-09-24 14:02 · 6 tasks | …)  [Discard] [Save] [Save as new version…]
+⚠ Not ready to save: tasks[1] references task 'x', which has no saved version yet      ← live validation
+Status from run 7f3a… (v4, 2h ago)                                                     ← status caption
 ┌───────────────────────────────────────────────────────────────────────────────┐
-│ ·  ·  ·  ·  ·  ·  ·  ·  (dot grid)                                            │
+│ ·  ·  ·  ·  (dot grid)                                                        │
 │   ┌─PY──────────────┐        ┌─PY──────────────┐        ┌─SQL─────────────┐   │  560 px, fixed
-│   │ ingest_raw      │──────▶ │ transform        │──────▶│ aggregate       │   │
+│   │ ingest_raw      │──────▶ │ transform       │──────▶ │ aggregate       │   │
 │   │ extract · latest│        │ spark_xf · v3   │        │ agg · v1   ●    │   │
 │   └─────────────────┘        └─────────────────┘        └─────────────────┘   │
 │   green border               green                      blue (running)        │
 └───────────────────────────────────────────────────────────────────────────────┘
-[ node detail card appears HERE, below the canvas, when a node is clicked ]
-```
-
-- The canvas shows the **current spec**: the draft if there is one, else the latest version.
-  At `/v/:n` it shows version n, with a banner: "Viewing v2 of 5 (created …). [Edit from this
-  version]". Editing from an old version saves as a new version, and pins elsewhere are unaffected
-  (same behavior as before).
-- **Status borders** (new): each node's border takes the latest run's status for the node key
-  (§5). Nodes absent from that run stay neutral. A caption names the run (link). It polls every 2 s
-  while that run is active.
-- **Nodes** show a language badge, the **task name** (resolved in bulk on load, which also fixes
-  the old "(no task picked) until clicked" gap), key · version reference, and a status dot.
-- Clicking a node opens a **read-only detail card below the canvas** (Figma's right-hand panel,
-  moved below per the user's stated preference): task name (link to S5), description, version
-  ref, depends on, runner, retries, timeout, platform access, params, and from the latest run
-  the status, attempts, duration and a "Logs" link to S3 filtered to that task. There is no
-  editing here.
-- Pan/zoom and fit-view controls. Nodes aren't draggable in view mode.
-- Empty spec: centered card "This pipeline has no tasks yet" with [Edit] for writers.
-
-### S2b — DAG tab, edit mode  (the builder)
-
-```
-[+ Add task] [Tidy layout]   ● Unsaved changes                [Discard] [Save]  [Save as new version…]
-⚠ Not ready to save: tasks[1] references task 'x', which has no saved version yet   ← live validation
-┌───────────────────────────────────────────────────────────────────────────────┐
-│  canvas: 560 px fixed, draggable nodes, drag handle→handle to add a dependency, │
-│  Backspace deletes the selected node, error node gets a red border             │
-└───────────────────────────────────────────────────────────────────────────────┘
 ┌ Panel (below the canvas, in page flow; exactly one of these) ─────────────────┐
 │ (a) nothing selected:  hint text                                               │
 │ (b) Add a task:        TaskPicker                                              │
-│ (c) node selected:     Reference settings + the referenced task's settings     │
+│ (c) node selected:     Last-run strip + Reference settings + the task's settings│
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -215,31 +191,48 @@ Showing current draft  ▾(Current draft | v4 · 2026-09-24 14:02 · 6 tasks | v
   normal block flow at every width. Nothing opens beside the canvas, over it, or inside a flex
   row with it, so opening or closing a panel cannot change the canvas height. This is exactly
   "all of the menu popups should be under the pipeline DAG view".
+- **What it shows:** the **current spec**, meaning the draft if there is one, else the latest
+  version. At `/v/:n` it shows version n with a banner: "Viewing v2 of 5 (created …). Saving
+  creates v6 from this one; nothing pinned changes." (Same as before.)
+- **Nodes** show a language badge, the **task name** (resolved in bulk on load, which also fixes
+  the old "(no task picked) until clicked" gap), key · version reference, and a status dot.
+- **Status borders** (new): each node's border takes the latest run's status for the node key
+  (§5), polling every 2 s while that run is active. They stay on while editing. A node that is
+  new or re-pointed since that run has no status, so it stays neutral. The red validation outline
+  and the indigo selection ring take precedence.
+- **Editing (writers):** drag nodes; drag from handle to handle to add a dependency; Backspace
+  deletes the selected node; pan/zoom/fit controls. Viewers get pan/zoom only.
 - **(b) Add a task** uses the same picker as before: search existing tasks; tasks with no saved
   version and no draft are hidden by default behind a "show unconfigured" toggle and badged
   "not configured yet"; typing a new name offers "+ Create task 'x'". Picking an existing task
   **never** creates a Task. Picking wires a node, selects it, and scrolls the panel into view.
-- **(c) Node selected**, two sections:
-  1. *Reference*: node key (rename, collision-checked), References task [Change → picker],
-     Version: "Always follow latest (draft if saved)" / "Pin to v3 — 2026-09-24 14:02",
-     Depends on (multi-select), [Remove from pipeline].
+- **(c) Node selected**, three sections:
+  0. *Last run* (from the Figma's side panel): the status, attempts, duration and a "Logs" link to
+     S3 filtered to this node, when the latest run has it.
+  1. *Reference*: node key (rename, collision-checked), References task [Change → picker]
+     [Open task →], Version: "Always follow latest (draft if saved)" / "Pin to v3 —
+     2026-09-24 14:02", Depends on (multi-select), [Remove from pipeline]. For viewers these
+     are the same rows, read-only.
   2. *Task settings* (collapsible, starts collapsed when pinned): the shared task's config form
      (code source picker: catalog / storage, runner, retry, timeout, platform access, params),
      with its own **[Save]** (task draft) and **[Save as new task version…]**, plus a notice
-     that this edits the shared task and affects every pipeline following "latest". Disabled
-     with an explanation when the node is pinned to an old version: "Pinned to v2 — pinned
-     versions are frozen. Switch to 'latest' or open the task to edit it."
+     that this edits the shared task and affects every pipeline following "latest". When the
+     node is pinned, the form is read-only and explains why: "Pinned to v2 — pinned versions
+     are frozen. Switch to 'latest' or open the task to edit it."
 - **Save** → `PUT /pipelines/:id/draft`. No version, no prompt. Banner: "Saved. Runs still use
   v4 until you save a new version." (This copy matters: pipeline-level Run now uses a saved
   version, even though task "latest" refs pick up task drafts.)
 - **Save as new version…** → a small inline popover **below the toolbar** (not a modal over the
   canvas) with an optional "What changed?" note → `POST …/versions`. Banner: "Saved as v5."
-- **Discard** reloads from the server after an inline confirm. Leaving edit mode, switching
-  tab, or navigating with unsaved changes shows an inline "Discard unsaved changes?" bar; a
-  `beforeunload` guard covers reloads.
+- **Discard** reloads from the server after an inline confirm. Switching tabs or navigating
+  away with unsaved changes shows an inline "Discard unsaved changes?" bar; a `beforeunload`
+  guard covers reloads. (Tab switches keep the canvas state in memory, so switching to Runs and
+  back loses nothing. The bar only appears when leaving the pipeline.)
 - **Live validation** calls `POST /pipelines/validate` debounced at 500 ms. The server is the
   only rule source. A field error (`tasks[N].x`) outlines node N in red, selects it, and routes
   the message to input `x` in panel (c). This keeps the old field-routing fix.
+- **Empty spec:** a centered card inside the canvas, "This pipeline has no tasks yet", with
+  [+ Add task] for writers.
 
 ### S2c — Runs tab  (new, Figma screen 4)
 
@@ -373,7 +366,7 @@ rows in mono.
 **S5c Versions**: version, created, by, notes, [View] (sets the "Showing" selector). The draft
 row appears when the draft differs.
 
-**S5d Edit mode**: the full config form (the same component as panel (c) in S2b), with
+**S5d Edit mode**: the full config form (the same component as panel (c) in S2a), with
 [Discard] [Save] [Save as new version…]. It starts from the draft if there is one, else the latest
 version, else defaults. Copy: "Save updates the draft that every pipeline following 'latest'
 uses immediately; pinned pipelines are unaffected."
@@ -392,8 +385,9 @@ depends on the shell's z-index stack.
   `GET /runs/:id`). Match by **node key**. If the run was of a different version, keys that no
   longer exist are ignored and new keys stay neutral. The caption names the run's version so a
   mismatch is visible.
-- In edit mode, borders are neutral (the draft hasn't run), except the red validation-error
-  outline and the indigo selection ring.
+- Borders stay on while editing. A node whose key or task reference changed since that run is
+  neutral, because the run says nothing about it. The red validation-error outline and the
+  indigo selection ring take precedence.
 - Mapping: succeeded → green, failed → red, running/retrying → blue with a pulsing dot,
   pending/queued → grey dashed, skipped → amber, canceled → slate.
 
@@ -423,17 +417,17 @@ The click-through for this is in §8. It uses a **real** viewport resize via Pla
 | Must keep (ADR 0074)                                                               | Where |
 |------------------------------------------------------------------------------------|---|
 | Task and Pipeline lists dedupe by entity; version history on the entity with creation times | S1, S4, S2f, S5c |
-| Every version picker shows the version's creation time                              | S2a selector, S2b version pin, S2d pin picker, S5 "Showing" selector |
-| Add-task picker distinguishes configured from unconfigured and never creates orphans | S2b (b) |
-| Plain Save = draft; Save as new version = immutable; "latest" resolves the draft; pins frozen | S2b, S5d; pinned refs lock the inline task form |
+| Every version picker shows the version's creation time                              | S2a version selector and version pin, S2d pin picker, S5 "Showing" selector |
+| Add-task picker distinguishes configured from unconfigured and never creates orphans | S2a (b) |
+| Plain Save = draft; Save as new version = immutable; "latest" resolves the draft; pins frozen | S2a, S5d; pinned refs lock the inline task form |
 | Run now from the pipeline's own page                                                | S2 header, on every tab |
 | YAML export                                                                         | S2 ⋯ menu, S2f per-version |
 | Scheduling (cron/interval/presets/timezone/enabled/concurrency/role ceiling) plus `pinnedVersion` | S2d |
-| Live server validation with field-level routing to the right node and input         | S2b |
+| Live server validation with field-level routing to the right node and input         | S2a |
 | Read-only role hides every write control                                            | all screens |
-| Error boundary per route; catalog/storage outages don't break the form              | global; S2b (c), S5d |
+| Error boundary per route; catalog/storage outages don't break the form              | global; S2a (c), S5d |
 | Per-run DAG, task table, logs, cancel                                               | S3 |
-| Unsaved-work guard                                                                  | S2b, S5d |
+| Unsaved-work guard                                                                  | S2a, S5d |
 | New from the Figma: stat header, Runs tab with pass/fail strip, status-colored nodes, flat Configuration tab | S2, S2c, S2a/§5, S2e and S5b |
 
 ## 8. Implementation phases (each ends with a check-in)
@@ -445,7 +439,7 @@ The click-through for this is in §8. It uses a **real** viewport resize via Pla
    Banner, InlineConfirm, Table, Skeleton) in both themes; S1 and S4 including create and delete.
 2. **Pipeline read side**: S2 header, stat strip and Run now; S2a with bulk name resolution and
    status borders; S2c, S2e, S2f; S3.
-3. **Pipeline editing**: S2b (canvas rules §6, picker, reference and task panels, draft vs.
+3. **Pipeline editing**: S2a editing (canvas rules §6, picker, reference and task panels, draft vs.
    version, validation routing, discard guard); S2d editor; export.
 4. **Task detail**: S5a–S5d.
 5. **Verification and release**: RTL tests per screen plus a mount-contract test; then a **live
@@ -456,10 +450,9 @@ The click-through for this is in §8. It uses a **real** viewport resize via Pla
 
 ## 9. Decisions taken in this pass (reversible, flagged for visibility)
 
-- **Edit is a mode, not always-on.** The DAG tab defaults to a read-only, status-colored view,
-  matching the Figma's separate Edit button. This keeps run-status coloring (which describes what
-  ran) apart from draft editing (which hasn't run yet), and gives viewers the same screen minus
-  the button. It costs writers one extra click.
+- **The pipeline canvas is always editable** for writers (ruled Q2; the Figma's Edit button is
+  dropped for pipelines). The task detail page keeps a separate Edit mode (S5d), because the
+  flat read-only Configuration tab there is itself one of the Figma items ADR 0074 asked for.
 - **Panels go below the canvas, not to its right** as in the Figma, per the user's direct
   instruction in the brief. This is also the core of the layout fix (§6).
 - **A fifth "Versions" tab** on pipelines, and Versions in place of Runs on tasks, so version
@@ -469,16 +462,12 @@ The click-through for this is in §8. It uses a **real** viewport resize via Pla
 - **Run now names its version**, because it never runs the pipeline draft (`service.start_run`).
   Without that, plain Save plus Run now would silently run stale DAG wiring.
 
-## 10. Open questions for the user
+## 10. Rulings (user, 2026-09-25)
 
-- **Q1: task run history and "Run Task".** The Figma's task Runs tab, its Status/Duration/Last-run
-  columns, and "Run Task" need backend support that doesn't exist: a per-task run query and a
-  single-task run. ADR 0074 freezes the API, so this pass drops them and puts version history in
-  the Runs tab's place. A client-side join over recent runs is possible but slow and incomplete.
-  Is dropping them fine, or should a small read-only backend endpoint be raised as its own ADR?
-- **Q2: edit mode vs. an always-editable canvas.** See §9. Keep the Figma-style Edit button?
-- **Q3: palette.** Keep the fleet's shared slate/indigo tokens so pipeline matches catalog and
-  storage in the shell (recommended), or match the Figma's own blue/near-black palette, which
-  would make this module look different from its neighbors?
-- **Q4: release number.** `1.0.0` for the rewrite (recommended; the props contract is
-  unchanged), or `0.5.0`?
+- **Q1: task run history and "Run Task": dropped.** The Figma's task Runs tab, its task-list
+  Status/Duration/Last-run columns, and "Run Task" need backend support that doesn't exist (a
+  per-task run query, a single-task run). The Versions tab takes the Runs tab's place.
+- **Q2: always-editable canvas.** No view/edit toggle on the pipeline DAG tab (S2a).
+- **Q3: keep the fleet palette.** Shared slate/indigo tokens, so the module matches catalog and
+  storage in the shell. The Figma's structure and status colors are adopted; its palette is not.
+- **Q4: release as `1.0.0`.** The props contract is unchanged; the major bump marks the rewrite.
