@@ -6,6 +6,28 @@ export function formatTime(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+/** "2026-09-24 06:00" in local time — the compact, fixed-width form the stat cards and tables use
+ *  (the Figma's style). `formatTime` stays the long, locale-formatted form for tooltips and prose. */
+export function formatStamp(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** "just now" / "5 min ago" / "3 h ago" / "2 d ago" / "in 4 h". */
+export function formatRelative(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const diff = t - now;
+  const abs = Math.abs(diff);
+  const unit = abs < 45_000 ? null : abs < 3_600_000 ? [Math.round(abs / 60_000), "min"] : abs < 86_400_000 ? [Math.round(abs / 3_600_000), "h"] : [Math.round(abs / 86_400_000), "d"];
+  if (!unit) return "just now";
+  return diff < 0 ? `${unit[0]} ${unit[1]} ago` : `in ${unit[0]} ${unit[1]}`;
+}
+
 /** "1m 05s" / "12s" / "340ms"; empty when the interval is not known. Takes the end as a parameter
  *  (rather than reading the clock) so a running task's duration ticks with the caller's own timer. */
 export function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined, now: number = Date.now()): string {

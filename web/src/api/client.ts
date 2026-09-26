@@ -12,6 +12,7 @@ import type {
   Run,
   RunDetail,
   RunnerInfo,
+  RunStatus,
   StorageBackendSummary,
   StorageObjectSummary,
   TaskConfig,
@@ -145,7 +146,10 @@ export const api = {
   getTaskDraft: (c: ApiContext, id: string) => request<TaskDraft>(c, PIPELINE, `/tasks/${e(id)}/draft`),
   saveTaskDraft: (c: ApiContext, id: string, config: TaskConfig) => request<TaskDraft>(c, PIPELINE, `/tasks/${e(id)}/draft`, json("PUT", { config })),
 
-  listRuns: (c: ApiContext, pipelineId?: string) => request<Page<Run>>(c, PIPELINE, `/runs${qs({ pipelineId, limit: 50 })}`),
+  // Newest first. `.total` is the exact count matching the filters, so `limit: 1` doubles as a
+  // cheap "how many runs have this status" query (the Runs tab's stat cards rely on it).
+  listRuns: (c: ApiContext, opts: { pipelineId?: string; status?: RunStatus; limit?: number; offset?: number } = {}) =>
+    request<Page<Run>>(c, PIPELINE, `/runs${qs({ pipelineId: opts.pipelineId, status: opts.status, limit: opts.limit ?? 50, offset: opts.offset })}`),
   getRun: (c: ApiContext, id: string) => request<RunDetail>(c, PIPELINE, `/runs/${e(id)}`),
   cancelRun: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/runs/${e(id)}/cancel`, { method: "POST" }),
   runLogs: (c: ApiContext, id: string, opts: { task?: string; after?: number } = {}) =>

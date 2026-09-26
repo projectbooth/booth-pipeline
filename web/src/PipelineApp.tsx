@@ -1,20 +1,22 @@
 import { useMemo } from "react";
 import type { ApiContext, GetAccessToken } from "./api/client";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import { Link } from "./components/ui";
 import type { ViewCtx } from "./context";
 import { DEFAULT_BASE_PATH, defaultNavigate, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
 import type { WorkspaceRole } from "./types";
-import { PipelineEditor } from "./views/PipelineEditor";
+import { ErrorBoundary } from "./ui/ErrorBoundary";
+import { Link } from "./ui/primitives";
+import { PipelineDetail } from "./views/pipeline/PipelineDetail";
 import { PipelineList } from "./views/PipelineList";
-import { RunView } from "./views/RunView";
-import { TaskDetail, TaskList } from "./views/TaskViews";
+import { RunDetail } from "./views/RunDetail";
+import { TaskDetail } from "./views/task/TaskDetail";
+import { TaskList } from "./views/TaskList";
 
 /**
  * Props contract agreed with booth-design and pinned into contracts/ui-integration.md by ADR 0031
  * (workspace/role/theme) and ADR 0033 (getAccessToken): plain React props, not shared context, so
  * this package never depends on anything booth-design exports (that would invert the dependency
- * direction ADR 0030 established).
+ * direction ADR 0030 established). Unchanged by the ADR 0074 rebuild — booth-design needs nothing
+ * beyond a version-pin bump.
  *
  * The optional props below the contract four are this package's own, none required.
  */
@@ -44,7 +46,9 @@ const SECTIONS: { section: Section; label: string; route: Route }[] = [
 
 /**
  * The native-mode component booth-design's shell mounts for booth-pipeline (ADR 0030), published
- * as @projectbooth/pipeline-ui: the graphical DAG builder, jobs and schedules, and per-run logs.
+ * as @projectbooth/pipeline-ui. Screens are specified in docs/decisions/0016.
+ *
+ * No outer padding on the root (ADR 0072): the shell owns the gutter around every native module.
  */
 export function PipelineApp({ workspace, role, theme, getAccessToken, basePath = DEFAULT_BASE_PATH, onNavigate = defaultNavigate }: PipelineAppProps) {
   const { pathname, search } = useLocation();
@@ -68,29 +72,42 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
   const active = sectionOf(route);
 
   return (
-    <div data-theme={theme} className="flex flex-col gap-5 text-slate-900 dark:text-slate-100">
-      <header className="border-b border-slate-200 pb-3 dark:border-slate-800">
-        <nav aria-label="Pipeline sections" className="flex gap-1">
-          {SECTIONS.map((s) => (
-            <Link
-              key={s.section}
-              href={v.href(s.route)}
-              onNavigate={v.goPath}
-              aria-current={active === s.section ? "page" : undefined}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                active === s.section ? "bg-indigo-600 text-white" : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-              }`}
-            >
-              {s.label}
-            </Link>
-          ))}
-        </nav>
-      </header>
-      <main>
-        <ErrorBoundary key={routePath(route, basePath)}>{renderRoute(route, v)}</ErrorBoundary>
+    <div data-theme={theme} className="flex flex-col gap-6 text-slate-900 dark:text-slate-100">
+      <nav aria-label="Pipeline sections" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
+        {SECTIONS.map((s) => (
+          <Link
+            key={s.section}
+            href={v.href(s.route)}
+            onNavigate={v.goPath}
+            aria-current={active === s.section ? "page" : undefined}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${
+              active === s.section
+                ? "border-indigo-600 text-slate-900 dark:border-indigo-400 dark:text-slate-50"
+                : "border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+            }`}
+          >
+            {s.label}
+          </Link>
+        ))}
+      </nav>
+      <main className="min-w-0">
+        {/* Keyed on the entity, not the full path: switching tabs inside one pipeline must NOT
+            remount it, or unsaved canvas edits would be lost on every tab switch (0016 §4 S2a). */}
+        <ErrorBoundary key={boundaryKey(route)}>{renderRoute(route, v)}</ErrorBoundary>
       </main>
     </div>
   );
+}
+
+function boundaryKey(route: Route): string {
+  switch (route.name) {
+    case "pipeline":
+    case "task":
+    case "run":
+      return `${route.name}:${route.id}`;
+    default:
+      return route.name;
+  }
 }
 
 function renderRoute(route: Route, v: ViewCtx) {
@@ -98,12 +115,12 @@ function renderRoute(route: Route, v: ViewCtx) {
     case "pipelines":
       return <PipelineList v={v} />;
     case "pipeline":
-      return <PipelineEditor v={v} pipelineId={route.id} version={route.version} />;
+      return <PipelineDetail key={route.id} v={v} pipelineId={route.id} tab={route.tab ?? "dag"} version={route.version} />;
     case "tasks":
       return <TaskList v={v} />;
     case "task":
-      return <TaskDetail v={v} taskId={route.id} />;
+      return <TaskDetail key={route.id} v={v} taskId={route.id} tab={route.tab ?? "code"} version={route.version} />;
     case "run":
-      return <RunView v={v} runId={route.id} />;
+      return <RunDetail key={route.id} v={v} runId={route.id} initialTask={route.task} />;
   }
 }

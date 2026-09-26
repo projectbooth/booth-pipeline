@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { ErrorBoundary } from "../components/ErrorBoundary";
+import { ErrorBoundary } from "../ui/ErrorBoundary";
 
 // The gap a 2026-09-23 pilot test found: nothing anywhere in this package caught a render-time
 // exception, so one crashed component unmounted the entire app to a blank screen with no visible

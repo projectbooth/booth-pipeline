@@ -169,16 +169,25 @@ export class FakeBackend {
 
     let m: RegExpMatchArray | null;
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
-    if (method === "GET" && path === "/pipelines") return this.json(this.page(this.pipelines));
+    if (method === "GET" && path === "/pipelines") {
+      const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+      return this.json(this.page(q ? this.pipelines.filter((p) => p.name.toLowerCase().includes(q)) : this.pipelines));
+    }
     if (method === "POST" && path === "/pipelines") {
       const p = this.addPipeline(body.name);
       p.description = body.description ?? "";
       return this.json(p, 201);
     }
     if (method === "POST" && path === "/pipelines/validate") return this.json({ valid: true });
-    if ((m = path.match(/^\/pipelines\/([^/]+)$/)) && method === "GET") {
+    if ((m = path.match(/^\/pipelines\/([^/]+)$/))) {
       const p = this.pipelines.find((x) => x.id === m![1]);
-      return p ? this.json(p) : this.json({ error: "pipeline not found" }, 404);
+      if (!p) return this.json({ error: "pipeline not found" }, 404);
+      if (method === "GET") return this.json(p);
+      if (method === "PUT") return this.json(Object.assign(p, { name: body.name, description: body.description }));
+      if (method === "DELETE") {
+        this.pipelines = this.pipelines.filter((x) => x.id !== p.id);
+        return this.json(undefined, 204);
+      }
     }
     if ((m = path.match(/^\/pipelines\/([^/]+)\/schedule$/)) && method === "PUT") {
       const p = this.pipelines.find((x) => x.id === m![1])!;
@@ -248,7 +257,17 @@ export class FakeBackend {
       }
       if (method === "PUT") return this.json(this.saveTaskDraft(m[1], body.config));
     }
-    if (method === "GET" && path === "/runs") return this.json(this.page([...this.runs.values()]));
+    if (method === "GET" && path === "/runs") {
+      // Same contract as the real store: newest first, exact `total` for the filters, limit/offset paging.
+      const pid = u.searchParams.get("pipelineId");
+      const status = u.searchParams.get("status");
+      const all = [...this.runs.values()]
+        .filter((r) => (!pid || r.pipelineId === pid) && (!status || r.status === status))
+        .sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1));
+      const limit = Number(u.searchParams.get("limit") ?? 50);
+      const offset = Number(u.searchParams.get("offset") ?? 0);
+      return this.json({ items: all.slice(offset, offset + limit).map((r) => ({ ...r, tasks: undefined })), total: all.length });
+    }
     if ((m = path.match(/^\/runs\/([^/]+)$/)) && method === "GET") {
       const r = this.runs.get(m[1]);
       return r ? this.json(r) : this.json({ error: "run not found" }, 404);
@@ -267,6 +286,27 @@ export class FakeBackend {
       return this.json({ items, done: !!run && !["queued", "running"].includes(run.status) });
     }
     return this.json({ error: `fake backend: unhandled ${method} ${path}` }, 501);
+  }
+
+  /** A finished (or still active) run recorded directly, for list/stat assertions. */
+  addRun(pipelineId: string, status: RunDetail["status"], createdAt: string, over: Partial<RunDetail> = {}): RunDetail {
+    const r: RunDetail = {
+      id: `run-${this.runs.size + 1}-${createdAt.replace(/\D/g, "").slice(0, 12)}`,
+      pipelineId,
+      pipelineVersion: this.pipelines.find((p) => p.id === pipelineId)?.latestVersion ?? 1,
+      status,
+      trigger: "schedule",
+      triggeredBy: "scheduler",
+      createdAt,
+      startedAt: createdAt,
+      finishedAt: ["queued", "running"].includes(status) ? null : new Date(new Date(createdAt).getTime() + 65_000).toISOString(),
+      error: status === "failed" ? "task extract failed" : null,
+      cancelRequested: false,
+      tasks: [],
+      ...over,
+    };
+    this.runs.set(r.id, r);
+    return r;
   }
 
   newRun(pipelineId: string): RunDetail {
