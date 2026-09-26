@@ -165,6 +165,12 @@ export function DevShell() {
         </div>
       </header>
       <div className="mx-auto max-w-7xl px-6 py-6">
+        {!tokenInput && (
+          <p role="status" className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+            Not signed in, so every request will fail with "missing bearer token". Pick a user under <strong>Sign in as</strong> (needs{" "}
+            <code>hack/dev-keycloak.sh up</code>) or paste a token.
+          </p>
+        )}
         {/* keyed on workspace + identity so switching either re-fetches everything; a silent token
             renewal for the same signed-in user must NOT remount (that would drop unsaved edits) */}
         <PipelineApp key={`${workspace}:${devUser && tokenInput ? devUser : tokenInput}`} workspace={workspace} role={role} theme={theme} getAccessToken={getAccessToken} />
