@@ -462,3 +462,12 @@ export function EmptyState({ title, children, action }: { title: string; childre
     </div>
   );
 }
+
+/** A play triangle as inline SVG — the "▶" character renders as a coloured emoji tile on Windows. */
+export function PlayIcon({ className = "h-3 w-3" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 12 12" aria-hidden="true" className={`shrink-0 fill-current ${className}`}>
+      <path d="M3 1.8v8.4a.6.6 0 0 0 .9.52l7-4.2a.6.6 0 0 0 0-1.04l-7-4.2A.6.6 0 0 0 3 1.8Z" />
+    </svg>
+  );
+}

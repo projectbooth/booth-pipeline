@@ -4,6 +4,11 @@ import type { WorkspaceRole } from "../types";
 
 const ROLES: WorkspaceRole[] = ["owner", "editor", "viewer"];
 
+// hack/dev-keycloak.sh's booth-local realm: its test users and their workspace roles in "acme".
+const DEV_USERS = { alice: "owner", bob: "editor", carol: "viewer" } as const satisfies Record<string, WorkspaceRole>;
+type DevUser = keyof typeof DEV_USERS;
+const DEV_PASSWORD = "booth-dev-password";
+
 // Stand-in for booth-design's real shell — local-dev scaffolding only, never shipped (the same idea
 // as booth-catalog's and booth-module-store's dev harnesses). It exists so this package can be
 // built and looked at standalone against a locally running backend, and doubles as a manual check
@@ -37,6 +42,37 @@ export function DevShell() {
     tokenRef.current = tokenInput;
   }, [tokenInput]);
   const getAccessToken = useCallback(() => tokenRef.current || null, []);
+
+  // "Sign in as": a real token from the local Keycloak hack/dev-keycloak.sh starts (its test users,
+  // its documented dev password), via vite.config.ts's same-origin /dev-keycloak proxy, renewed
+  // before it expires so a long manual click-through never hits a dead token.
+  const [devUser, setDevUser] = useState<DevUser | "">("");
+  const [signInError, setSignInError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!devUser) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const renew = async () => {
+      try {
+        const body = new URLSearchParams({ grant_type: "password", client_id: "booth-design", username: devUser, password: DEV_PASSWORD });
+        const res = await fetch("/dev-keycloak/realms/booth-local/protocol/openid-connect/token", { method: "POST", body });
+        if (!res.ok) throw new Error(`Keycloak said ${res.status}`);
+        const tok = (await res.json()) as { access_token: string; expires_in: number };
+        if (!alive) return;
+        setSignInError(null);
+        setTokenInput(tok.access_token);
+        setRole(DEV_USERS[devUser]);
+        timer = setTimeout(renew, Math.max(10, tok.expires_in - 30) * 1000);
+      } catch (err) {
+        if (alive) setSignInError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    void renew();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [devUser]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -79,6 +115,23 @@ export function DevShell() {
             </select>
           </label>
           <label className="text-xs text-slate-500 dark:text-slate-400">
+            Sign in as (local Keycloak)
+            <select
+              aria-label="Sign in as"
+              value={devUser}
+              onChange={(e) => setDevUser(e.target.value as DevUser | "")}
+              className="ml-1.5 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              <option value="">—</option>
+              {(Object.keys(DEV_USERS) as DevUser[]).map((u) => (
+                <option key={u} value={u}>
+                  {u} ({DEV_USERS[u]})
+                </option>
+              ))}
+            </select>
+            {signInError && <span className="ml-1.5 text-red-600">{signInError}</span>}
+          </label>
+          <label className="text-xs text-slate-500 dark:text-slate-400">
             Access token
             <input
               type="password"
@@ -98,8 +151,9 @@ export function DevShell() {
         </div>
       </header>
       <div className="mx-auto max-w-7xl px-6 py-6">
-        {/* keyed on workspace + token so pasting a token (or switching workspace) re-fetches everything */}
-        <PipelineApp key={`${workspace}:${tokenInput}`} workspace={workspace} role={role} theme={theme} getAccessToken={getAccessToken} />
+        {/* keyed on workspace + identity so switching either re-fetches everything; a silent token
+            renewal for the same signed-in user must NOT remount (that would drop unsaved edits) */}
+        <PipelineApp key={`${workspace}:${devUser && tokenInput ? devUser : tokenInput}`} workspace={workspace} role={role} theme={theme} getAccessToken={getAccessToken} />
       </div>
     </div>
   );

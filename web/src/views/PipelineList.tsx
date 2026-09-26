@@ -16,6 +16,7 @@ import {
   Loaded,
   OverflowMenu,
   PageHeader,
+  PlayIcon,
   Skeleton,
   StatusBadge,
   inputClass,
@@ -297,7 +298,11 @@ function PipelineRow({
                 title={neverSaved ? "Save a version first — Run now runs the latest saved version" : `Run ${p.pinnedVersion ? `v${p.pinnedVersion} (pinned)` : `v${p.latestVersion}`} now`}
                 aria-label={`Run ${p.name} now`}
               >
-                {starting ? "Starting…" : "▶ Run"}
+                {starting ? "Starting…" : (
+                  <>
+                    <PlayIcon /> Run
+                  </>
+                )}
               </Button>
               <OverflowMenu label={`More actions for ${p.name}`} items={[{ label: "Delete pipeline…", danger: true, onSelect: onAskDelete }]} />
             </span>

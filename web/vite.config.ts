@@ -59,6 +59,14 @@ export default defineConfig(({ command }) => ({
         rewrite: (path) => path.replace(/^\/modules\/catalog/, ""),
         configure: gatewayHeaders,
       },
+      // Dev harness only: lets DevShell's "Sign in as" mint and renew real tokens from the local
+      // Keycloak that hack/dev-keycloak.sh starts, same-origin (the realm's CORS allow-list
+      // doesn't include arbitrary dev ports). Never part of the published library.
+      "/dev-keycloak": {
+        target: process.env.BOOTH_DEV_KEYCLOAK ?? "http://localhost:8081",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/dev-keycloak/, ""),
+      },
       "/modules/storage": {
         target: process.env.BOOTH_STORAGE_DEV_BACKEND ?? "http://localhost:8071",
         changeOrigin: true,
