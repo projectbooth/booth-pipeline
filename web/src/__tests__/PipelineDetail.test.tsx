@@ -150,9 +150,9 @@ describe("DAG tab (read side)", () => {
     expect(screen.getByText(/Status from/)).toBeInTheDocument();
   });
 
-  it("shows a node's details BELOW the canvas when it's selected", async () => {
+  it("shows a viewer a node's read-only details BELOW the canvas when it's selected", async () => {
     const { p } = etl();
-    renderApp(b, { path: path(p.id) });
+    renderApp(b, { path: path(p.id), role: "viewer" });
     // A plain click: user-event's mousedown has no `view` in jsdom, which d3-zoom (under React
     // Flow) dereferences. React Flow's onNodeClick only needs the click itself.
     fireEvent.click(await screen.findByTestId("task-node-load"));

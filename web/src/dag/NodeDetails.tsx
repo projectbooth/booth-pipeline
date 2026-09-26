@@ -9,7 +9,6 @@ import { codeRefLabel, resolvedFromLabel, versionRefLabel, type ResolvedNode } f
 export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewCtx; taskRef: TaskRef; node: ResolvedNode | undefined; lastRun: RunDetail | null; runCounts: boolean }) {
   const task = node?.task ?? null;
   const cfg = node?.config ?? null;
-  const tr = runCounts ? lastRun?.tasks.find((t) => t.taskKey === taskRef.key) : undefined;
 
   const reference: KV[] = [
     { label: "Node key", value: taskRef.key, mono: true },
@@ -50,22 +49,34 @@ export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewC
         </span>
       }
     >
-      {tr && lastRun && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-200 px-4 py-2.5 text-sm dark:border-slate-700">
-          <span className="text-slate-500 dark:text-slate-400">Last run</span>
-          <StatusBadge status={tr.status} />
-          <span className="font-mono text-xs">attempts {tr.attempts}</span>
-          <span className="font-mono text-xs">{formatDuration(tr.startedAt, tr.finishedAt)}</span>
-          {tr.error && <span className="min-w-0 truncate text-xs text-red-600 dark:text-red-400" title={tr.error}>{tr.error}</span>}
-          <Link href={v.href({ name: "run", id: lastRun.id, task: taskRef.key })} onNavigate={v.goPath} className={`${linkClass} ml-auto text-xs`}>
-            Logs →
-          </Link>
-        </div>
-      )}
+      <LastRunStrip v={v} nodeKey={taskRef.key} lastRun={runCounts ? lastRun : null} />
       <div className="grid md:grid-cols-2 md:divide-x md:divide-slate-100 dark:md:divide-slate-800">
         <KVRows rows={reference} />
         {cfg ? <KVRows rows={config} /> : <p className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">{node?.from.kind === "none" && !node.error ? "This task has no saved configuration yet." : ""}</p>}
       </div>
     </Card>
+  );
+}
+
+/** This node's result in the pipeline's latest run, with a link to its logs. Renders nothing when
+ *  that run didn't include this node (or the node was re-pointed since — the caller decides). */
+export function LastRunStrip({ v, nodeKey, lastRun }: { v: ViewCtx; nodeKey: string; lastRun: RunDetail | null }) {
+  const tr = lastRun?.tasks.find((t) => t.taskKey === nodeKey);
+  if (!lastRun || !tr) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-200 px-4 py-2.5 text-sm dark:border-slate-700">
+      <span className="text-slate-500 dark:text-slate-400">Last run</span>
+      <StatusBadge status={tr.status} />
+      <span className="font-mono text-xs">attempts {tr.attempts}</span>
+      <span className="font-mono text-xs">{formatDuration(tr.startedAt, tr.finishedAt)}</span>
+      {tr.error && (
+        <span className="min-w-0 truncate text-xs text-red-600 dark:text-red-400" title={tr.error}>
+          {tr.error}
+        </span>
+      )}
+      <Link href={v.href({ name: "run", id: lastRun.id, task: nodeKey })} onNavigate={v.goPath} className={`${linkClass} ml-auto text-xs`}>
+        Logs →
+      </Link>
+    </div>
   );
 }

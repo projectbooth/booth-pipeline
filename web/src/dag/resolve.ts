@@ -15,25 +15,30 @@ export interface ResolvedNode {
   task: TaskEntity | null;
   config: TaskConfig | null;
   from: ResolvedFrom;
+  /** The (task, version reference) this was resolved for — lets a caller tell a fresh result from
+   *  one still describing a node's previous target while the new lookup is in flight. */
+  forTask: string;
+  forVersion: TaskRef["taskVersion"];
   error?: string;
 }
 
 export type Resolved = Record<string, ResolvedNode>; // keyed by node key
 
 async function resolveOne(ctx: ApiContext, ref: TaskRef, task: TaskEntity): Promise<ResolvedNode> {
+  const f = { forTask: ref.taskId, forVersion: ref.taskVersion };
   if (ref.taskVersion !== "latest") {
     const v = await api.getTaskVersion(ctx, ref.taskId, ref.taskVersion);
-    return { task, config: v.config, from: { kind: "version", version: v.version } };
+    return { ...f, task, config: v.config, from: { kind: "version", version: v.version } };
   }
   if (task.hasDraft) {
     const d = await api.getTaskDraft(ctx, ref.taskId);
-    return { task, config: d.config, from: { kind: "draft" } };
+    return { ...f, task, config: d.config, from: { kind: "draft" } };
   }
   if (task.latestVersion > 0) {
     const v = await api.getTaskVersion(ctx, ref.taskId, task.latestVersion);
-    return { task, config: v.config, from: { kind: "version", version: v.version } };
+    return { ...f, task, config: v.config, from: { kind: "version", version: v.version } };
   }
-  return { task, config: null, from: { kind: "none" } };
+  return { ...f, task, config: null, from: { kind: "none" } };
 }
 
 export async function resolveRefs(ctx: ApiContext, refs: TaskRef[]): Promise<Resolved> {
@@ -52,13 +57,13 @@ export async function resolveRefs(ctx: ApiContext, refs: TaskRef[]): Promise<Res
     refs.map(async (r) => {
       const t = tasks.get(r.taskId);
       if (!t || t instanceof Error) {
-        out[r.key] = { task: null, config: null, from: { kind: "none" }, error: t ? t.message : "task not found" };
+        out[r.key] = { forTask: r.taskId, forVersion: r.taskVersion, task: null, config: null, from: { kind: "none" }, error: t ? t.message : "task not found" };
         return;
       }
       try {
         out[r.key] = await resolveOne(ctx, r, t);
       } catch (err) {
-        out[r.key] = { task: t, config: null, from: { kind: "none" }, error: errorMessage(err) };
+        out[r.key] = { forTask: r.taskId, forVersion: r.taskVersion, task: t, config: null, from: { kind: "none" }, error: errorMessage(err) };
       }
     }),
   );

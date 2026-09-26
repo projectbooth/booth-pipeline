@@ -15,4 +15,14 @@ export interface ViewCtx {
   /** Navigate in-app to a route. */
   go: (route: Route) => void;
   goPath: (path: string) => void;
+  /** Registers (or, with null, clears) a guard over in-app navigation while there is unsaved work.
+   *  Navigating to a path the guard doesn't allow asks "discard unsaved changes?" first. */
+  setLeaveGuard: (guard: LeaveGuard | null) => void;
+}
+
+export interface LeaveGuard {
+  /** Paths that keep the unsaved work alive (e.g. the same pipeline's other tabs). */
+  allows: (path: string) => boolean;
+  /** What would be lost, for the confirmation ("unsaved changes to the DAG"). */
+  what: string;
 }

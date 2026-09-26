@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import type { ViewCtx } from "../../context";
 import { describeInterval, formatDuration, formatRelative, formatStamp, formatTime } from "../../format";
@@ -27,6 +27,7 @@ import {
 import { ConfigTab } from "./ConfigTab";
 import { DagTab } from "./DagTab";
 import { currentSpec, downloadYaml, loadPipeline, runnableVersion, useLatestRun, type LatestRun, type PipelineData } from "./data";
+import { useEditor } from "./useEditor";
 import { RunsTab } from "./RunsTab";
 import { ScheduleTab } from "./ScheduleTab";
 import { VersionsTab } from "./VersionsTab";
@@ -58,9 +59,29 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
   const [panel, setPanel] = useState<"none" | "details" | "delete">("none");
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const refs = currentSpec(d);
-  // Resolved once here and shared by the DAG and Configuration tabs.
-  const { resolved } = useResolved(v.api, refs);
+  // The builder's state lives HERE, not in the DAG tab, so switching tabs keeps unsaved edits.
+  const editor = useEditor(v, d, reload);
+  const [resolveToken, setResolveToken] = useState(0);
+  // Resolved once here (from the live, possibly unsaved refs) and shared by the DAG and
+  // Configuration tabs; re-resolved after a task is saved from the node panel.
+  const { resolved } = useResolved(v.api, editor.refs, resolveToken);
+  const savedRefs = currentSpec(d);
+  const [taskDirty, setTaskDirty] = useState(false);
+  const onTaskDirty = useCallback((dirty: boolean) => setTaskDirty(dirty), []);
+
+  // Unsaved work → guard every in-app navigation except this pipeline's own tabs (which keep the
+  // page, and so the edits, mounted). An old version's view keeps only its own URL: its tabs
+  // drop the version from the path, which reloads the page.
+  const unsaved = editor.dirty || taskDirty;
+  useEffect(() => {
+    if (!unsaved) return v.setLeaveGuard(null);
+    const allowed = new Set(d.viewed ? [v.href({ name: "pipeline", id: p.id, version: d.viewed.version })] : TABS.map((t) => v.href({ name: "pipeline", id: p.id, tab: t.key })));
+    v.setLeaveGuard({
+      allows: (path) => allowed.has(path),
+      what: editor.dirty && taskDirty ? "unsaved changes to this pipeline's DAG and to a task" : editor.dirty ? "unsaved changes to this pipeline's DAG" : "unsaved changes to a task's settings",
+    });
+  }, [unsaved, editor.dirty, taskDirty, d.viewed, p.id, v]);
+  useEffect(() => () => v.setLeaveGuard(null), [v]);
 
   const exportVersion = d.viewed?.version ?? d.latest?.version ?? null;
 
@@ -122,7 +143,7 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
         subtitle={p.description || undefined}
         actions={
           <>
-            {v.canWrite && <RunNow v={v} d={d} />}
+            {v.canWrite && <RunNow v={v} d={d} unsaved={editor.dirty} />}
             <OverflowMenu label="More pipeline actions" items={menu} />
           </>
         }
@@ -154,14 +175,16 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
         />
       )}
 
-      <StatStrip label="Pipeline summary" stats={summaryStats(v, d, latestRun, refs.length)} />
+      <StatStrip label="Pipeline summary" stats={summaryStats(v, d, latestRun, savedRefs.length)} />
 
       <div className="flex flex-col gap-4">
         <Tabs label="Pipeline views" tabs={TABS} active={tab} hrefFor={(t) => v.href({ name: "pipeline", id: p.id, tab: t })} onNavigate={v.goPath} />
-        {tab === "dag" && <DagTab v={v} d={d} refs={refs} resolved={resolved} latestRun={latestRun} />}
+        {tab === "dag" && (
+          <DagTab v={v} d={d} editor={editor} resolved={resolved} latestRun={latestRun} onTaskSaved={() => setResolveToken((n) => n + 1)} onTaskDirty={onTaskDirty} />
+        )}
         {tab === "runs" && <RunsTab v={v} pipeline={p} />}
-        {tab === "schedule" && <ScheduleTab v={v} d={d} />}
-        {tab === "config" && <ConfigTab v={v} d={d} refs={refs} resolved={resolved} />}
+        {tab === "schedule" && <ScheduleTab v={v} d={d} reload={reload} />}
+        {tab === "config" && <ConfigTab v={v} d={d} refs={savedRefs} resolved={resolved} />}
         {tab === "versions" && <VersionsTab v={v} d={d} />}
       </div>
     </div>
@@ -204,35 +227,48 @@ function LiveDuration({ start, end, active }: { start: string | null; end: strin
 /** ▶ Run now, plus the one line of small print that says exactly which version it runs — the
  *  backend runs the pin or the latest SAVED version, never the draft (service.start_run), and
  *  without saying so a plain Save followed by Run now would silently run stale wiring. */
-function RunNow({ v, d }: { v: ViewCtx; d: PipelineData }) {
+function RunNow({ v, d, unsaved }: { v: ViewCtx; d: PipelineData; unsaved: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [started, setStarted] = useState<string | null>(null);
   const target = runnableVersion(d.pipeline);
 
   async function run() {
     setBusy(true);
     setError(null);
+    setStarted(null);
     try {
       const r = await api.runPipeline(v.api, d.pipeline.id);
-      v.go({ name: "run", id: r.id });
+      // With unsaved edits on the canvas, don't navigate away from them: say it started instead.
+      if (unsaved) {
+        setStarted(r.id);
+        setBusy(false);
+      } else v.go({ name: "run", id: r.id });
     } catch (err) {
       setError(errorMessage(err));
       setBusy(false);
     }
   }
 
-  const note = !target
-    ? "Nothing to run yet: save a version first."
-    : `Runs v${target.version}${target.pinned ? " (pinned)" : " (latest saved version)"}${d.draftDiffers ? " — your draft changes aren't in it" : ""}`;
+  const notIn = unsaved ? " — your unsaved and draft changes aren't in it" : d.draftDiffers ? " — your draft changes aren't in it" : "";
+  const note = !target ? "Nothing to run yet: save a version first." : `Runs v${target.version}${target.pinned ? " (pinned)" : " (latest saved version)"}${notIn}`;
 
   return (
     <div className="flex flex-col items-end gap-1">
       <Button variant="primary" onClick={run} disabled={!target || busy} aria-describedby="run-now-note">
         <PlayIcon /> {busy ? "Starting…" : "Run now"}
       </Button>
-      <p id="run-now-note" className={`max-w-xs text-right text-xs ${d.draftDiffers && target ? "text-amber-700 dark:text-amber-400" : "text-slate-500 dark:text-slate-400"}`}>
+      <p id="run-now-note" className={`max-w-xs text-right text-xs ${notIn && target ? "text-amber-700 dark:text-amber-400" : "text-slate-500 dark:text-slate-400"}`}>
         {note}
       </p>
+      {started && (
+        <p role="status" className="max-w-xs text-right text-xs text-emerald-700 dark:text-emerald-400">
+          Started run{" "}
+          <Link href={v.href({ name: "run", id: started })} onNavigate={v.goPath} className={`${linkClass} font-mono`}>
+            {started.slice(0, 8)}
+          </Link>
+        </p>
+      )}
       {error && (
         <p role="alert" className="max-w-xs text-right text-xs text-red-600 dark:text-red-400">
           {error}

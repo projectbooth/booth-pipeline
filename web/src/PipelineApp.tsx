@@ -1,10 +1,10 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApiContext, GetAccessToken } from "./api/client";
-import type { ViewCtx } from "./context";
+import type { LeaveGuard, ViewCtx } from "./context";
 import { DEFAULT_BASE_PATH, defaultNavigate, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
 import type { WorkspaceRole } from "./types";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
-import { Link } from "./ui/primitives";
+import { InlineConfirm, Link } from "./ui/primitives";
 import { PipelineDetail } from "./views/pipeline/PipelineDetail";
 import { PipelineList } from "./views/PipelineList";
 import { RunDetail } from "./views/RunDetail";
@@ -57,16 +57,44 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
   // Stable across renders unless the workspace or token accessor actually changes, so effects keyed
   // on it don't refire spuriously.
   const api = useMemo<ApiContext>(() => ({ workspace, getAccessToken }), [workspace, getAccessToken]);
+
+  // Unsaved-work guard (docs/decisions/0016 §4 S2a/S5d). A ref, so registering it never re-renders
+  // the whole app; only a blocked navigation does (it shows the confirmation bar).
+  const guard = useRef<LeaveGuard | null>(null);
+  const [blocked, setBlocked] = useState<{ path: string; what: string } | null>(null);
+  const setLeaveGuard = useCallback((g: LeaveGuard | null) => {
+    guard.current = g;
+    if (!g) setBlocked(null);
+  }, []);
+  const goPath = useCallback(
+    (path: string) => {
+      const g = guard.current;
+      if (g && !g.allows(path)) return setBlocked({ path, what: g.what });
+      setBlocked(null);
+      onNavigate(path);
+    },
+    [onNavigate],
+  );
+  // Reloading or closing the page with unsaved work gets the browser's own prompt.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (guard.current) e.preventDefault();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   const v = useMemo<ViewCtx>(
     () => ({
       api,
       canWrite: role === "owner" || role === "editor",
       theme,
       href: (r) => routePath(r, basePath),
-      go: (r) => onNavigate(routePath(r, basePath)),
-      goPath: onNavigate,
+      go: (r) => goPath(routePath(r, basePath)),
+      goPath,
+      setLeaveGuard,
     }),
-    [api, role, theme, basePath, onNavigate],
+    [api, role, theme, basePath, goPath, setLeaveGuard],
   );
 
   const active = sectionOf(route);
@@ -90,6 +118,19 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
           </Link>
         ))}
       </nav>
+      {blocked && (
+        <InlineConfirm
+          message={<>You have {blocked.what}. Leave this page and discard them?</>}
+          confirmLabel="Discard and leave"
+          onConfirm={() => {
+            guard.current = null;
+            const path = blocked.path;
+            setBlocked(null);
+            onNavigate(path);
+          }}
+          onCancel={() => setBlocked(null)}
+        />
+      )}
       <main className="min-w-0">
         {/* Keyed on the entity, not the full path: switching tabs inside one pipeline must NOT
             remount it, or unsaved canvas edits would be lost on every tab switch (0016 §4 S2a). */}

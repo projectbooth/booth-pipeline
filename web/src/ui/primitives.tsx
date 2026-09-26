@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type InputHTMLAttributes, type MouseEvent, type ReactNode } from "react";
 import type { LoadState } from "../hooks";
 import type { RunStatus, TaskStatus } from "../types";
 
@@ -469,5 +469,53 @@ export function PlayIcon({ className = "h-3 w-3" }: { className?: string }) {
     <svg viewBox="0 0 12 12" aria-hidden="true" className={`shrink-0 fill-current ${className}`}>
       <path d="M3 1.8v8.4a.6.6 0 0 0 .9.52l7-4.2a.6.6 0 0 0 0-1.04l-7-4.2A.6.6 0 0 0 3 1.8Z" />
     </svg>
+  );
+}
+
+/** A number field that lets you type. A plain controlled `<input type="number">` that clamps on
+ *  every keystroke snaps an emptied field straight back to its minimum, so selecting "30" and
+ *  typing "120" yields "1120". This keeps the raw text while you type, commits only whole numbers
+ *  inside [min, max], and tidies the text back to the committed value on blur. */
+export function NumberInput({
+  value,
+  onChange,
+  min,
+  max,
+  className = inputClass,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "min" | "max" | "type"> & {
+  value: number;
+  onChange: (n: number) => void;
+  min: number;
+  max?: number;
+}) {
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  // Follow outside changes (a reset, a reload) — but never fight the user mid-edit.
+  useEffect(() => {
+    if (!focused.current) setText(String(value));
+  }, [value]);
+  return (
+    <input
+      {...rest}
+      type="number"
+      inputMode="numeric"
+      min={min}
+      max={max}
+      className={className}
+      value={text}
+      onFocus={() => {
+        focused.current = true;
+      }}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== "" && Number.isInteger(n) && n >= min && (max === undefined || n <= max)) onChange(n);
+      }}
+      onBlur={() => {
+        focused.current = false;
+        setText(String(value));
+      }}
+    />
   );
 }

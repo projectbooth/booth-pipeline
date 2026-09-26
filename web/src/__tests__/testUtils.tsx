@@ -38,6 +38,8 @@ export class FakeBackend {
   logs = new Map<string, { seq: number; taskKey: string | null; stream: string; message: string; attempt?: number }[]>();
   /** Errors to return for the next call whose "METHOD path" matches. */
   failNext = new Map<string, { status: number; error: string; field?: string }>();
+  /** What POST /pipelines/validate answers — set it to exercise the builder's live-validation path. */
+  validation: { valid: boolean; error?: string; field?: string | null } = { valid: true };
   catalogDown = false;
   catalogEntries = [{ id: "e1", name: "loader", description: "loads things", language: "python", latestVersion: { version: "2.0.0" }, versionCount: 2 }];
   storageDown = false;
@@ -178,7 +180,7 @@ export class FakeBackend {
       p.description = body.description ?? "";
       return this.json(p, 201);
     }
-    if (method === "POST" && path === "/pipelines/validate") return this.json({ valid: true });
+    if (method === "POST" && path === "/pipelines/validate") return this.json(this.validation);
     if ((m = path.match(/^\/pipelines\/([^/]+)$/))) {
       const p = this.pipelines.find((x) => x.id === m![1]);
       if (!p) return this.json({ error: "pipeline not found" }, 404);
