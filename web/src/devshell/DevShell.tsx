@@ -46,7 +46,21 @@ export function DevShell() {
   // "Sign in as": a real token from the local Keycloak hack/dev-keycloak.sh starts (its test users,
   // its documented dev password), via vite.config.ts's same-origin /dev-keycloak proxy, renewed
   // before it expires so a long manual click-through never hits a dead token.
-  const [devUser, setDevUser] = useState<DevUser | "">("");
+  const [devUser, setDevUser] = useState<DevUser | "">(() => {
+    try {
+      const saved = localStorage.getItem("pipeline-dev-user");
+      return saved && saved in DEV_USERS ? (saved as DevUser) : "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("pipeline-dev-user", devUser);
+    } catch {
+      // best-effort only
+    }
+  }, [devUser]);
   const [signInError, setSignInError] = useState<string | null>(null);
   useEffect(() => {
     if (!devUser) return;

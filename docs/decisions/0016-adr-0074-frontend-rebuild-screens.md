@@ -325,12 +325,16 @@ Tasks                                                                      [+ Ne
 Reusable, versioned units of code. Pipelines reference them.
 [🔍 Search tasks…]
 NAME (mono)        DESCRIPTION                 VERSION                  UPDATED           CREATED BY
-extract            Pull raw events             v3  · draft ahead        2026-09-24 14:02  alice   [⋯]
+extract            Pull raw events             v3                       2026-09-24 14:02  alice   [⋯]
+sketch             —                           Draft only               …                 bob     [⋯]
 task_7             —                           not configured yet       …                 bob     [⋯]
 ```
 
 - One row per task entity (the dedup, as before). Version history is not in the list: it lives
   on S5c.
+- *Built in phase 1:* the version badge is `vN` / "Draft only" / "Not configured yet". Whether a
+  draft actually *differs* from vN can't be told from the entity alone (it needs both configs), so
+  that finer "draft ahead" state is shown on the task page (S5), not in the list.
 - The Figma's Type / Status / Duration / Last run / Cluster columns are dropped (§3, Q1). Type is
   shown on S5 instead, where the config is loaded anyway.
 - **+ New task** opens an inline card (Name*, Description) → `createTask` with no config →
@@ -447,6 +451,14 @@ The click-through for this is in §8. It uses a **real** viewport resize via Pla
    real Keycloak tokens, at **1440 px and 900 px** real viewports, recording canvas height
    before, during and after selecting a node, opening Add task, and opening Save as new version.
    Then release (Q4) and hand the pin bump to booth-design.
+
+   **Measurement pitfall found in phase 2:** a backgrounded browser tab (as the Chrome-extension
+   automation tab often is: `document.visibilityState === "hidden"`) never fires
+   `requestAnimationFrame`. React Flow's fit and layout steps wait on a frame, so any canvas
+   measurement taken in a hidden tab reads a half-initialised canvas: identity transform, or a fit
+   to a stale size. It is plausibly why earlier sessions measured canvas collapses that other
+   sessions couldn't reproduce. Phase 5 therefore measures with Playwright (frames always render)
+   at real viewport sizes, and asserts `visibilityState === "visible"` before trusting a number.
 
 ## 9. Decisions taken in this pass (reversible, flagged for visibility)
 

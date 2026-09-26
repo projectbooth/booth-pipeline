@@ -183,7 +183,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
           const shown = pipelines.filter((p) => matches(filter, latest[p.id] ?? null));
           if (shown.length === 0) return <EmptyState title="No pipelines match this filter" />;
           return (
-            <div className="overflow-x-auto">
+            <div className="relative overflow-x-auto">
               <table className={tableClass}>
                 <thead className={theadClass}>
                   <tr>
@@ -193,7 +193,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                     <th className={thClass}>Last run</th>
                     <th className={thClass}>Duration</th>
                     <th className={thClass}>Next run</th>
-                    <th className={thClass}>Owner</th>
+                    <th className={`${thClass} hidden xl:table-cell`}>Owner</th>
                     <th className={thClass}>
                       <span className="sr-only">Actions</span>
                     </th>
@@ -287,7 +287,7 @@ function PipelineRow({
         <td className={`${tdClass} whitespace-nowrap font-mono text-xs`} title={p.nextRunAt ? formatRelative(p.nextRunAt) : undefined}>
           {p.nextRunAt ? formatStamp(p.nextRunAt) : "—"}
         </td>
-        <td className={`${tdClass} max-w-40 truncate text-slate-600 dark:text-slate-300`}>{p.createdBy}</td>
+        <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>{p.createdBy}</td>
         <td className={`${tdClass} whitespace-nowrap text-right`}>
           {v.canWrite && (
             <span className="inline-flex items-center gap-2">
@@ -355,10 +355,10 @@ function NewPipelineCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) 
       <form onSubmit={submit} aria-label="New pipeline" className="flex flex-col gap-3 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field id="new-pipeline-name" label="Name" required error={error?.field === "name" ? error.message : undefined}>
-            {(p) => <input {...p} autoFocus className={inputClass} value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />}
+            {(p) => <input {...p} autoFocus className={inputClass} value={name} maxLength={200} onChange={(e) => setName(e.target.value)} />}
           </Field>
           <Field id="new-pipeline-description" label="Description">
-            {(p) => <input {...p} className={inputClass} value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} />}
+            {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
         </div>
         {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}

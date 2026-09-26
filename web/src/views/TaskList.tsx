@@ -102,7 +102,7 @@ export function TaskList({ v }: { v: ViewCtx }) {
               <EmptyState title="No tasks yet">{v.canWrite ? "Create one here, or add one straight from a pipeline's canvas." : "Someone with edit access needs to create one."}</EmptyState>
             )
           ) : (
-            <div className="overflow-x-auto">
+            <div className="relative overflow-x-auto">
               <table className={tableClass}>
                 <thead className={theadClass}>
                   <tr>
@@ -195,10 +195,10 @@ function NewTaskCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) {
       <form onSubmit={submit} aria-label="New task" className="flex flex-col gap-3 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field id="new-task-name" label="Name" required error={error?.field === "name" ? error.message : undefined}>
-            {(p) => <input {...p} autoFocus className={`${inputClass} font-mono`} value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />}
+            {(p) => <input {...p} autoFocus className={`${inputClass} font-mono`} value={name} maxLength={200} onChange={(e) => setName(e.target.value)} />}
           </Field>
           <Field id="new-task-description" label="Description">
-            {(p) => <input {...p} className={inputClass} value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} />}
+            {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
         </div>
         {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}
