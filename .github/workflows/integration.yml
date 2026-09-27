@@ -4,8 +4,9 @@ name: Integration
 # and nightly, not on every push/PR. See tests/integration/README.md for what it covers and what it
 # does not.
 #
-# NOTE: this workflow has NEVER BEEN EXECUTED. No kind/k3d was available where it was written; it
-# was linted and its steps reasoned through by hand. Expect first-run issues. In particular it
+# Every step below was run end to end on a local kind cluster on 2026-09-27 (it had never passed in
+# CI before: its in-cluster curls lost their output to a `kubectl run -i` race, one checked a route
+# ADR 0071 removed, and one expected a pod its NetworkPolicy blocks to reach the runner). It
 # deploys against a stand-in for booth-core's BoothModule CRD and Postgres Secret rather than a
 # real, pinned booth-core, so it proves the chart deploys and the module serves, not that core
 # reconciles it — that is booth-e2e's job.
@@ -74,15 +75,17 @@ jobs:
 
       - name: /healthz is 200 (migrations ran, the database is reachable)
         run: |
-          out="$(kubectl -n booth-pipeline run curl-health --rm -i --restart=Never --image=curlimages/curl -- \
-            curl -sf http://booth-pipeline.booth-pipeline.svc.cluster.local:8080/healthz)"
+          # hack/incluster-curl.sh, not `kubectl run -i --rm`: see that script for why.
+          out="$(bash hack/incluster-curl.sh booth-pipeline -sf --max-time 10 http://booth-pipeline.booth-pipeline.svc.cluster.local:8080/healthz)"
           echo "$out"; echo "$out" | grep -q '"status":"ok"'
 
       - name: The API refuses unauthenticated requests in-cluster
         run: |
-          for path in /api/pipelines /api/jobs /api/runs /api/runners; do
-            kubectl -n booth-pipeline run curl-authz --rm -i --restart=Never --image=curlimages/curl -- \
-              curl -s -o /dev/null -w 'status=%{http_code}' "http://booth-pipeline.booth-pipeline.svc.cluster.local:8080$path" \
+          # /api/tasks, not the retired /api/jobs (ADR 0071 removed Job): a route that no longer
+          # exists answers 404, which says nothing about whether authentication is enforced.
+          for path in /api/pipelines /api/tasks /api/runs /api/runners; do
+            bash hack/incluster-curl.sh booth-pipeline -s --max-time 10 -o /dev/null -w 'status=%{http_code}' \
+              "http://booth-pipeline.booth-pipeline.svc.cluster.local:8080$path" \
               | grep -q 'status=401' || { echo "$path was not refused"; exit 1; }
           done
 
@@ -103,11 +106,14 @@ jobs:
           echo "$secrets" | grep -q 'booth-database-credentials' && { echo "the runner mounts the database credential"; exit 1; }
           test "$(r '{.spec.template.spec.automountServiceAccountToken}')" = "false"
           kubectl -n booth-pipeline rollout status deployment/booth-pipeline-runner --timeout=120s
-          # and it authenticates: no bearer, no service
-          kubectl -n booth-pipeline run curl-runner --rm -i --restart=Never --image=curlimages/curl -- \
-            curl -s -o /dev/null -w 'status=%{http_code}' -X POST \
-            http://booth-pipeline-runner.booth-pipeline.svc.cluster.local:8080/v1/run \
-            | grep -q 'status=401'
+          runner=http://booth-pipeline-runner.booth-pipeline.svc.cluster.local:8080/v1/run
+          # Its NetworkPolicy admits only this release's API pod: any other pod gets no connection at all.
+          bash hack/incluster-curl.sh booth-pipeline -s --max-time 5 -o /dev/null -w 'status=%{http_code}' -X POST "$runner" \
+            | grep -q 'status=000' || { echo "a pod that is not the API reached the runner"; exit 1; }
+          # And even from a pod the policy lets through, it authenticates: no bearer, no service.
+          INCLUSTER_LABELS=app.kubernetes.io/name=booth-pipeline,app.kubernetes.io/instance=booth-pipeline,app.kubernetes.io/component=api \
+            bash hack/incluster-curl.sh booth-pipeline -s --max-time 10 -o /dev/null -w 'status=%{http_code}' -X POST "$runner" \
+            | grep -q 'status=401' || { echo "the runner served a caller with no bearer secret"; exit 1; }
 
       - name: Dump logs on failure
         if: failure()
