@@ -12,7 +12,18 @@ from datetime import datetime
 from typing import Protocol
 
 from ..model import PipelineSpec, TaskConfig
-from ..records import LogLine, Page, Pipeline, PipelineDraft, PipelineVersion, Run, TaskDraft, TaskEntity, TaskRun, TaskVersionRecord
+from ..records import (
+    LogLine,
+    Page,
+    Pipeline,
+    PipelineDraft,
+    PipelineVersion,
+    Run,
+    TaskDraft,
+    TaskEntity,
+    TaskRun,
+    TaskVersionRecord,
+)
 
 
 class Conflict(Exception):

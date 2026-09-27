@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 from typing import Any
 
@@ -27,6 +28,26 @@ log = logging.getLogger(__name__)
 
 # A token is good for ~10 minutes (ADR 0056); replacing it every 4 leaves two failed attempts of headroom.
 DEFAULT_REFRESH_SECONDS = 240.0
+
+
+def _hang_up(resp: httpx.Response) -> None:
+    """Disconnect from the runner NOW, from a thread other than the one reading the stream.
+
+    ``resp.close()`` alone is not enough on Linux (where this runs in production): closing a socket
+    from another thread neither wakes a ``recv`` already blocked on it nor sends a FIN while that
+    ``recv`` holds it, so the reader stayed blocked — and the runner kept the task running — until
+    the runner's next 15 s keep-alive line arrived. ``shutdown(SHUT_RDWR)`` does both at once: the
+    blocked read returns immediately and the runner sees the hang-up. Windows happened to behave
+    either way, which is why this only ever showed up in CI.
+    """
+    stream = resp.extensions.get("network_stream")
+    sock = stream.get_extra_info("socket") if stream is not None else None
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed or reset: the hang-up has happened either way
+    resp.close()
 
 
 class RemoteRunner:
@@ -77,7 +98,7 @@ class RemoteRunner:
                 if cancel.canceled:
                     resp = stream_box.get("r")
                     if resp is not None:
-                        resp.close()  # hanging up is the cancel signal the runner acts on
+                        _hang_up(resp)  # hanging up is the cancel signal the runner acts on
                     return
 
         threads = [threading.Thread(target=watch_cancel, daemon=True)]
