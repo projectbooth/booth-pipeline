@@ -17,7 +17,7 @@ import pytest
 SCRIPT = r'''
 import os, sys
 from booth_pipeline.engine import execute
-from booth_pipeline.model import PipelineSpec
+from booth_pipeline.model import PipelineSpec, TaskConfig
 from booth_pipeline.runners.base import Cancellation
 from booth_pipeline.runners.registry import RunnerRegistry
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
@@ -31,13 +31,19 @@ class Rec:
             def line(self, stream, msg): print(f"[{k}/{stream}] {msg}")
         return L()
 
+# ADR 0071: a spec holds only references (key, task, version, wiring); what each node runs is its
+# task's config, resolved separately and passed alongside: the shape engine.execute takes.
 spec = PipelineSpec.model_validate({"tasks": [
-  {"key": "a", "kind": "source", "code": {"type": "inline", "source":
-    "import os\nprint('uid', os.getuid())\nopen('scratch.txt', 'w').write('x')\ndef run(ctx):\n    return 41\n"}},
-  {"key": "b", "kind": "sink", "dependsOn": ["a"], "code": {"type": "inline", "source":
-    "def run(ctx):\n    print('got', ctx.inputs['a'] + 1)\n    try:\n        open('/etc/nope', 'w')\n    except OSError:\n        print('rootfs read-only')\n"}},
+  {"key": "a", "taskId": "a", "taskVersion": 1},
+  {"key": "b", "taskId": "b", "taskVersion": 1, "dependsOn": ["a"]},
 ]})
-res = execute(spec, run_id="smoke", registry=RunnerRegistry([SubprocessRunner()]), recorder=Rec(), cancel=Cancellation())
+configs = {
+  "a": TaskConfig.model_validate({"code": {"type": "inline", "source":
+    "import os\nprint('uid', os.getuid())\nopen('scratch.txt', 'w').write('x')\ndef run(ctx):\n    return 41\n"}}),
+  "b": TaskConfig.model_validate({"code": {"type": "inline", "source":
+    "def run(ctx):\n    print('got', ctx.inputs['a'] + 1)\n    try:\n        open('/etc/nope', 'w')\n    except OSError:\n        print('rootfs read-only')\n"}}),
+}
+res = execute(spec, configs, run_id="smoke", registry=RunnerRegistry([SubprocessRunner()]), recorder=Rec(), cancel=Cancellation())
 sys.exit(0 if res.success else 1)
 '''
 
