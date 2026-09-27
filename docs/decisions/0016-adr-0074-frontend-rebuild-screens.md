@@ -1,8 +1,20 @@
 # 0016: Adopting ADR 0074, phase 0 — the screens-first design pass for the `web/` rebuild
 
-Status: **design pass done and ruled on (2026-09-25).** This document is the spec the rebuild is
-built against. The user's rulings on the four open questions are in §10. Q2 changed the DAG tab
-from a view/edit toggle to an always-editable canvas, and §4 reflects that.
+Status: **built and released as `pipeline-ui-v1.0.0` (2026-09-27).** This document is the spec the
+rebuild was built against. The user's rulings on the four open questions are in §10. Q2 changed
+the DAG tab from a view/edit toggle to an always-editable canvas, and §4 reflects that.
+
+Verified before release, live, against a real backend with real Keycloak tokens (Playwright at real
+viewport sizes, measuring only on a visible page, §8):
+- every screen and state at 1440px and 900px (89 checks), including canvas height, all nodes
+  drawn inside it, and the node editor / add-task picker opening below it, before and after
+  selecting a node; a full create → add task → save version → run flow; dark theme; a viewer;
+- §6's 480px canvas below 640px wide, at 500 / 639 / 640 / 900px;
+- the code-source pickers against real booth-catalog and booth-storage (first time any harness ran
+  them): a catalog-pinned version and a storage file, snapshotted by the backend and run in order.
+
+Faults the live pass found and fixed before release: off-screen row actions at 900px, a
+`w-auto`/`w-full` conflict stretching inline selects, and the missing 480px canvas height.
 
 Inputs: ADR 0074; `agent-briefs/pipeline.md` (the design-review section and everything after it);
 the Figma reference at `examples/pipeline` (all nine `screens/` and the `PipelineView.tsx` /
