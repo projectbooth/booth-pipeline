@@ -21,7 +21,7 @@ import {
   OverflowMenu,
   PageHeader,
   Tabs,
-  inputClass,
+  inputClass, inputInlineClass,
   linkClass,
   rowHoverClass,
   tableClass,
@@ -259,7 +259,7 @@ function ShowingPicker({ v, d, tab }: { v: ViewCtx; d: TaskData; tab: TaskTab })
       Showing
       <select
         aria-label="Task version shown"
-        className={`${inputClass} w-auto max-w-full`}
+        className={inputInlineClass}
         value={d.viewed ? String(d.viewed.version) : ""}
         onChange={(e) => v.go({ name: "task", id: t.id, tab, version: e.target.value === "" ? undefined : Number(e.target.value) })}
       >

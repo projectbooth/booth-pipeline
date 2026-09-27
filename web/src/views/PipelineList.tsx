@@ -189,10 +189,10 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                   <tr>
                     <th className={thClass}>Name</th>
                     <th className={thClass}>Status</th>
-                    <th className={thClass}>Trigger</th>
+                    <th className={`${thClass} hidden lg:table-cell`}>Trigger</th>
                     <th className={thClass}>Last run</th>
-                    <th className={thClass}>Duration</th>
-                    <th className={thClass}>Next run</th>
+                    <th className={`${thClass} hidden lg:table-cell`}>Duration</th>
+                    <th className={`${thClass} hidden lg:table-cell`}>Next run</th>
                     <th className={`${thClass} hidden xl:table-cell`}>Owner</th>
                     <th className={thClass}>
                       <span className="sr-only">Actions</span>
@@ -271,7 +271,7 @@ function PipelineRow({
         <td className={tdClass}>
           <StatusBadge status={statusOf(run)} />
         </td>
-        <td className={tdClass}>
+        <td className={`${tdClass} hidden lg:table-cell`}>
           <TriggerSummary schedule={p.schedule} compact />
         </td>
         <td className={`${tdClass} whitespace-nowrap font-mono text-xs`} title={run ? `${formatTime(runStart(run))} (${formatRelative(runStart(run))})` : undefined}>
@@ -283,8 +283,8 @@ function PipelineRow({
             "—"
           )}
         </td>
-        <td className={`${tdClass} whitespace-nowrap font-mono text-xs`}>{run && run.finishedAt ? formatDuration(run.startedAt, run.finishedAt) : "—"}</td>
-        <td className={`${tdClass} whitespace-nowrap font-mono text-xs`} title={p.nextRunAt ? formatRelative(p.nextRunAt) : undefined}>
+        <td className={`${tdClass} hidden whitespace-nowrap font-mono text-xs lg:table-cell`}>{run && run.finishedAt ? formatDuration(run.startedAt, run.finishedAt) : "—"}</td>
+        <td className={`${tdClass} hidden whitespace-nowrap font-mono text-xs lg:table-cell`} title={p.nextRunAt ? formatRelative(p.nextRunAt) : undefined}>
           {p.nextRunAt ? formatStamp(p.nextRunAt) : "—"}
         </td>
         <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>{p.createdBy}</td>

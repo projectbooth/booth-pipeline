@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type ApiContext } from "../api/client";
 import { errorMessage, useDebounced } from "../hooks";
 import type { CatalogCodeEntry, CatalogVersionSummary, TaskCode } from "../types";
-import { Banner, Button, inputClass } from "../ui/primitives";
+import { Banner, Button, inputClass, inputInlineClass } from "../ui/primitives";
 
 // Picks a code-catalog entry and a version for a Task (ADR 0010's narrow reference: {entryId,
 // version}). Browse-only: the pipeline BACKEND resolves and snapshots the chosen version at save
@@ -93,7 +93,7 @@ export function CodePicker({
             </label>
             <select
               id="catalog-version"
-              className={`${inputClass} w-auto`}
+              className={inputInlineClass}
               value={value.version}
               disabled={disabled}
               onChange={(e) => setVersion(e.target.value)}

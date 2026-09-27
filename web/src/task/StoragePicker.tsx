@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type ApiContext } from "../api/client";
 import { errorMessage, useDebounced } from "../hooks";
 import type { StorageBackendSummary, TaskCode } from "../types";
-import { Banner, Button, inputClass } from "../ui/primitives";
+import { Banner, Button, inputClass, inputInlineClass } from "../ui/primitives";
 
 // Picks a booth-storage object and backend for a Task (ADR 0063's narrow reference: {backendId,
 // path}). Browse-only, same contract as CodePicker: the pipeline BACKEND resolves and snapshots
@@ -101,7 +101,7 @@ export function StoragePicker({
         <>
           <label className="flex flex-col gap-1">
             <span className="text-xs font-medium text-slate-600 dark:text-slate-300">Backend</span>
-            <select className={`${inputClass} w-auto`} value={backendId} onChange={(e) => (setBackendId(e.target.value), setEntries(null))}>
+            <select className={inputInlineClass} value={backendId} onChange={(e) => (setBackendId(e.target.value), setEntries(null))}>
               {backends.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.displayName || b.id}

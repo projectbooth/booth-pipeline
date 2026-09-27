@@ -6,7 +6,7 @@ import { NodeEditor } from "../../dag/NodeEditor";
 import type { Resolved } from "../../dag/resolve";
 import { formatRelative, formatStamp } from "../../format";
 import { TaskPicker } from "../../task/TaskPicker";
-import { Badge, Banner, Button, InlineConfirm, Link, inputClass, linkClass } from "../../ui/primitives";
+import { Badge, Banner, Button, InlineConfirm, Link, inputClass, inputInlineClass, linkClass } from "../../ui/primitives";
 import type { LatestRun, PipelineData } from "./data";
 import type { Editor } from "./useEditor";
 
@@ -62,7 +62,7 @@ export function DagTab({
           Showing
           <select
             aria-label="Pipeline version shown"
-            className={`${inputClass} w-auto max-w-full`}
+            className={inputInlineClass}
             value={d.viewed ? String(d.viewed.version) : ""}
             onChange={(e) => v.go(e.target.value === "" ? { name: "pipeline", id: p.id } : { name: "pipeline", id: p.id, version: Number(e.target.value) })}
           >

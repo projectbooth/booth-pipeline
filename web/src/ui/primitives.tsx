@@ -41,6 +41,9 @@ export function Button({
 export const inputClass =
   "w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-60 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500";
 
+/** `inputClass` sized to its content instead of its container — for selects that sit in a row. */
+export const inputInlineClass = inputClass.replace("w-full ", "w-auto max-w-full ");
+
 export const monoClass = "font-mono text-xs leading-relaxed";
 
 /** A labelled form control with optional help and error text, wired for accessibility: the label
