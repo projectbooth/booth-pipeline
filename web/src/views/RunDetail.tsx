@@ -28,8 +28,6 @@ import { LogViewer } from "./run/LogViewer";
 // S3 — one Run (docs/decisions/0016 §4): its DAG coloured by each node's status, a per-node
 // table, and logs for the whole run or one node. Refreshes while active, settles once it ends.
 
-const RUN_CANVAS_HEIGHT = 420;
-
 export function RunDetail({ v, runId, initialTask }: { v: ViewCtx; runId: string; initialTask?: string }) {
   const load = useLoad(() => api.getRun(v.api, runId), [v.api, runId]);
   const run = load.state.status === "ready" ? load.state.data : null;
@@ -138,7 +136,7 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
       {graphError ? (
         <Banner tone="warn">The pipeline graph could not be loaded ({graphError}); the task table below is still accurate.</Banner>
       ) : (
-        <DagCanvas label="Run DAG" refs={refs} resolved={resolved} selected={selected} onSelect={setSelected} statuses={statuses} theme={v.theme} height={RUN_CANVAS_HEIGHT} />
+        <DagCanvas label="Run DAG" refs={refs} resolved={resolved} selected={selected} onSelect={setSelected} statuses={statuses} theme={v.theme} size="run" />
       )}
 
       <div className="relative overflow-x-auto">

@@ -27,7 +27,8 @@ import { languageOf, versionRefLabel, type Resolved } from "./resolve";
 // blank at ≥1024px, collapsing on node selection) came from the canvas's height being *derived*:
 // a flex item in a row/column-switching container, sharing an axis with a side panel, with an
 // `h-full` percentage chain down into React Flow. Here the height is never derived:
-//   1. The wrapper is a plain block element with an explicit pixel height (the `height` prop).
+//   1. The wrapper is a plain block element with an explicit pixel height (the `size` prop picks
+//      it: a fixed number per breakpoint, from static classes — still never computed from siblings).
 //      It must never be made a flex/grid item whose size depends on siblings.
 //   2. React Flow fills it at 100% × 100% — one resolution step against a definite number.
 //   3. Anything that "opens" for a node (panels, pickers) is rendered by the caller AFTER this
@@ -41,7 +42,13 @@ import { languageOf, versionRefLabel, type Resolved } from "./resolve";
 // from it every render, and every gesture is translated back into a new `refs` array via the pure
 // functions in graph.ts. Passing no `onChange` makes it read-only.
 
-export const CANVAS_HEIGHT = 560;
+/** Fixed canvas heights (docs/decisions/0016 §6): the pipeline DAG is 560px, or 480px below 640px
+ *  wide; a run's DAG is 420px at every width (already under 480). Static classes, so Tailwind
+ *  keeps them, and each resolves to one definite pixel height — nothing to derive or race. */
+export const CANVAS_SIZES = {
+  dag: "h-[480px] sm:h-[560px]",
+  run: "h-[420px]",
+} as const;
 
 const FIT = { padding: 0.2, maxZoom: 1 };
 
@@ -108,13 +115,13 @@ export interface DagCanvasProps {
   statuses?: Record<string, TaskStatus>;
   errors?: Record<string, string>;
   theme: "dark" | "light";
-  height?: number;
+  size?: keyof typeof CANVAS_SIZES;
   label: string;
   /** Drawn centred over an empty canvas (inside the fixed-height box, so it can't change its size). */
   empty?: ReactNode;
 }
 
-export function DagCanvas({ refs, resolved, selected, onSelect, onChange, statuses, errors, theme, height = CANVAS_HEIGHT, label, empty }: DagCanvasProps) {
+export function DagCanvas({ refs, resolved, selected, onSelect, onChange, statuses, errors, theme, size = "dag", label, empty }: DagCanvasProps) {
   const editable = onChange !== undefined;
 
   // Once the user pans or zooms, stop re-fitting their view (see LAYOUT 4 above).
@@ -206,8 +213,8 @@ export function DagCanvas({ refs, resolved, selected, onSelect, onChange, status
       aria-label={label}
       data-testid="dag-canvas"
       // Explicit pixel height, block layout — see the LAYOUT note at the top of this file.
-      style={{ height, position: "relative" }}
-      className="w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950"
+      data-size={size}
+      className={`relative w-full overflow-hidden ${CANVAS_SIZES[size]} rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950`}
     >
       <ReactFlow
         style={{ width: "100%", height: "100%" }}

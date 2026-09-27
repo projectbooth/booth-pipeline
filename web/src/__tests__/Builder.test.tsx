@@ -36,7 +36,8 @@ describe("adding a task", () => {
     const picker = screen.getByRole("region", { name: "Add a task" });
     const canvas = screen.getByRole("region", { name: "Pipeline DAG" });
     expect(canvas.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(canvas).toHaveStyle({ height: "560px" });
+    // jsdom computes no Tailwind, so assert the fixed-size classes (0016 §6): 480px below 640px, else 560px.
+    expect(canvas.className).toContain("h-[480px] sm:h-[560px]");
 
     const list = within(picker).getByRole("list", { name: "Matching tasks" });
     await within(list).findByText("spare");
@@ -51,7 +52,7 @@ describe("adding a task", () => {
     // The new node is selected, and its editor opens in the same place below the canvas.
     expect(await screen.findByRole("region", { name: "Node task_1" })).toBeInTheDocument();
     expect(b.tasks.find((t) => t.id === spare.id)).toBeDefined();
-    expect(canvas).toHaveStyle({ height: "560px" });
+    expect(canvas.className).toContain("h-[480px] sm:h-[560px]");
   });
 
   it("creates a task only when asked to, by typing a new name", async () => {
