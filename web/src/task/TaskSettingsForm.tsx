@@ -114,7 +114,7 @@ export function TaskSettingsForm({
             <span className="flex-1" />
             {onCancel && (
               <Button onClick={onCancel} disabled={saving !== null}>
-                Cancel
+                {dirty ? "Cancel" : "Close"}
               </Button>
             )}
             <Button onClick={saveDraft} disabled={saving !== null || !dirty}>
