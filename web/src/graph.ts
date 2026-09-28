@@ -151,6 +151,22 @@ export function disconnect(refs: TaskRef[], from: string, to: string): TaskRef[]
   return refs.map((r) => (r.key === to ? { ...r, dependsOn: r.dependsOn.filter((d) => d !== from) } : r));
 }
 
+/** A copy of node `key` — same task, version, dependencies and param overrides (ADR 0078) — under
+ *  a new unique key derived from the original, placed just below it. Nothing depends on the copy
+ *  yet. Returns the new array and the copy's key; `refs` unchanged if `key` doesn't exist. */
+export function duplicateRef(refs: TaskRef[], key: string): { refs: TaskRef[]; key: string | null } {
+  const src = refs.find((r) => r.key === key);
+  if (!src) return { refs, key: null };
+  const copy: TaskRef = {
+    ...src,
+    key: uniqueKey(src.key.slice(0, 58), refs.map((r) => r.key)),
+    dependsOn: [...src.dependsOn],
+    position: { x: src.position.x, y: src.position.y + NODE_HEIGHT + ROW_GAP },
+    ...(src.paramOverrides ? { paramOverrides: { ...src.paramOverrides } } : {}),
+  };
+  return { refs: [...refs, copy], key: copy.key };
+}
+
 export function removeRef(refs: TaskRef[], key: string): TaskRef[] {
   return refs.filter((r) => r.key !== key).map((r) => ({ ...r, dependsOn: r.dependsOn.filter((d) => d !== key) }));
 }

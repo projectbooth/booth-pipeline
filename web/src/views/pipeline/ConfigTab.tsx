@@ -58,6 +58,7 @@ export function ConfigTab({ v, d, refs, resolved }: { v: ViewCtx; d: PipelineDat
                   <th className={thClass}>Task</th>
                   <th className={thClass}>Version ref</th>
                   <th className={thClass}>Depends on</th>
+                  <th className={thClass}>Param overrides</th>
                 </tr>
               </thead>
               <tbody className={tbodyClass}>
@@ -80,6 +81,7 @@ export function ConfigTab({ v, d, refs, resolved }: { v: ViewCtx; d: PipelineDat
                         {r.taskVersion === "latest" && node && <span className="text-slate-500"> → {resolvedFromLabel(node.from)}</span>}
                       </td>
                       <td className={`${tdClass} font-mono text-xs`}>{r.dependsOn.join(", ") || "—"}</td>
+                      <td className={`${tdClass} font-mono text-xs`}>{Object.keys(r.paramOverrides ?? {}).length ? JSON.stringify(r.paramOverrides) : "—"}</td>
                     </tr>
                   );
                 })}

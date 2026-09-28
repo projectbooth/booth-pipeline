@@ -195,6 +195,7 @@ export function DagTab({
             onRename={ed.rename}
             onSetDeps={ed.setDeps}
             onRemove={ed.remove}
+            onDuplicate={ed.duplicate}
             onTaskSaved={onTaskSaved}
             onTaskDirty={onTaskDirty}
           />

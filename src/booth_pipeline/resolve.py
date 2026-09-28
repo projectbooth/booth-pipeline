@@ -9,13 +9,17 @@ validation, at save-time compile-check, and at run start (``runs.py``) — which
 later plain Save on the referenced task visible to it immediately, matching what the UI already
 promises. A reference pinned to a specific version number is completely unaffected: it always
 resolves to that exact immutable snapshot, never a draft.
+
+ADR 0078 adds one step on top: each node's own ``paramOverrides`` are merged onto the config its
+reference resolves to (``node_config``), so the same task referenced by several nodes can run with
+a different value at each.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .model import ModelError, PipelineSpec, TaskConfig, TaskRef
+from .model import ModelError, PipelineSpec, TaskConfig, TaskRef, check_params
 from .records import TaskEntity
 from .store.base import Store
 
@@ -49,8 +53,29 @@ def resolve_task_ref(store: Store, workspace: str, ref: TaskRef, field: str) -> 
     return ResolvedTaskRef(entity, tv.version, tv.config)
 
 
+def node_config(config: TaskConfig, ref: TaskRef, field: str) -> TaskConfig:
+    """The config one DAG node actually runs with (ADR 0078): the referenced task's resolved
+    ``config`` with this node's ``paramOverrides`` merged over its ``params`` — shallow, key by
+    key, the node's value replacing the task's. A new object: the task's own config (which may be
+    shared by other nodes referencing the same task) is never mutated. No overrides → ``config``
+    itself, unchanged. Raises ``ModelError`` if the merge exceeds the params size cap."""
+    if not ref.param_overrides:
+        return config
+    merged = {**config.params, **ref.param_overrides}
+    try:
+        check_params(merged, "params with this node's overrides")
+    except ValueError as e:
+        raise ModelError(str(e), f"{field}.paramOverrides") from None
+    return config.model_copy(update={"params": merged})
+
+
 def resolve_task_configs(store: Store, workspace: str, spec: PipelineSpec) -> dict[str, TaskConfig]:
     """``{ref.key: TaskConfig}`` for every node in ``spec``, resolved fresh — see module docstring
-    for what "latest" means now. Raises ``ModelError`` naming the first reference that cannot be
-    resolved."""
-    return {ref.key: resolve_task_ref(store, workspace, ref, f"tasks[{i}]").config for i, ref in enumerate(spec.tasks)}
+    for what "latest" means now — with each node's own param overrides applied (ADR 0078). Keyed
+    by node, not by task, so two nodes referencing the same task each get their own params.
+    Raises ``ModelError`` naming the first reference that cannot be resolved."""
+    out: dict[str, TaskConfig] = {}
+    for i, ref in enumerate(spec.tasks):
+        field = f"tasks[{i}]"
+        out[ref.key] = node_config(resolve_task_ref(store, workspace, ref, field).config, ref, field)
+    return out

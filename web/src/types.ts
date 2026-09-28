@@ -101,6 +101,10 @@ export interface TaskRef {
   taskVersion: number | "latest";
   dependsOn: string[];
   position: { x: number; y: number };
+  /** ADR 0078: this node's own values for the task's params, merged over the task's saved params
+   *  (shallow, key by key) when it runs. Saved with the pipeline version. Absent on specs saved
+   *  before ADR 0078, which the server reads as {}. */
+  paramOverrides?: Record<string, unknown>;
 }
 
 export interface PipelineSpec {

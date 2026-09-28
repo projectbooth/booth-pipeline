@@ -19,6 +19,7 @@ import {
 import { NODE_HEIGHT, NODE_WIDTH, checkConnection, connect, disconnect, removeRef } from "../graph";
 import type { TaskRef, TaskStatus } from "../types";
 import { STATUS_STYLE } from "../ui/primitives";
+import { overridesLabel } from "./ParamOverrides";
 import { languageOf, versionRefLabel, type Resolved } from "./resolve";
 
 // The DAG canvas (docs/decisions/0016 §4 S2a/S3, §5, §6).
@@ -56,13 +57,15 @@ interface TaskNodeData extends Record<string, unknown> {
   ref: TaskRef;
   name: string | null;
   lang: string | null;
+  /** ADR 0078: e.g. "symbol=HOOD" — what tells several nodes of the same task apart. */
+  overrides: string | null;
   status?: TaskStatus;
   error?: string;
   connectable: boolean;
 }
 
 function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {
-  const { ref, name, lang, status, error, connectable } = data;
+  const { ref, name, lang, overrides, status, error, connectable } = data;
   const style = status ? STATUS_STYLE[status] : null;
   const border = error ? "border-red-500" : style ? style.border : "border-slate-300 dark:border-slate-600";
   const ring = error ? "ring-2 ring-red-400/70" : selected ? "ring-2 ring-indigo-500" : "";
@@ -70,13 +73,20 @@ function TaskNode({ data, selected }: NodeProps<Node<TaskNodeData>>) {
     <div
       data-testid={`task-node-${ref.key}`}
       data-status={status ?? "none"}
-      aria-label={`Task ${name ?? ref.key}, ${versionRefLabel(ref)}${status ? `, ${STATUS_STYLE[status].label.toLowerCase()}` : ""}${error ? `, has an error: ${error}` : ""}`}
+      aria-label={`Task ${name ?? ref.key}, ${versionRefLabel(ref)}${overrides ? `, overrides ${overrides}` : ""}${status ? `, ${STATUS_STYLE[status].label.toLowerCase()}` : ""}${error ? `, has an error: ${error}` : ""}`}
       className={`flex h-full w-full flex-col justify-center gap-1 rounded-lg border-2 bg-white px-3 py-2 text-left shadow-sm dark:bg-slate-900 ${border} ${ring}`}
     >
       <Handle type="target" position={Position.Left} isConnectable={connectable} className="!h-2.5 !w-2.5 !border-slate-400 !bg-white dark:!bg-slate-800" />
       <div className="flex items-center justify-between gap-2">
-        <span className="rounded bg-slate-100 px-1.5 py-px font-mono text-[10px] font-semibold tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-          {lang ?? "TASK"}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 rounded bg-slate-100 px-1.5 py-px font-mono text-[10px] font-semibold tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {lang ?? "TASK"}
+          </span>
+          {overrides && (
+            <span title="This node's param overrides" data-testid={`task-node-overrides-${ref.key}`} className="truncate rounded bg-indigo-50 px-1.5 py-px font-mono text-[10px] text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+              {overrides}
+            </span>
+          )}
         </span>
         {style && <span title={style.label} className={`h-2.5 w-2.5 rounded-full ${style.dot}`} aria-hidden="true" />}
       </div>
@@ -142,6 +152,7 @@ export function DagCanvas({ refs, resolved, selected, onSelect, onChange, status
           ref: r,
           name: resolved[r.key]?.task?.name ?? (resolved[r.key]?.error ? "(task missing)" : null),
           lang: languageOf(resolved[r.key]?.config ?? null),
+          overrides: overridesLabel(r.paramOverrides),
           status: statuses?.[r.key],
           error: errors?.[r.key],
           connectable: editable,

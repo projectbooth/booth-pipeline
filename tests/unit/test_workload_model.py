@@ -73,9 +73,13 @@ def test_the_runner_secret_is_read_from_its_file_when_given(tmp_path):
 
 def test_a_pipelines_task_refs_have_no_kind_and_carry_no_execution_config_of_their_own():
     """ADR 0071: a PipelineSpec's nodes are references (key/taskId/taskVersion/dependsOn/position)
-    only — platform access, retry, params etc. live on the referenced Task's own TaskConfig."""
+    only — platform access, retry, code, runner, timeout live on the referenced Task's own
+    TaskConfig. The one ratified exception is ADR 0078's ``paramOverrides``: values layered over
+    the task's params, never a node-level copy of any other execution setting."""
     from booth_pipeline.model import TaskConfig, TaskRef
 
     s = spec(task_ref("a", task_id="t1"))
-    assert s.tasks[0].model_dump(by_alias=True).keys() == {"key", "taskId", "taskVersion", "dependsOn", "position"}
+    assert s.tasks[0].model_dump(by_alias=True).keys() == {"key", "taskId", "taskVersion", "dependsOn", "position", "paramOverrides"}
+    execution = {"code", "runner", "retry", "timeout_seconds", "platform_access", "params"}
+    assert execution <= set(TaskConfig.model_fields) and not execution & set(TaskRef.model_fields)
     assert "kind" not in TaskRef.model_fields and "kind" not in TaskConfig.model_fields

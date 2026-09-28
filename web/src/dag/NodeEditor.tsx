@@ -8,6 +8,7 @@ import { Banner, Button, Card, Field, Link, inputClass, linkClass } from "../ui/
 import { DEFAULT_CONFIG, TaskSettingsForm } from "../task/TaskSettingsForm";
 import { TaskPicker } from "../task/TaskPicker";
 import { LastRunStrip } from "./NodeDetails";
+import { ParamOverrides } from "./ParamOverrides";
 import { resolvedFromLabel, type ResolvedNode } from "./resolve";
 
 // Panel (c) of the builder (docs/decisions/0016 §4 S2a): one selected node, rendered BELOW the
@@ -18,7 +19,7 @@ import { resolvedFromLabel, type ResolvedNode } from "./resolve";
 
 /** Fields with their own slot here, matched against the server's field path relative to the node
  *  ("tasks[N]." stripped). Anything else is shown as a banner so it's never silently dropped. */
-const REF_FIELDS = new Set(["key", "dependsOn", "taskId", "taskVersion"]);
+const REF_FIELDS = new Set(["key", "dependsOn", "taskId", "taskVersion", "paramOverrides"]);
 
 export function NodeEditor({
   v,
@@ -32,6 +33,7 @@ export function NodeEditor({
   onRename,
   onSetDeps,
   onRemove,
+  onDuplicate,
   onTaskSaved,
   onTaskDirty,
 }: {
@@ -46,6 +48,8 @@ export function NodeEditor({
   onRename: (from: string, to: string) => void;
   onSetDeps: (key: string, deps: string[]) => void;
   onRemove: (key: string) => void;
+  /** A copy of this node (same task, version, dependencies and param overrides) under a new key. */
+  onDuplicate: (key: string) => void;
   onTaskSaved: () => void;
   onTaskDirty: (dirty: boolean) => void;
 }) {
@@ -100,9 +104,14 @@ export function NodeEditor({
           </span>
         }
         actions={
-          <Button size="sm" variant="danger" onClick={() => onRemove(taskRef.key)}>
-            Remove from pipeline
-          </Button>
+          <>
+            <Button size="sm" onClick={() => onDuplicate(taskRef.key)} title="Same task, version, dependencies and param overrides, under a new key">
+              Duplicate node
+            </Button>
+            <Button size="sm" variant="danger" onClick={() => onRemove(taskRef.key)}>
+              Remove from pipeline
+            </Button>
+          </>
         }
       >
         <LastRunStrip v={v} nodeKey={taskRef.key} lastRun={runCounts ? lastRun : null} />
@@ -208,6 +217,19 @@ export function NodeEditor({
               )}
             </fieldset>
           </div>
+        </div>
+      </Card>
+
+      <Card label="Parameters for this node" title="Parameters for this node">
+        <div className="p-4">
+          <ParamOverrides
+            overrides={taskRef.paramOverrides}
+            // The task's own params — its defaults — once the node's target has actually resolved.
+            baseParams={node && resolvesTo(node, taskRef) ? (node.config?.params ?? {}) : null}
+            readOnly={false}
+            error={fieldError("paramOverrides")}
+            onChange={(next) => onChangeRef({ ...taskRef, paramOverrides: next })}
+          />
         </div>
       </Card>
 

@@ -220,15 +220,22 @@ class TaskConfig(Wire):
     @field_validator("params")
     @classmethod
     def _params_ok(cls, v: dict[str, Any]) -> dict[str, Any]:
-        import json
+        return check_params(v, "params")
 
-        try:
-            size = len(json.dumps(v))
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"params must be JSON-serialisable: {e}") from e
-        if size > MAX_PARAMS_BYTES:
-            raise ValueError(f"params are limited to {MAX_PARAMS_BYTES} bytes")
-        return v
+
+def check_params(v: dict[str, Any], what: str) -> dict[str, Any]:
+    """The one shape a params object may take — a task's own ``params``, a DAG node's
+    ``paramOverrides`` (ADR 0078), and the two merged: JSON-serialisable and at most
+    ``MAX_PARAMS_BYTES``. Raises ``ValueError`` (pydantic turns it into a field error)."""
+    import json
+
+    try:
+        size = len(json.dumps(v))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{what} must be JSON-serialisable: {e}") from e
+    if size > MAX_PARAMS_BYTES:
+        raise ValueError(f"{what} are limited to {MAX_PARAMS_BYTES} bytes")
+    return v
 
 
 def validate_task_config(config: TaskConfig, available_runners: set[str] | None = None) -> None:
@@ -273,6 +280,17 @@ class TaskRef(Wire):
     task_version: int | Literal["latest"] = "latest"
     depends_on: list[str] = Field(default_factory=list)
     position: Position = Field(default_factory=Position)
+    # ADR 0078: this node's own values for the referenced task's params, merged over the task's
+    # saved ``params`` at resolution time (``resolve.py``) — shallow, key by key, a node's value
+    # replacing the task's. Lives here, on the reference, so it is part of the pipeline version's
+    # saved spec like everything else about this node: fixed at save time, versioned, exported.
+    # The task's own ``params`` stay its defaults, used by any reference that doesn't override.
+    param_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("param_overrides")
+    @classmethod
+    def _overrides_ok(cls, v: dict[str, Any]) -> dict[str, Any]:
+        return check_params(v, "param overrides")
 
     @field_validator("key")
     @classmethod

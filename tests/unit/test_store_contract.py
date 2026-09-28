@@ -117,6 +117,28 @@ def test_spec_round_trips_exactly_including_task_refs(store):
     assert store.get_version(WS, p.id, 1).spec == spec
 
 
+def test_node_param_overrides_are_part_of_the_saved_version_and_draft(store):
+    """ADR 0078: two nodes referencing one task, each with its own overrides (nested values and
+    all), are stored IN the version's and the draft's spec — no side table — and read back exactly."""
+    from booth_pipeline.model import PipelineSpec
+
+    s = PipelineSpec.model_validate(
+        {
+            "tasks": [
+                {"key": "hood", "taskId": "fetch", "taskVersion": 1, "paramOverrides": {"symbol": "HOOD", "window": {"days": 1}}},
+                {"key": "tslq", "taskId": "fetch", "taskVersion": 1, "paramOverrides": {"symbol": "TSLQ"}},
+                {"key": "plain", "taskId": "fetch", "taskVersion": 1},
+            ]
+        }
+    )
+    p = store.create_pipeline(WS, "quotes", "", "a")
+    store.add_version(WS, p.id, s, "", "a")
+    store.save_pipeline_draft(WS, p.id, s, "a")
+    for got in (store.get_version(WS, p.id, 1).spec, store.get_pipeline_draft(WS, p.id).spec):
+        assert got == s
+        assert [t.param_overrides for t in got.tasks] == [{"symbol": "HOOD", "window": {"days": 1}}, {"symbol": "TSLQ"}, {}]
+
+
 def test_pipeline_draft_is_separate_from_and_survives_independently_of_versions(store):
     """ADR 0073: a mutable draft, distinct from the immutable version list — plain "Save" writes
     only this, no version created."""

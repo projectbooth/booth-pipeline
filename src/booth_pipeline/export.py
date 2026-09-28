@@ -2,8 +2,8 @@
 
 Export-only for now, but shaped as a faithful, complete structure — not a debug dump of internal
 ids — since it is the intended future import format too: every referenced task is resolved to its
-own name, description, pinned version and full config, alongside the DAG wiring and the pipeline's
-own schedule. A saved pipeline version's references always resolve (``delete_task`` refuses to
+own name, description, pinned version and full config, alongside the DAG wiring, each node's own
+param overrides (ADR 0078), and the pipeline's own schedule. A saved pipeline version's references always resolve (``delete_task`` refuses to
 remove a task still referenced by *any* pipeline version, past or present — see
 ``store/base.py``), so this never has to represent a dangling reference.
 """
@@ -37,6 +37,9 @@ def export_pipeline_version(store: Store, workspace: str, pipeline: Pipeline, ve
                 "key": ref.key,
                 "dependsOn": list(ref.depends_on),
                 "position": {"x": ref.position.x, "y": ref.position.y},
+                # ADR 0078: this node's own values, merged over task.config.params (shallow, key by
+                # key) when it runs. task.config below stays the task's own, un-merged config.
+                "paramOverrides": dict(ref.param_overrides),
                 "task": {
                     "id": resolved.entity.id,
                     "name": resolved.entity.name,

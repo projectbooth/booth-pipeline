@@ -2,6 +2,7 @@ import type { ViewCtx } from "../context";
 import { formatDuration } from "../format";
 import type { RunDetail, TaskRef } from "../types";
 import { Card, KVRows, Link, StatusBadge, linkClass, type KV } from "../ui/primitives";
+import { effectiveParams } from "./ParamOverrides";
 import { codeRefLabel, resolvedFromLabel, versionRefLabel, type ResolvedNode } from "./resolve";
 
 /** Read-only facts about one DAG node — the Figma's side panel, rendered BELOW the canvas
@@ -27,6 +28,10 @@ export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewC
       value: taskRef.taskVersion === "latest" ? `Always follow latest → currently ${node ? resolvedFromLabel(node.from) : "…"}` : `Pinned to ${versionRefLabel(taskRef)}`,
     },
     { label: "Depends on", value: taskRef.dependsOn.length ? taskRef.dependsOn.join(", ") : "—", mono: true },
+    {
+      label: "Param overrides",
+      value: Object.keys(taskRef.paramOverrides ?? {}).length ? <code className="whitespace-pre-wrap text-xs">{JSON.stringify(taskRef.paramOverrides, null, 2)}</code> : "— (runs with the task's own params)",
+    },
   ];
   const config: KV[] = cfg
     ? [
@@ -35,7 +40,15 @@ export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewC
         { label: "Retries", value: cfg.retry ? `${cfg.retry.maxRetries} · ${cfg.retry.backoff}, ${cfg.retry.delaySeconds}s` : "none", mono: true },
         { label: "Timeout", value: `${cfg.timeoutSeconds}s`, mono: true },
         { label: "Platform access", value: cfg.platformAccess ? "on" : "off" },
-        { label: "Parameters", value: Object.keys(cfg.params).length ? <code className="whitespace-pre-wrap text-xs">{JSON.stringify(cfg.params, null, 2)}</code> : "—" },
+        {
+          // What this node runs with: the task's params with this node's overrides merged over them.
+          label: "Parameters",
+          value: Object.keys(effectiveParams(cfg.params, taskRef.paramOverrides)).length ? (
+            <code className="whitespace-pre-wrap text-xs">{JSON.stringify(effectiveParams(cfg.params, taskRef.paramOverrides), null, 2)}</code>
+          ) : (
+            "—"
+          ),
+        },
       ]
     : [];
 

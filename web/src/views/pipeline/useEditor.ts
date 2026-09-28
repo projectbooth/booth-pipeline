@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "../../api/client";
 import type { ViewCtx } from "../../context";
-import { autoLayout, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey } from "../../graph";
+import { autoLayout, duplicateRef, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey } from "../../graph";
 import { errorMessage, useDebounced } from "../../hooks";
 import type { TaskEntity, TaskRef, ValidateResult } from "../../types";
 import { currentSpec, type PipelineData } from "./data";
@@ -179,6 +179,12 @@ export function useEditor(v: ViewCtx, d: PipelineData, reload: () => void) {
     remove: (key: string) => {
       change(removeRef(refs, key));
       setSelected(null);
+    },
+    duplicate: (key: string) => {
+      const out = duplicateRef(refs, key);
+      if (!out.key) return;
+      change(out.refs);
+      setSelected(out.key);
     },
     saving,
     saveDraft,
