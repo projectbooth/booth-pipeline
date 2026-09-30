@@ -115,6 +115,29 @@ jobs:
             bash hack/incluster-curl.sh booth-pipeline -s --max-time 10 -o /dev/null -w 'status=%{http_code}' -X POST "$runner" \
             | grep -q 'status=401' || { echo "the runner served a caller with no bearer secret"; exit 1; }
 
+      - name: The runner reaches a bundled booth-database only once boothDatabase.url is set, and never its own database (ADR 0092)
+        run: |
+          kubectl create namespace booth-database
+          kubectl apply -n booth-database -f tests/integration/fixtures/booth-database-postgres.yaml
+          kubectl -n booth-database rollout status deployment/booth-database-postgres --timeout=180s
+          # A TCP connect from INSIDE the runner pod (where task code runs), so this tests the policy
+          # as enforced by the CNI, not just what the chart renders.
+          probe_from() {
+            kubectl -n booth-pipeline exec "deploy/$1" -- \
+              python -c 'import socket, sys; socket.create_connection((sys.argv[1], 5432), timeout=5)' "$2" 2>/dev/null
+          }
+          probe() { probe_from booth-pipeline-runner "$1"; }
+          bdb=booth-database-postgres.booth-database.svc.cluster.local
+          own=postgres.booth-pipeline.svc.cluster.local
+          # Controls, so a "blocked" below means the policy, not a wrong address or a broken probe:
+          # the API pod legitimately uses this module's database.
+          probe_from booth-pipeline "$own" || { echo "control failed: the API pod cannot reach its own database"; exit 1; }
+          ! probe "$bdb" || { echo "booth-database was reachable before opting in"; exit 1; }
+          helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values \
+            --set boothDatabase.url="$bdb:5432" --wait --timeout 5m
+          probe "$bdb" || { echo "booth-database is still unreachable after setting boothDatabase.url"; exit 1; }
+          ! probe "$own" || { echo "the runner reached this module's OWN database"; exit 1; }
+
       - name: Dump logs on failure
         if: failure()
         run: |

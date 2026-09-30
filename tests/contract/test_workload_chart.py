@@ -123,6 +123,55 @@ def test_internet_egress_is_opt_in_and_never_covers_private_ranges():
     assert blk["cidr"] == "0.0.0.0/0" and {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} <= set(blk["except"])
 
 
+BOOTH_DB_URL = ("--set", "boothDatabase.url=booth-database-postgres.booth-database.svc:5432")
+
+
+def booth_database_rules(np: dict) -> list[dict]:
+    return [r for r in np["spec"]["egress"] for t in r.get("to", []) if t.get("podSelector", {}).get("matchLabels", {}).get("app.kubernetes.io/name") == "booth-database"]
+
+
+def test_booth_database_egress_is_closed_by_default(chart):
+    """ADR 0092: booth-database is optional, so with boothDatabase.url empty (the default) nothing
+    new opens — the runner stays exactly as closed as ADR 0070 requires."""
+    np = by_kind(chart, "NetworkPolicy", "-runner")
+    assert booth_database_rules(np) == []
+
+
+def test_setting_booth_database_url_opens_exactly_its_postgres_pod_on_5432():
+    np = by_kind(docs(*BOOTH_DB_URL), "NetworkPolicy", "-runner")
+    (rule,) = booth_database_rules(np)
+    (to,) = rule["to"]
+    assert to["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "booth-database"}
+    assert to["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "booth-database", "app.kubernetes.io/component": "postgres"}
+    assert rule["ports"] == [{"protocol": "TCP", "port": 5432}]  # that pod, that port — not the namespace, not any port
+    # One rule added to DNS + core; still no internet, still nothing broader than that one pod.
+    assert len(np["spec"]["egress"]) == 3
+    assert "ipBlock" not in yaml.safe_dump(np["spec"]["egress"])
+
+
+def test_the_booth_database_selector_follows_the_install():
+    np = by_kind(
+        docs(*BOOTH_DB_URL, "--set", "runner.networkPolicy.egress.boothDatabase.namespaceSelector.kubernetes\\.io/metadata\\.name=data"),
+        "NetworkPolicy",
+        "-runner",
+    )
+    (rule,) = booth_database_rules(np)
+    assert rule["to"][0]["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "data"}
+
+
+def test_opening_booth_database_gives_the_runner_no_credential_and_leaves_its_own_database_unreachable():
+    """The rule is network reachability only. The runner still holds no database credential, and this
+    module's OWN database (the `database:` values, ADR 0053) is not what the rule selects."""
+    items = docs(*BOOTH_DB_URL)
+    runner = by_kind(items, "Deployment", "-runner")
+    assert secret_names(runner) == {"pipeline-contract-test-booth-pipeline-runner-auth"}
+    env = {e["name"] for c in pod(runner)["containers"] for e in c.get("env", [])}
+    assert not {n for n in env if "DSN" in n or "DATABASE" in n}
+    np = by_kind(items, "NetworkPolicy", "-runner")
+    selectors = [t.get("podSelector", {}).get("matchLabels", {}) for r in np["spec"]["egress"] for t in r.get("to", [])]
+    assert not [s for s in selectors if s.get("app.kubernetes.io/name") == "booth-pipeline"]  # never this module's pods
+
+
 def test_the_two_services_select_their_own_pods_only(chart):
     api_svc = by_kind(chart, "Service", "booth-pipeline")
     runner_svc = by_kind(chart, "Service", "-runner")

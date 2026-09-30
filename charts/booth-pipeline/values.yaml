@@ -34,6 +34,15 @@ core:
   # code at save time. Leave empty to run with no catalog at all (inline code only).
   url: http://booth-core.booth-system.svc:8080
 
+# ADR 0092: a workspace's booth-database (ADR 0081) — NOT this module's own database above, which
+# task code can never reach. booth-database is optional, so this is empty by default and the runner
+# stays closed. Set it to your bundled booth-database's in-cluster address (e.g.
+# booth-database-postgres.booth-database.svc:5432) to let tasks reach it: that adds one egress rule
+# to its Postgres pod on port 5432 (selector: runner.networkPolicy.egress.boothDatabase). Bundled
+# mode only — an external booth-database has no in-cluster pod to select; use egress.extra for it.
+boothDatabase:
+  url: ""
+
 # Where workspace members' code runs (ADR 0057): a separate Deployment holding NO module credentials.
 # Disabling it runs tasks inside the API/scheduler pod instead, which is only acceptable for a
 # single-tenant/dev install and is REFUSED together with workloadIdentity (the minting credential
@@ -58,6 +67,11 @@ runner:
       core:
         namespaceSelector: {kubernetes.io/metadata.name: booth-system}
         podSelector: {app.kubernetes.io/name: booth-core}
+      # A bundled booth-database's Postgres pod (ADR 0092). Only rendered when boothDatabase.url is set.
+      # Match your install's namespace; the pod labels are booth-database's own.
+      boothDatabase:
+        namespaceSelector: {kubernetes.io/metadata.name: booth-database}
+        podSelector: {app.kubernetes.io/name: booth-database, app.kubernetes.io/component: postgres}
       # Raw NetworkPolicy egress rules. Empty by default: tasks reach storage and the catalog through
       # booth-core's gateway (the rule above, ADR 0059). Only needed if you point the runner at modules
       # directly with BOOTH_PIPELINE_STORAGE_URL / _CATALOG_URL.

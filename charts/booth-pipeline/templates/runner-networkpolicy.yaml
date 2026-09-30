@@ -1,6 +1,8 @@
 {{- if and .Values.runner.enabled .Values.runner.networkPolicy.enabled }}
 # The runner's network boundary (ADR 0057). Task code runs here, so this is where "no route to the
-# module's database, and only the API/scheduler pod may call in" is actually enforced. (Requires a
+# module's database, and only the API/scheduler pod may call in" is actually enforced. Closed by
+# default (ADR 0070): the only opt-in openings are the public internet and, when boothDatabase.url is
+# set, a workspace's bundled booth-database (ADR 0092). (Requires a
 # CNI that implements NetworkPolicy; on one that does not, this object is silently inert.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -46,6 +48,19 @@ spec:
           podSelector:
             matchLabels:
               {{- toYaml .Values.runner.networkPolicy.egress.core.podSelector | nindent 14 }}
+    {{- end }}
+    {{- if .Values.boothDatabase.url }}
+    # A workspace's bundled booth-database (ADR 0092), opt-in: only its Postgres pod, only on 5432.
+    # This module's OWN database is a different Postgres and still has no route from here.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.boothDatabase.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.runner.networkPolicy.egress.boothDatabase.podSelector | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 5432}
     {{- end }}
     {{- with .Values.runner.networkPolicy.egress.extra }}
     {{- toYaml . | nindent 4 }}
