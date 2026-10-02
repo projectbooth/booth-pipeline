@@ -12,7 +12,6 @@ import platform
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -24,8 +23,8 @@ from .catalog_client import CatalogClient
 from .config import Config
 from .model import ModelError
 from .runners.base import Runner
+from .runners.kubejob import KubernetesJobRunner
 from .runners.registry import RunnerRegistry
-from .runners.remote import RemoteRunner
 from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
@@ -119,15 +118,21 @@ def create_app(
     storage: StorageClient | None = None,
     start_scheduler: bool = True,
     minter: WorkloadMinter | None = None,
-    runner_transport: httpx.BaseTransport | None = None,
+    runner: Runner | None = None,
 ) -> FastAPI:
     store = store or build_store(cfg)
-    if cfg.runner_url:
-        # Deployed default (ADR 0057): user code runs in the separate, credential-less runner pod.
-        runner: Runner = RemoteRunner(cfg.runner_url, cfg.runner_secret(), transport=runner_transport)
-    else:
-        log.warning("BOOTH_PIPELINE_RUNNER_URL is unset: tasks run in subprocesses of THIS pod (fine for local dev; see docs/decisions/0002)")
-        runner = SubprocessRunner(python=cfg.runner_python or None, env_passthrough=cfg.runner_env_passthrough)
+    if runner is None:
+        if cfg.task_job_template:
+            # The deployed path (ADR 0096): one Kubernetes Job — its own pod — per task attempt.
+            runner = KubernetesJobRunner.from_template_file(
+                cfg.task_job_template,
+                max_concurrent=cfg.max_concurrent_tasks,
+                start_timeout_seconds=cfg.task_start_timeout_seconds,
+                name_prefix=cfg.task_name_prefix,
+            )
+        else:
+            log.warning("BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset: tasks run in subprocesses of THIS process (local dev and tests only; see docs/decisions/0018)")
+            runner = SubprocessRunner(python=cfg.runner_python or None, env_passthrough=cfg.runner_env_passthrough)
     registry = RunnerRegistry([runner])
     catalog = catalog or CatalogClient(cfg.core_url)
     storage = storage or StorageClient(cfg.core_url)

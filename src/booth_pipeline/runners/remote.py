@@ -1,6 +1,6 @@
-"""The remote runner: executes a task in the separate, credential-less runner pod (ADR 0057).
+"""The remote runner: drives one task in a credential-less task pod over HTTP (ADR 0057/0096).
 
-This is the ``Runner`` implementation the API/scheduler pod uses in a real deployment. It never
+``KubernetesJobRunner`` uses it against each task's own Job pod once that pod is Ready. It never
 executes user code itself. For one task attempt it:
 
 1. POSTs the task snapshot to the runner service and reads the NDJSON stream back, forwarding log

@@ -1,6 +1,3 @@
-{{- if and .Values.workloadIdentity.enabled (not .Values.runner.enabled) }}
-{{- fail "workloadIdentity.enabled requires runner.enabled: the workload-minting credential is mounted into this pod, so task code must not run here or it could read it (ADR 0057). Enable the runner, or disable workloadIdentity." }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,14 +19,16 @@ spec:
       labels:
         {{- include "booth-pipeline.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
+      annotations:
+        # Roll the pod when the task Job template changes: it is read once, at startup.
+        checksum/task-job: {{ include "booth-pipeline.taskJob" . | sha256sum }}
     spec:
       serviceAccountName: {{ include "booth-pipeline.serviceAccountName" . }}
-      # No service-account token: the module never calls the Kubernetes API, so one would be pure
-      # attack surface. What this pod DOES hold that must never reach user code — the database DSN
-      # and the workload-minting credential — is exactly why workspace members' tasks run in the
-      # separate runner pod (runner.yaml, ADR 0057), not here. (With runner.enabled=false, tasks run
-      # here as subprocesses; that is refused together with workloadIdentity.)
-      automountServiceAccountToken: false
+      # A service-account token: this pod creates one Kubernetes Job per task attempt (ADR 0096),
+      # bound by rbac.yaml's namespace Role to exactly that. What this pod holds that must never
+      # reach user code — the database DSN and the workload-minting credential — is why tasks run in
+      # their own Job pods (task-job.yaml), which get no token, no module Secret and no RBAC.
+      automountServiceAccountToken: true
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -66,13 +65,15 @@ spec:
             - name: BOOTH_CORE_URL
               value: {{ .Values.core.url | quote }}
             {{- end }}
-            {{- if .Values.runner.enabled }}
-            # User code runs in the separate, credential-less runner pod (ADR 0057), never here.
-            - name: BOOTH_PIPELINE_RUNNER_URL
-              value: "http://{{ include "booth-pipeline.fullname" . }}-runner:8080"
-            - name: BOOTH_RUNNER_AUTH_TOKEN_FILE
-              value: /etc/booth/runner-auth/token
-            {{- end }}
+            # User code runs in its own credential-less Job pod per task (ADR 0057/0096), never here.
+            - name: BOOTH_PIPELINE_TASK_JOB_TEMPLATE
+              value: /etc/booth/task-job/job.json
+            - name: BOOTH_PIPELINE_TASK_NAME_PREFIX
+              value: "{{ include "booth-pipeline.fullname" . | trunc 34 | trimSuffix "-" }}-task"
+            - name: BOOTH_PIPELINE_MAX_CONCURRENT_TASKS
+              value: {{ .Values.runner.maxConcurrent | quote }}
+            - name: BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS
+              value: {{ .Values.runner.startTimeoutSeconds | quote }}
             {{- if .Values.workloadIdentity.enabled }}
             - name: BOOTH_WORKLOAD_MINT_DIR
               value: /etc/booth/workload
@@ -104,14 +105,12 @@ spec:
             # space need somewhere writable. An emptyDir: nothing here survives the pod, by design.
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.runner.enabled }}
-            - name: runner-auth
-              mountPath: /etc/booth/runner-auth
+            - name: task-job
+              mountPath: /etc/booth/task-job
               readOnly: true
-            {{- end }}
             {{- if .Values.workloadIdentity.enabled }}
             # The credential core minted for this module (ADR 0056/0058). Mounted here and nowhere
-            # else: not in the runner pod. The module refuses to start if it is present while tasks
+            # else: not in any task pod. The module refuses to start if it is present while tasks
             # would run in this same pod (config.py).
             - name: workload-minting
               mountPath: /etc/booth/workload
@@ -121,11 +120,9 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.execution.scratchSize | quote }}
-        {{- if .Values.runner.enabled }}
-        - name: runner-auth
-          secret:
-            secretName: {{ .Values.runner.authSecret.name | default (printf "%s-runner-auth" (include "booth-pipeline.fullname" .)) }}
-        {{- end }}
+        - name: task-job
+          configMap:
+            name: {{ include "booth-pipeline.fullname" . }}-task-job
         {{- if .Values.workloadIdentity.enabled }}
         - name: workload-minting
           secret:

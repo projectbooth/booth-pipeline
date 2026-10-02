@@ -35,28 +35,25 @@ core:
   url: http://booth-core.booth-system.svc:8080
 
 # ADR 0092: a workspace's booth-database (ADR 0081) — NOT this module's own database above, which
-# task code can never reach. booth-database is optional, so this is empty by default and the runner
-# stays closed. Set it to your bundled booth-database's in-cluster address (e.g.
+# task code can never reach. booth-database is optional, so this is empty by default and task pods
+# stay closed. Set it to your bundled booth-database's in-cluster address (e.g.
 # booth-database-postgres.booth-database.svc:5432) to let tasks reach it: that adds one egress rule
 # to its Postgres pod on port 5432 (selector: runner.networkPolicy.egress.boothDatabase). Bundled
 # mode only — an external booth-database has no in-cluster pod to select; use egress.extra for it.
 boothDatabase:
   url: ""
 
-# Where workspace members' code runs (ADR 0057): a separate Deployment holding NO module credentials.
-# Disabling it runs tasks inside the API/scheduler pod instead, which is only acceptable for a
-# single-tenant/dev install and is REFUSED together with workloadIdentity (the minting credential
-# must never share a pod with task code).
+# Where workspace members' code runs (ADR 0057, ADR 0096): one Kubernetes Job — its own pod — per
+# task attempt, holding NO module credentials and no service-account token. This is the only mode.
 runner:
-  enabled: true
-  # Must be 1 in v0: a task's short-lived platform token is refreshed by pushing it to the runner
-  # pod hosting that task (docs/decisions/0007). Scale with maxConcurrent and resources.
-  replicaCount: 1
+  # At most this many task Jobs outstanding at once (per API/scheduler replica); further tasks wait.
   maxConcurrent: 16
+  # A task fails if its pod is not Ready this long after its Job is created (image pull, scheduling).
+  startTimeoutSeconds: 300
+  # Collects a finished task Job the API/scheduler pod never deleted (it normally deletes each one).
+  ttlSecondsAfterFinished: 300
+  # Each task pod's resources.
   resources: {}
-  authSecret:
-    # Empty = the chart generates and keeps one. Or name a Secret you manage (key: token).
-    name: ""
   networkPolicy:
     enabled: true
     egress:

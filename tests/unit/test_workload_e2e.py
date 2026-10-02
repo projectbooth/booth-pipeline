@@ -19,6 +19,7 @@ from booth_pipeline.app import create_app
 from booth_pipeline.catalog_client import CatalogClient
 from booth_pipeline.config import Config
 from booth_pipeline.runner_service import create_runner_app
+from booth_pipeline.runners.remote import RemoteRunner
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
 from booth_pipeline.store.memory import MemoryStore
 from booth_pipeline.workload import OWNER_NOT_CURRENT, WorkloadMinter
@@ -110,13 +111,15 @@ def world():
             dev_memory=True,
             oidc_issuer_url="https://idp.test/realms/booth",
             oidc_client_id="c",
-            runner_url=runner_url,
-            runner_auth_token=RUNNER_SECRET,
             core_url=platform.url,  # tasks reach storage/catalog through "the gateway" at core_url/modules/...
         )
         store = MemoryStore()
         catalog = CatalogClient("http://core.test", transport=httpx.MockTransport(FakeCatalog().handler))
-        app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=catalog, start_scheduler=False, minter=minter)
+        # The protocol each task Job pod speaks (ADR 0096): RemoteRunner against a real runner
+        # service. KubernetesJobRunner adds only the Job around it (tests/unit/test_kubejob.py).
+        app = create_app(
+            cfg, store=store, verifier=FakeVerifier(), catalog=catalog, start_scheduler=False, minter=minter, runner=RemoteRunner(runner_url, RUNNER_SECRET)
+        )
         with TestClient(app) as client:
             yield World(client, core, platform, runner, store, app)
     core.close()
@@ -242,12 +245,12 @@ def test_a_pipeline_that_predates_workload_identity_says_how_to_fix_it(world: Wo
 
 
 def test_the_startup_guard_refuses_a_minting_credential_in_a_pod_that_runs_tasks(tmp_path):
-    """ADR 0057: with no runner URL, tasks run in THIS pod and could read the mounted Secret."""
+    """ADR 0057/0096: with no task Job template, tasks run in THIS pod and could read the mounted Secret."""
     (tmp_path / "credential").write_text(CRED)
     from booth_pipeline.config import ConfigError
 
     base = dict(dev_memory=True, oidc_issuer_url="https://i/r", oidc_client_id="c", workload_mint_dir=str(tmp_path))
     with pytest.raises(ConfigError, match="same pod and could read it"):
         Config(**base).validate()
-    Config(**base, runner_url="http://runner:8080", runner_auth_token="s").validate()  # fine once tasks run elsewhere
+    Config(**base, task_job_template="/etc/booth/task-job/job.json").validate()  # fine once each task runs in its own Job
     Config(**{**base, "workload_mint_dir": str(tmp_path / "absent")}).validate()  # fine when there is no credential at all

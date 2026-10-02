@@ -48,7 +48,7 @@ jobs:
 
       - name: The Secret booth-core would provision for workload identity (ADR 0056), as a stand-in
         # The API pod mounts booth-workload-minting-credentials and waits for it. No core here, so
-        # a dummy: enough to prove the wiring and that the runner does NOT get it (checked below).
+        # a dummy: enough to prove the wiring and that task pods do NOT get it (checked below).
         run: |
           kubectl -n booth-pipeline create secret generic booth-workload-minting-credentials \
             --from-literal=credential=bwmc.pipeline.ci-standin \
@@ -89,57 +89,86 @@ jobs:
               | grep -q 'status=401' || { echo "$path was not refused"; exit 1; }
           done
 
-      - name: The pod has no Kubernetes API access (user code runs here)
+      - name: Kubernetes API access is exactly "run task Jobs", and only for the API pod (ADR 0096)
         run: |
-          sa="system:serviceaccount:booth-pipeline:booth-pipeline"
-          for args in "get secrets -n booth-pipeline" "list pods -n booth-pipeline" "get secrets -n kube-system"; do
-            test "$(kubectl auth can-i $args --as="$sa")" = "no" || { echo "unexpectedly ALLOWED: $args"; exit 1; }
+          api="system:serviceaccount:booth-pipeline:booth-pipeline"
+          task="system:serviceaccount:booth-pipeline:booth-pipeline-task"
+          can() { test "$(kubectl auth can-i $2 -n booth-pipeline --as="$1")" = "$3" || { echo "$1 '$2': expected $3"; exit 1; }; }
+          for v in "create jobs.batch" "delete jobs.batch" "list pods" "create secrets" "delete secrets"; do can "$api" "$v" yes; done
+          # Never read a Secret back, never a task's logs or a shell in its pod, nothing outside its namespace.
+          # (A subresource needs --subresource: "get pods/log" would ask about a pod NAMED log.)
+          for v in "get secrets" "list secrets" "get pods --subresource=log" "create pods --subresource=exec" "create pods --subresource=attach" "create pods"; do can "$api" "$v" no; done
+          test "$(kubectl auth can-i create jobs.batch -n kube-system --as="$api")" = "no"
+          for v in "create jobs.batch" "get secrets" "list pods" "get pods --subresource=log"; do can "$task" "$v" no; done
+          test "$(kubectl -n booth-pipeline get pod -l app.kubernetes.io/component=api -o jsonpath='{.items[0].spec.automountServiceAccountToken}')" = "true"
+
+      - name: Two concurrent tasks from different workspaces cannot reach each other's token, Secret, pod or logs (ADR 0096)
+        # Real Jobs, created by the API pod with its own token and Role, on a CNI that enforces the
+        # task NetworkPolicy. Each task tries the original attack (/tmp, /proc), the Kubernetes API,
+        # and a direct connection to the other's pod: tests/integration/task_jobs_driver.py.
+        run: |
+          kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - isolation < tests/integration/task_jobs_driver.py
+
+      - name: A pod that is not the API cannot call a task pod
+        run: |
+          # A task that runs long enough to aim at its pod while it is up.
+          kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - sleep 40 < tests/integration/task_jobs_driver.py &
+          ip=""
+          for _ in $(seq 1 90); do
+            ip="$(kubectl -n booth-pipeline get pod -l app.kubernetes.io/component=task -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
+            [ -n "$ip" ] && break; sleep 1
           done
-          test "$(kubectl -n booth-pipeline get pod -l app.kubernetes.io/name=booth-pipeline -o jsonpath='{.items[0].spec.automountServiceAccountToken}')" = "false"
+          test -n "$ip" || { echo "no task pod appeared"; exit 1; }
+          bash hack/incluster-curl.sh booth-pipeline -s --max-time 5 -o /dev/null -w 'status=%{http_code}' -X POST "http://$ip:8080/v1/run" \
+            | grep -q 'status=000' || { echo "a pod that is not the API reached a task pod"; exit 1; }
+          wait
 
-      - name: The runner pod (where user code executes) holds no module credential (ADR 0057)
+      - name: Finished tasks leave no Job, pod or Secret behind
         run: |
-          r() { kubectl -n booth-pipeline get deployment booth-pipeline-runner -o jsonpath="$1"; }
-          secrets="$(r '{.spec.template.spec.volumes[*].secret.secretName}')"
-          echo "runner secrets: $secrets"
-          echo "$secrets" | grep -q 'booth-workload-minting-credentials' && { echo "the runner mounts the minting credential"; exit 1; }
-          echo "$secrets" | grep -q 'booth-database-credentials' && { echo "the runner mounts the database credential"; exit 1; }
-          test "$(r '{.spec.template.spec.automountServiceAccountToken}')" = "false"
-          kubectl -n booth-pipeline rollout status deployment/booth-pipeline-runner --timeout=120s
-          runner=http://booth-pipeline-runner.booth-pipeline.svc.cluster.local:8080/v1/run
-          # Its NetworkPolicy admits only this release's API pod: any other pod gets no connection at all.
-          bash hack/incluster-curl.sh booth-pipeline -s --max-time 5 -o /dev/null -w 'status=%{http_code}' -X POST "$runner" \
-            | grep -q 'status=000' || { echo "a pod that is not the API reached the runner"; exit 1; }
-          # And even from a pod the policy lets through, it authenticates: no bearer, no service.
-          INCLUSTER_LABELS=app.kubernetes.io/name=booth-pipeline,app.kubernetes.io/instance=booth-pipeline,app.kubernetes.io/component=api \
-            bash hack/incluster-curl.sh booth-pipeline -s --max-time 10 -o /dev/null -w 'status=%{http_code}' -X POST "$runner" \
-            | grep -q 'status=401' || { echo "the runner served a caller with no bearer secret"; exit 1; }
+          left=""
+          for _ in $(seq 1 60); do
+            left="$(kubectl -n booth-pipeline get jobs,pods,secrets -l booth.projectbooth.io/task-job -o name)"
+            [ -z "$left" ] && exit 0; sleep 1
+          done
+          echo "left behind: $left"; exit 1
 
-      - name: The runner reaches a bundled booth-database only once boothDatabase.url is set, and never its own database (ADR 0092)
+      - name: Task pod cold start, measured
+        run: |
+          out="$(kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - coldstart 5 < tests/integration/task_jobs_driver.py)"
+          echo "$out"
+          { echo '### Task pod cold start (Job created -> pod Ready), 5 sequential tasks'; echo '```json'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: A refreshed platform token reaches a running task pod, measured
+        run: |
+          out="$(kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - refresh < tests/integration/task_jobs_driver.py)"
+          echo "$out"
+          { echo '### Token refresh latency (minted in the API pod -> seen by the task)'; echo '```json'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Task pods reach a bundled booth-database only once boothDatabase.url is set, and never their own module's database (ADR 0092)
         run: |
           kubectl create namespace booth-database
           kubectl apply -n booth-database -f tests/integration/fixtures/booth-database-postgres.yaml
           kubectl -n booth-database rollout status deployment/booth-database-postgres --timeout=180s
-          # A TCP connect from INSIDE the runner pod (where task code runs), so this tests the policy
-          # as enforced by the CNI, not just what the chart renders.
-          probe_from() {
-            kubectl -n booth-pipeline exec "deploy/$1" -- \
-              python -c 'import socket, sys; socket.create_connection((sys.argv[1], 5432), timeout=5)' "$2" 2>/dev/null
-          }
-          probe() { probe_from booth-pipeline-runner "$1"; }
-          bdb=booth-database-postgres.booth-database.svc.cluster.local
-          own=postgres.booth-pipeline.svc.cluster.local
-          # Controls, so a "blocked" below means the policy, not a wrong address or a broken probe:
+          # A TCP connect from INSIDE a real task pod (where task code runs), so this tests the
+          # policy as enforced by the CNI, not just what the chart renders.
+          bdb=booth-database-postgres.booth-database.svc.cluster.local:5432
+          own=postgres.booth-pipeline.svc.cluster.local:5432
+          probe() { kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - probe "$bdb" "$own" < tests/integration/task_jobs_driver.py; }
+          # Control, so a "blocked" below means the policy, not a wrong address or a broken probe:
           # the API pod legitimately uses this module's database.
-          probe_from booth-pipeline "$own" || { echo "control failed: the API pod cannot reach its own database"; exit 1; }
-          ! probe "$bdb" || { echo "booth-database was reachable before opting in"; exit 1; }
+          kubectl -n booth-pipeline exec deploy/booth-pipeline -- \
+            python -c 'import socket; socket.create_connection(("postgres.booth-pipeline.svc.cluster.local", 5432), timeout=5)' \
+            || { echo "control failed: the API pod cannot reach its own database"; exit 1; }
+          before="$(probe)"; echo "before: $before"
+          test "$before" = "{\"$bdb\": false, \"$own\": false}" || { echo "a task reached a database before opting in"; exit 1; }
           helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values \
-            --set boothDatabase.url="$bdb:5432" --wait --timeout 5m
-          probe "$bdb" || { echo "booth-database is still unreachable after setting boothDatabase.url"; exit 1; }
-          ! probe "$own" || { echo "the runner reached this module's OWN database"; exit 1; }
+            --set boothDatabase.url="$bdb" --wait --timeout 5m
+          after="$(probe)"; echo "after: $after"
+          test "$after" = "{\"$bdb\": true, \"$own\": false}" || { echo "expected booth-database reachable and this module's own database not"; exit 1; }
 
       - name: Dump logs on failure
         if: failure()
         run: |
-          kubectl -n booth-pipeline get all
+          kubectl -n booth-pipeline get all,jobs,secrets,networkpolicies
           kubectl -n booth-pipeline logs deployment/booth-pipeline --tail=200 || true
+          kubectl -n booth-pipeline describe pods -l app.kubernetes.io/component=task || true

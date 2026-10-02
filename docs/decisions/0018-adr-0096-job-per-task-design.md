@@ -101,3 +101,26 @@ cluster) and unit-test path, which a chart install can never select.
 Cold-start latency per task on a real cluster (Job create → pod Ready → first log line), versus
 today's subprocess spawn, including for a frequent short schedule. Token-refresh latency should be
 unchanged (still an in-process write in the task's pod), and will be measured to confirm it.
+
+### Measured (2026-10-02, kind v0.33 single node, image already on the node)
+
+Taken by `.github/workflows/integration.yml` (`tests/integration/task_jobs_driver.py`), which
+reports them to the job summary on every run:
+
+| | Result |
+|---|---|
+| Job created → task pod Ready, 5 sequential trivial tasks | 1.0 / **2.0** / 2.0 s (min / median / max) |
+| The same task as a bare subprocess (the old path) | 0.06 s median |
+| Token minted in the API pod → visible to the running task | 3–11 ms, **7 ms** median (8 refreshes) |
+
+So each task attempt pays roughly 1–2 s of pod start-up that it didn't before: negligible against
+any real task, noticeable only for a schedule of many trivial tasks. The figures are quantized by
+the 0.5 s Ready poll and the 1 s readiness period, and exclude image pull — a cold node pulls the
+image once. Token refresh is unchanged in practice, as predicted.
+
+### Found by running it on a real cluster
+
+- The per-task Secret volume first used `defaultMode: 0400`. That file is root-owned and the
+  non-root runner (no `fsGroup`) could not read its own bearer, so every pod exited at once. It now
+  uses the default mode. A tighter mode would protect nothing in a one-task pod anyway, since the
+  task's code runs as the same user as the runner reading it.

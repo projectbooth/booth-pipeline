@@ -10,7 +10,7 @@
 # completion unattached and its output is read back from its logs, so nothing can be missed.
 #
 # INCLUSTER_LABELS (optional, "k=v,k=v") labels the pod — e.g. as this release's API component, the
-# only pod the runner's NetworkPolicy lets through. Pass curl a --max-time so no check can hang.
+# only pod the task NetworkPolicy lets through. Pass curl a --max-time so no check can hang.
 set -euo pipefail
 
 ns="$1"

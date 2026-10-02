@@ -1,11 +1,15 @@
-"""Chart contract for workload identity and the separate runner (ADR 0056/0057/0058).
+"""Chart contract for workload identity and task Jobs (ADR 0056/0057/0058/0096).
 
 These pin the *security topology*, not just the shape: the minting credential reaches the
-API/scheduler pod and nothing else; the pod that executes user code holds no module credential and is
-reachable only from the API pod.
+API/scheduler pod and nothing else; the pod that executes user code — one Job per task, from the
+template in the task-job ConfigMap — holds no module credential, no service-account token, and is
+reachable only from the API pod. The API pod's Kubernetes access is exactly what creating those Jobs
+needs.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import yaml
@@ -29,12 +33,17 @@ def chart() -> list[dict]:
 
 @pytest.fixture(scope="module")
 def api(chart) -> dict:
-    return by_kind(chart, "Deployment", "booth-pipeline")  # the API/scheduler (the runner's name ends in -runner)
+    return by_kind(chart, "Deployment")  # the API/scheduler; there is no other
+
+
+def task_job(items: list[dict]) -> dict:
+    """The Job template KubernetesJobRunner creates each task's Job from."""
+    return json.loads(by_kind(items, "ConfigMap", "-task-job")["data"]["job.json"])
 
 
 @pytest.fixture(scope="module")
-def runner(chart) -> dict:
-    return by_kind(chart, "Deployment", "-runner")
+def task(chart) -> dict:
+    return task_job(chart)
 
 
 def pod(d: dict) -> dict:
@@ -65,7 +74,7 @@ def test_the_manifest_declares_workload_identity_so_core_provisions_a_minting_cr
 def test_disabling_workload_identity_omits_the_field_the_secret_and_the_mount():
     items = docs("--set", "workloadIdentity.enabled=false")
     assert "workloadIdentity" not in by_kind(items, "BoothModule", "pipeline")["spec"]
-    api = by_kind(items, "Deployment", "booth-pipeline")
+    api = by_kind(items, "Deployment")
     assert "booth-workload-minting-credentials" not in secret_names(api)
     assert "BOOTH_WORKLOAD_MINT_DIR" not in {e["name"] for e in pod(api)["containers"][0]["env"]}
 
@@ -77,38 +86,101 @@ def test_the_minting_credential_is_mounted_into_the_api_pod(api):
     assert {e["name"]: e.get("value") for e in c["env"]}["BOOTH_WORKLOAD_MINT_DIR"] == "/etc/booth/workload"
 
 
-def test_the_pod_that_runs_user_code_holds_no_module_credential(runner):
-    """The heart of ADR 0057. The runner may read exactly one Secret — the bearer that lets the API pod
-    call it — and never the database credentials or the minting credential."""
-    secrets = secret_names(runner)
-    assert secrets == {"pipeline-contract-test-booth-pipeline-runner-auth"}
-    assert "booth-workload-minting-credentials" not in secrets and "booth-database-credentials" not in secrets
-    env = {e["name"] for c in pod(runner)["containers"] for e in c.get("env", [])}
+def test_the_pod_that_runs_user_code_holds_no_module_credential(task):
+    """The heart of ADR 0057. A task pod may read exactly one Secret — its own per-task runner bearer,
+    which KubernetesJobRunner names per task — and never the database or minting credentials."""
+    (vol,) = [v for v in pod(task)["volumes"] if "secret" in v]
+    assert vol["name"] == "runner-auth"
+    assert secret_names(task) == {"per-task"}  # a placeholder the runner replaces with "<job>-auth"
+    env = {e["name"] for c in pod(task)["containers"] for e in c.get("env", [])}
     assert not {n for n in env if "DSN" in n or "DATABASE" in n or "MINT" in n or "OIDC" in n or "CORE" in n}
-    assert pod(runner)["automountServiceAccountToken"] is False
+    assert not [e for c in pod(task)["containers"] for e in c.get("env", []) if "valueFrom" in e]
+    assert not [c for c in pod(task)["containers"] if "envFrom" in c]
 
 
-def test_the_runner_is_as_locked_down_as_the_api_pod(runner):
-    spec = pod(runner)
-    c = spec["containers"][0]
+def test_a_task_pod_gets_no_service_account_token_and_its_account_has_no_rbac(chart, task):
+    spec = pod(task)
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["serviceAccountName"] == "pipeline-contract-test-booth-pipeline-task"
+    sa = by_kind(chart, "ServiceAccount", "-task")
+    assert sa["automountServiceAccountToken"] is False
+    (binding,) = [d for d in chart if d["kind"] in ("RoleBinding", "ClusterRoleBinding")]
+    assert [s["name"] for s in binding["subjects"]] == ["pipeline-contract-test-booth-pipeline"]  # the API pod's, only
+
+
+def test_a_task_pod_is_one_shot_and_as_locked_down_as_the_api_pod(task):
+    spec = pod(task)
+    (c,) = spec["containers"]
     assert c["command"] == ["booth-pipeline-runner"]
+    env = {e["name"]: e.get("value") for e in c["env"]}
+    assert env["BOOTH_RUNNER_MAX_CONCURRENT"] == "1" and env["BOOTH_RUNNER_ONE_SHOT"] == "1"
+    assert env["BOOTH_RUNNER_AUTH_TOKEN_FILE"] == "/etc/booth/runner-auth/token"
+    assert c["readinessProbe"]["httpGet"]["path"] == "/healthz"  # what "pod Ready" waits for
     assert spec["securityContext"]["runAsNonRoot"] is True
     assert c["securityContext"]["readOnlyRootFilesystem"] is True and c["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    assert c["securityContext"]["allowPrivilegeEscalation"] is False
     assert {"name": "tmp", "mountPath": "/tmp"} in c["volumeMounts"]  # task working directories need somewhere writable
+    assert spec["enableServiceLinks"] is False  # no other Services' addresses in its environment
+    assert task["spec"]["ttlSecondsAfterFinished"] == 300
+    assert task["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/component"] == "task"
 
 
-def test_the_runners_service_account_has_no_token_and_no_rbac(chart):
-    sa = by_kind(chart, "ServiceAccount", "-runner")
-    assert sa["automountServiceAccountToken"] is False
-    assert not [d for d in chart if d["kind"] in ("Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding")]
+def test_the_api_pod_may_run_task_jobs_and_nothing_more(chart):
+    """docs/decisions/0018's RBAC table: namespace-scoped; no secrets get/list, no pods/log or exec."""
+    assert not [d for d in chart if d["kind"] in ("ClusterRole", "ClusterRoleBinding")]
+    role = by_kind(chart, "Role", "-task-runner")
+    rules = {(g, r): set(rule["verbs"]) for rule in role["rules"] for g in rule["apiGroups"] for r in rule["resources"]}
+    assert rules == {
+        ("batch", "jobs"): {"create", "get", "list", "watch", "delete"},
+        ("", "pods"): {"get", "list", "watch"},
+        ("", "secrets"): {"create", "delete"},
+    }
+    binding = by_kind(chart, "RoleBinding", "-task-runner")
+    assert binding["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role["metadata"]["name"]}
 
 
-def test_only_the_api_pod_can_call_the_runner_and_the_database_is_unreachable_from_it(chart):
-    np = by_kind(chart, "NetworkPolicy", "-runner")
+def test_the_api_pod_has_a_token_and_is_pointed_at_the_task_job_template(api):
+    spec = pod(api)
+    assert spec["automountServiceAccountToken"] is True  # the one pod that talks to the Kubernetes API
+    c = spec["containers"][0]
+    env = {e["name"]: e.get("value") for e in c["env"]}
+    assert env["BOOTH_PIPELINE_TASK_JOB_TEMPLATE"] == "/etc/booth/task-job/job.json"
+    assert env["BOOTH_PIPELINE_MAX_CONCURRENT_TASKS"] == "16"
+    assert env["BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS"] == "300"
+    assert env["BOOTH_PIPELINE_TASK_NAME_PREFIX"] == "pipeline-contract-test-booth-pipel-task"  # fullname cut to fit
+    assert not {n for n in env if n.startswith("BOOTH_RUNNER_") or n == "BOOTH_PIPELINE_RUNNER_URL"}
+    assert {"name": "task-job", "mountPath": "/etc/booth/task-job", "readOnly": True} in c["volumeMounts"]
+    assert {"name": "task-job", "configMap": {"name": "pipeline-contract-test-booth-pipeline-task-job"}} in spec["volumes"]
+    assert "checksum/task-job" in api["spec"]["template"]["metadata"]["annotations"]
+
+
+def test_the_task_name_prefix_leaves_room_for_the_job_suffixes():
+    """<prefix>-<12 hex>-auth must stay a valid name; Job pod names add a further suffix."""
+    items = docs("--set", "fullnameOverride=" + "x" * 63)
+    env = {e["name"]: e.get("value") for e in pod(by_kind(items, "Deployment"))["containers"][0]["env"]}
+    assert len(env["BOOTH_PIPELINE_TASK_NAME_PREFIX"]) <= 40
+
+
+def test_there_is_no_shared_runner_any_more(chart):
+    assert [d["kind"] for d in chart if d["kind"] in ("Deployment", "StatefulSet", "DaemonSet")] == ["Deployment"]
+    assert len([d for d in chart if d["kind"] == "Service"]) == 1
+    assert not [d for d in chart if d["kind"] == "Secret"]  # task bearers are created per task, never by the chart
+
+
+@pytest.mark.parametrize("flag", ["runner.enabled=false", "runner.replicaCount=2", "runner.authSecret.name=mine"])
+def test_removed_runner_settings_are_refused_rather_than_silently_ignored(flag):
+    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", flag)
+    assert out.returncode != 0 and "ADR 0096" in out.stderr
+
+
+def test_only_the_api_pod_can_call_a_task_pod_and_the_database_is_unreachable_from_it(chart):
+    np = by_kind(chart, "NetworkPolicy", "-task")
+    assert np["spec"]["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "task"  # every task pod
     assert set(np["spec"]["policyTypes"]) == {"Ingress", "Egress"}
     (rule,) = np["spec"]["ingress"]
     (frm,) = rule["from"]
-    assert frm["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "api"  # not "any pod in the namespace"
+    # Not "any pod in the namespace" — and so never another task's pod.
+    assert frm["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "api"
     assert rule["ports"] == [{"protocol": "TCP", "port": 8080}]
     # egress is an allowlist: DNS and booth-core's gateway. Nothing names a database, and by default the
     # public internet is off too.
@@ -117,8 +189,14 @@ def test_only_the_api_pod_can_call_the_runner_and_the_database_is_unreachable_fr
     assert len(np["spec"]["egress"]) == 2
 
 
+def test_the_network_policy_selects_exactly_the_pods_the_job_template_makes(chart, task):
+    np = by_kind(chart, "NetworkPolicy", "-task")
+    labels = task["spec"]["template"]["metadata"]["labels"]
+    assert np["spec"]["podSelector"]["matchLabels"].items() <= labels.items()
+
+
 def test_internet_egress_is_opt_in_and_never_covers_private_ranges():
-    np = by_kind(docs("--set", "runner.networkPolicy.egress.allowInternet=true"), "NetworkPolicy", "-runner")
+    np = by_kind(docs("--set", "runner.networkPolicy.egress.allowInternet=true"), "NetworkPolicy", "-task")
     (blk,) = [t["ipBlock"] for r in np["spec"]["egress"] for t in r.get("to", []) if "ipBlock" in t]
     assert blk["cidr"] == "0.0.0.0/0" and {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} <= set(blk["except"])
 
@@ -132,13 +210,13 @@ def booth_database_rules(np: dict) -> list[dict]:
 
 def test_booth_database_egress_is_closed_by_default(chart):
     """ADR 0092: booth-database is optional, so with boothDatabase.url empty (the default) nothing
-    new opens — the runner stays exactly as closed as ADR 0070 requires."""
-    np = by_kind(chart, "NetworkPolicy", "-runner")
+    new opens — task pods stay exactly as closed as ADR 0070 requires."""
+    np = by_kind(chart, "NetworkPolicy", "-task")
     assert booth_database_rules(np) == []
 
 
 def test_setting_booth_database_url_opens_exactly_its_postgres_pod_on_5432():
-    np = by_kind(docs(*BOOTH_DB_URL), "NetworkPolicy", "-runner")
+    np = by_kind(docs(*BOOTH_DB_URL), "NetworkPolicy", "-task")
     (rule,) = booth_database_rules(np)
     (to,) = rule["to"]
     assert to["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "booth-database"}
@@ -153,63 +231,24 @@ def test_the_booth_database_selector_follows_the_install():
     np = by_kind(
         docs(*BOOTH_DB_URL, "--set", "runner.networkPolicy.egress.boothDatabase.namespaceSelector.kubernetes\\.io/metadata\\.name=data"),
         "NetworkPolicy",
-        "-runner",
+        "-task",
     )
     (rule,) = booth_database_rules(np)
     assert rule["to"][0]["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "data"}
 
 
-def test_opening_booth_database_gives_the_runner_no_credential_and_leaves_its_own_database_unreachable():
-    """The rule is network reachability only. The runner still holds no database credential, and this
+def test_opening_booth_database_gives_task_pods_no_credential_and_leaves_its_own_database_unreachable():
+    """The rule is network reachability only. A task pod still holds no database credential, and this
     module's OWN database (the `database:` values, ADR 0053) is not what the rule selects."""
     items = docs(*BOOTH_DB_URL)
-    runner = by_kind(items, "Deployment", "-runner")
-    assert secret_names(runner) == {"pipeline-contract-test-booth-pipeline-runner-auth"}
-    env = {e["name"] for c in pod(runner)["containers"] for e in c.get("env", [])}
+    task = task_job(items)
+    assert secret_names(task) == {"per-task"}
+    env = {e["name"] for c in pod(task)["containers"] for e in c.get("env", [])}
     assert not {n for n in env if "DSN" in n or "DATABASE" in n}
-    np = by_kind(items, "NetworkPolicy", "-runner")
+    np = by_kind(items, "NetworkPolicy", "-task")
     selectors = [t.get("podSelector", {}).get("matchLabels", {}) for r in np["spec"]["egress"] for t in r.get("to", [])]
     assert not [s for s in selectors if s.get("app.kubernetes.io/name") == "booth-pipeline"]  # never this module's pods
 
 
-def test_the_two_services_select_their_own_pods_only(chart):
-    api_svc = by_kind(chart, "Service", "booth-pipeline")
-    runner_svc = by_kind(chart, "Service", "-runner")
-    assert api_svc["spec"]["selector"]["app.kubernetes.io/component"] == "api"
-    assert runner_svc["spec"]["selector"]["app.kubernetes.io/component"] == "runner"
-
-
-def test_the_api_pod_is_told_where_the_runner_is_and_shares_the_bearer_with_it(api, runner):
-    env = {e["name"]: e.get("value") for e in pod(api)["containers"][0]["env"]}
-    assert env["BOOTH_PIPELINE_RUNNER_URL"] == "http://pipeline-contract-test-booth-pipeline-runner:8080"
-    shared = {"pipeline-contract-test-booth-pipeline-runner-auth"}
-    assert shared <= secret_names(api) and shared <= secret_names(runner)
-
-
-def test_the_runner_bearer_is_generated_once_and_can_be_supplied():
-    assert by_kind(docs(), "Secret", "-runner-auth")["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-    items = docs("--set", "runner.authSecret.name=my-own")
-    assert not [d for d in items if d["kind"] == "Secret"]  # ours is not created when you bring your own
-    assert "my-own" in secret_names(by_kind(items, "Deployment", "booth-pipeline"))
-    assert "my-own" in secret_names(by_kind(items, "Deployment", "-runner"))
-
-
-def test_more_than_one_runner_replica_is_refused_because_token_refresh_needs_the_same_pod():
-    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", "runner.replicaCount=2")
-    assert out.returncode != 0 and "runner.replicaCount must be 1" in out.stderr
-
-
-def test_the_minting_credential_and_in_pod_task_execution_cannot_be_combined():
-    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", "runner.enabled=false")
-    assert out.returncode != 0 and "workloadIdentity.enabled requires runner.enabled" in out.stderr
-
-
-def test_a_dev_install_without_workload_identity_can_still_run_tasks_in_pod():
-    items = docs("--set", "runner.enabled=false", "--set", "workloadIdentity.enabled=false")
-    assert not [d for d in items if d["metadata"]["name"].endswith("-runner")]
-    env = {e["name"] for e in pod(by_kind(items, "Deployment", "booth-pipeline"))["containers"][0]["env"]}
-    assert "BOOTH_PIPELINE_RUNNER_URL" not in env
-
-
-def test_the_runner_never_rolls_two_pods_at_once(runner):
-    assert runner["spec"]["strategy"]["type"] == "Recreate"
+def test_the_service_selects_the_api_pod_only(chart):
+    assert by_kind(chart, "Service")["spec"]["selector"]["app.kubernetes.io/component"] == "api"

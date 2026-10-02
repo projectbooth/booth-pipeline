@@ -10,7 +10,7 @@ dependency; it is a listed-but-unavailable per-task target until `booth-spark` p
 ([docs/decisions/0006](docs/decisions/0006-spark-runner-unavailable.md)).
 
 > **Read [docs/decisions/](docs/decisions/) before deploying**, especially **[0007](docs/decisions/0007-workload-identity-adoption.md)**:
-> task code runs in a separate, credential-less **runner pod** (ADR 0057) and tasks can use `booth-storage` / the catalog as a
+> each task runs in its own credential-less **Kubernetes Job pod** (ADR 0057/0096, design: [0018](docs/decisions/0018-adr-0096-job-per-task-design.md)) and tasks can use `booth-storage` / the catalog as a
 > short-lived run identity (ADR 0056/0058), called through booth-core's gateway (`BOOTH_CORE_URL/modules/{storage,catalog}`,
 > which accepts workload tokens since ADR 0059). `BOOTH_PIPELINE_STORAGE_URL` / `_CATALOG_URL` remain as an escape hatch only.
 
@@ -37,7 +37,7 @@ src/booth_pipeline/
   engine.py        compiles a spec to a Dagster job and runs it; retries/ordering are Dagster's
   runners/         the seam: Runner protocol, the base subprocess runner, the registry
   workload.py      minting client (API pod only) + per-run access provider (ADR 0056/0058)
-  runner_service.py  the credential-less runner pod's service; runners/remote.py is its client (ADR 0057)
+  runner_service.py  the service each task's Job pod runs; runners/kubejob.py creates the Job, runners/remote.py drives it (ADR 0096)
   runs.py          StoreRecorder (task state + buffered, capped logs) and RunManager (workers, heartbeat, cancel, sweep)
   service.py       every use case, independent of HTTP (save = resolve code -> validate -> compile -> store)
   scheduler.py     cron polling with atomic claiming; safe in every replica

@@ -1,0 +1,34 @@
+{{- if hasKey .Values.runner "enabled" }}{{- if not .Values.runner.enabled }}
+{{- fail "runner.enabled was removed (ADR 0096): every task runs in its own Kubernetes Job; there is no in-pod or shared-runner mode to fall back to." }}
+{{- end }}{{- end }}
+{{- if or (hasKey .Values.runner "replicaCount") (hasKey .Values.runner "authSecret") }}
+{{- fail "runner.replicaCount and runner.authSecret were removed (ADR 0096): there is no shared runner Deployment any more, and each task's runner bearer is generated per task." }}
+{{- end }}
+# Where workspace members' code runs (ADR 0057, ADR 0096; design: docs/decisions/0018): one
+# Kubernetes Job — one pod — per task attempt, created by the API/scheduler pod from the template
+# below. Each pod runs the runner service for exactly that one task and then exits. A task pod has:
+#   - no database Secret, no booth-workload-minting-credentials Secret, no other module config;
+#   - no service-account token (automountServiceAccountToken: false; its ServiceAccount has no RBAC);
+#   - its own filesystem, /tmp and process namespace, so it cannot read another task's token;
+#   - a NetworkPolicy (task-networkpolicy.yaml) letting only the API/scheduler pod call in.
+# The only secret it holds is a random bearer for its own runner service (a per-task Secret,
+# owner-referenced to the Job). Its platform token is pushed over that connection, never stored in
+# a Kubernetes object.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-task
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-task-job
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+data:
+  # KubernetesJobRunner fills in, per task: the name, task labels, backoffLimit 0,
+  # activeDeadlineSeconds, restartPolicy Never and the runner-auth Secret's name.
+  job.json: {{ include "booth-pipeline.taskJob" . | fromYaml | toJson | quote }}
