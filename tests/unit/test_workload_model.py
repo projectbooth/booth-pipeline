@@ -55,20 +55,36 @@ def test_storage_and_catalog_default_to_the_gateway_and_can_be_pointed_at_a_modu
     assert Config().storage_base == ""  # no core configured: tasks that opt in get nowhere to call and fail clearly
 
 
-def test_a_runner_url_needs_its_shared_secret():
+def test_task_jobs_are_configured_from_the_environment(monkeypatch):
+    """ADR 0096: the chart points the API/scheduler pod at its rendered task Job template; there is
+    no shared-runner URL any more."""
+    for k, v in {
+        "BOOTH_PIPELINE_DEV_MEMORY": "true",
+        "BOOTH_OIDC_ISSUER_URL": "https://i/r",
+        "BOOTH_OIDC_CLIENT_ID": "c",
+        "BOOTH_PIPELINE_TASK_JOB_TEMPLATE": "/etc/booth/task-job/job.json",
+        "BOOTH_PIPELINE_MAX_CONCURRENT_TASKS": "4",
+        "BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS": "120",
+        "BOOTH_PIPELINE_TASK_NAME_PREFIX": "rel-booth-pipeline-task",
+        "BOOTH_WORKLOAD_MINT_DIR": "/nonexistent",
+    }.items():
+        monkeypatch.setenv(k, v)
+    c = Config.from_env()
+    assert (c.task_job_template, c.max_concurrent_tasks, c.task_start_timeout_seconds, c.task_name_prefix) == (
+        "/etc/booth/task-job/job.json",
+        4,
+        120,
+        "rel-booth-pipeline-task",
+    )
+    assert not hasattr(c, "runner_url")
+
+
+def test_the_task_concurrency_cap_must_be_at_least_one(monkeypatch):
     import pytest
 
-    base = dict(dev_memory=True, oidc_issuer_url="https://i/r", oidc_client_id="c")
-    with pytest.raises(ConfigError, match="RUNNER_AUTH_TOKEN"):
-        Config(**base, runner_url="http://runner:8080").validate()
-    Config(**base, runner_url="http://runner:8080", runner_auth_token_file="/x").validate()
-
-
-def test_the_runner_secret_is_read_from_its_file_when_given(tmp_path):
-    f = tmp_path / "s"
-    f.write_text("from-file\n")
-    assert Config(runner_auth_token_file=str(f), runner_auth_token="from-env").runner_secret() == "from-file"
-    assert Config(runner_auth_token="from-env").runner_secret() == "from-env"
+    monkeypatch.setenv("BOOTH_PIPELINE_MAX_CONCURRENT_TASKS", "0")
+    with pytest.raises(ConfigError, match="MAX_CONCURRENT_TASKS"):
+        Config.from_env()
 
 
 def test_a_pipelines_task_refs_have_no_kind_and_carry_no_execution_config_of_their_own():

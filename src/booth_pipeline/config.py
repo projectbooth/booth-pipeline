@@ -61,11 +61,13 @@ class Config:
     runner_python: str = ""
     runner_env_passthrough: tuple[str, ...] = field(default_factory=tuple)
 
-    # Where tasks execute. Empty = in a subprocess of THIS pod (local dev / single-tenant only).
-    # Set = the separate, credential-less runner service (ADR 0057), the deployed default.
-    runner_url: str = ""
-    runner_auth_token_file: str = ""
-    runner_auth_token: str = ""
+    # Where tasks execute (ADR 0096). Set = one Kubernetes Job per task attempt, from this
+    # chart-rendered Job template (JSON); the only deployed path. Empty = in a subprocess of THIS
+    # process (local dev and tests only; refused alongside a workload-minting credential).
+    task_job_template: str = ""
+    max_concurrent_tasks: int = 16  # outstanding task Jobs (runner.maxConcurrent)
+    task_start_timeout_seconds: int = 300  # Job created -> its pod Ready, before the task fails
+    task_name_prefix: str = "booth-pipeline-task"
 
     # Workload identity (ADR 0056/0058): the Secret core writes when the manifest declares
     # `workloadIdentity: {mint: true}`. Only ever readable by THIS (trusted) pod.
@@ -97,9 +99,10 @@ class Config:
             queued_timeout_seconds=_int("BOOTH_PIPELINE_QUEUED_TIMEOUT_SECONDS", 900, 30),
             max_log_lines_per_run=_int("BOOTH_PIPELINE_MAX_LOG_LINES_PER_RUN", 50_000, 100),
             runner_python=os.environ.get("BOOTH_PIPELINE_RUNNER_PYTHON", ""),
-            runner_url=os.environ.get("BOOTH_PIPELINE_RUNNER_URL", "").rstrip("/"),
-            runner_auth_token_file=os.environ.get("BOOTH_RUNNER_AUTH_TOKEN_FILE", ""),
-            runner_auth_token=os.environ.get("BOOTH_RUNNER_AUTH_TOKEN", ""),
+            task_job_template=os.environ.get("BOOTH_PIPELINE_TASK_JOB_TEMPLATE", ""),
+            max_concurrent_tasks=_int("BOOTH_PIPELINE_MAX_CONCURRENT_TASKS", 16, 1),
+            task_start_timeout_seconds=_int("BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS", 300, 10),
+            task_name_prefix=os.environ.get("BOOTH_PIPELINE_TASK_NAME_PREFIX", "") or "booth-pipeline-task",
             workload_mint_dir=os.environ.get("BOOTH_WORKLOAD_MINT_DIR", "/etc/booth/workload"),
             storage_url=os.environ.get("BOOTH_PIPELINE_STORAGE_URL", "").rstrip("/"),
             catalog_url=os.environ.get("BOOTH_PIPELINE_CATALOG_URL", "").rstrip("/"),
@@ -118,27 +121,19 @@ class Config:
     def catalog_base(self) -> str:
         return self.catalog_url or (f"{self.core_url}/modules/catalog" if self.core_url else "")
 
-    def runner_secret(self) -> str:
-        if self.runner_auth_token_file:
-            with open(self.runner_auth_token_file, encoding="utf-8") as f:
-                return f.read().strip()
-        return self.runner_auth_token
-
     def has_minting_credential(self) -> bool:
         from pathlib import Path
 
         return Path(self.workload_mint_dir, "credential").is_file()
 
     def validate(self) -> None:
-        if self.runner_url and not (self.runner_auth_token or self.runner_auth_token_file):
-            raise ConfigError("BOOTH_RUNNER_AUTH_TOKEN_FILE (or BOOTH_RUNNER_AUTH_TOKEN) is required when BOOTH_PIPELINE_RUNNER_URL is set")
-        if not self.runner_url and self.has_minting_credential():
-            # ADR 0057: the credential that mints tokens must never share a pod with code a workspace
-            # member wrote. With no runner URL, tasks run as subprocesses HERE, and a task could simply
-            # read the mounted Secret. Refuse to start rather than run in that state.
+        if not self.task_job_template and self.has_minting_credential():
+            # ADR 0057/0096: the credential that mints tokens must never share a pod with code a
+            # workspace member wrote. With no Job template, tasks run as subprocesses HERE, and a task
+            # could simply read the mounted Secret. Refuse to start rather than run in that state.
             raise ConfigError(
-                f"a workload-minting credential is mounted at {self.workload_mint_dir} but BOOTH_PIPELINE_RUNNER_URL is unset, "
-                "so tasks would run in the same pod and could read it (ADR 0057). Point the module at the runner service, "
+                f"a workload-minting credential is mounted at {self.workload_mint_dir} but BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset, "
+                "so tasks would run in the same pod and could read it (ADR 0057/0096). Run tasks as Jobs, "
                 "or do not give it the credential"
             )
         if not self.dev_memory and not self.database_dsn:

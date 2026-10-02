@@ -103,13 +103,14 @@ def test_the_role_is_rederived_from_the_token_so_the_groups_claim_reaches_the_po
     assert env2["BOOTH_OIDC_GROUPS_CLAIM"] == "memberships"
 
 
-def test_no_kubernetes_api_access_and_no_mounted_token():
-    """Pipeline tasks are user code running in this pod, so anything mounted is reachable by
-    them. The module never calls the Kubernetes API: no RBAC, no service-account token."""
+def test_kubernetes_api_access_is_namespaced_and_only_the_api_pod_has_a_token():
+    """ADR 0096: the API/scheduler pod creates one Job per task, so it — and only it — gets a
+    service-account token, bound to a namespace Role (tests/contract/test_workload_chart.py pins its
+    verbs). No task code runs in it any more; task pods get no token at all."""
     everything = render()
-    for kind in ("kind: Role", "kind: ClusterRole", "kind: RoleBinding", "kind: ClusterRoleBinding"):
-        assert kind not in everything, f"chart renders {kind}; booth-pipeline needs no Kubernetes API access"
-    assert yaml.safe_load(render("templates/deployment.yaml"))["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    for kind in ("kind: ClusterRole", "kind: ClusterRoleBinding"):
+        assert kind not in everything, f"chart renders {kind}; booth-pipeline needs no cluster-wide access"
+    assert yaml.safe_load(render("templates/deployment.yaml"))["spec"]["template"]["spec"]["automountServiceAccountToken"] is True
 
 
 def test_the_pod_is_locked_down_but_has_a_writable_scratch_dir(deployment):

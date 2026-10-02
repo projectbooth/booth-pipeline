@@ -1,20 +1,21 @@
-{{- if and .Values.runner.enabled .Values.runner.networkPolicy.enabled }}
-# The runner's network boundary (ADR 0057). Task code runs here, so this is where "no route to the
-# module's database, and only the API/scheduler pod may call in" is actually enforced. Closed by
-# default (ADR 0070): the only opt-in openings are the public internet and, when boothDatabase.url is
-# set, a workspace's bundled booth-database (ADR 0092). (Requires a
+{{- if .Values.runner.networkPolicy.enabled }}
+# Every task pod's network boundary (ADR 0057, re-targeted onto task Jobs by ADR 0096). Task code
+# runs in these pods, so this is where "no route to the module's database, and only the
+# API/scheduler pod may call in" is actually enforced — which also means no task pod can connect to
+# another task's pod. Closed by default (ADR 0070): the only opt-in openings are the public internet
+# and, when boothDatabase.url is set, a workspace's bundled booth-database (ADR 0092). (Requires a
 # CNI that implements NetworkPolicy; on one that does not, this object is silently inert.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "booth-pipeline.fullname" . }}-runner
+  name: {{ include "booth-pipeline.fullname" . }}-task
   labels:
     {{- include "booth-pipeline.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
       {{- include "booth-pipeline.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: runner
+      app.kubernetes.io/component: task
   policyTypes: [Ingress, Egress]
   ingress:
     # Only the API/scheduler pod of this release.

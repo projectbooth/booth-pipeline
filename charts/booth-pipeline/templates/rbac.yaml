@@ -1,0 +1,38 @@
+# What the API/scheduler pod may do to the Kubernetes API, and nothing more (ADR 0096; design:
+# docs/decisions/0018): run one Job per task attempt in THIS namespace. Deliberately absent:
+#   - secrets get/list/watch: it creates each task's bearer Secret and never needs to read one back;
+#   - pods/log, pods/exec, pods/attach: a task's logs and result come back over its runner
+#     connection, never through the API server;
+#   - anything cluster-scoped.
+# Task pods themselves get no service-account token at all (task-job.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-task-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "booth-pipeline.fullname" . }}-task-runner
+  labels:
+    {{- include "booth-pipeline.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "booth-pipeline.fullname" . }}-task-runner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "booth-pipeline.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

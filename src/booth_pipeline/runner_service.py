@@ -1,13 +1,16 @@
-"""The runner service: the pod that executes workspace members' code (ADR 0057).
+"""The runner service: what executes a workspace member's code (ADR 0057), one task per pod.
 
-It runs in its own Deployment with **no module credentials at all** — no database DSN, no
-booth-workload-minting-credentials Secret, no service-account token, no RBAC — and a NetworkPolicy
-that only lets the API/scheduler pod call it. That absence *is* the security boundary: task code
-here can read everything in this pod and none of it is a standing credential. The only privileged
-thing it ever holds is one task's short-lived, role-ceilinged platform token (ADR 0056), pushed to
-it by the API/scheduler pod, which is the only pod that can mint.
+Since ADR 0096 it runs inside each task's own Kubernetes Job pod, for exactly that one task
+(``BOOTH_RUNNER_MAX_CONCURRENT=1``, ``BOOTH_RUNNER_ONE_SHOT=1``: it exits once the task's stream
+ends, or if no task arrives within ``BOOTH_RUNNER_IDLE_EXIT_SECONDS``). The pod holds **no module
+credentials at all** — no database DSN, no booth-workload-minting-credentials Secret, no
+service-account token, no RBAC — and a NetworkPolicy lets only the API/scheduler pod call it. The
+only privileged thing it ever holds is its own task's short-lived, role-ceilinged platform token
+(ADR 0056), pushed by the API/scheduler pod, which is the only pod that can mint. Being one task per
+pod is what keeps one task from reading another's token (they no longer share a filesystem, /tmp
+or /proc).
 
-Protocol (internal; authenticated with a shared bearer secret):
+Protocol (internal; authenticated with a per-task bearer secret, ADR 0096):
 
 * ``POST /v1/run`` — body is one task invocation; the response is NDJSON, streamed while the task
   runs: ``{"t":"log",...}`` lines, then exactly one ``{"t":"result",...}`` or ``{"t":"error",...}``.
@@ -25,6 +28,7 @@ import os
 import queue
 import sys
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import uvicorn
@@ -75,7 +79,16 @@ class _QueueLog:
         self._q.put({"t": "log", "stream": stream, "message": message})
 
 
-def create_runner_app(secret: str, runner: SubprocessRunner | None = None, max_concurrent: int = 16) -> FastAPI:
+def create_runner_app(
+    secret: str,
+    runner: SubprocessRunner | None = None,
+    max_concurrent: int = 16,
+    on_task_done: Callable[[], None] | None = None,
+    on_task_start: Callable[[], None] | None = None,
+) -> FastAPI:
+    """``on_task_start`` is called when an authenticated task is accepted; ``on_task_done`` once its
+    stream has ended for any reason (result, failure, or the caller hanging up). A one-task Job pod
+    (ADR 0096) uses them to shut itself down after its task, or if no task ever arrives."""
     if not secret:
         # Never construct an open runner: it executes arbitrary code for whoever can reach it.
         raise ValueError("the runner requires a non-empty shared secret")
@@ -116,6 +129,8 @@ def create_runner_app(secret: str, runner: SubprocessRunner | None = None, max_c
     async def run(body: RunBody, request: Request):
         if not slots.acquire(blocking=False):
             raise HTTPException(429, "the runner is at capacity")
+        if on_task_start is not None:
+            on_task_start()
         access = (
             TaskAccess(body.access.workspace, body.access.token, body.access.storageUrl, body.access.catalogUrl) if body.access else None
         )
@@ -176,6 +191,8 @@ def create_runner_app(secret: str, runner: SubprocessRunner | None = None, max_c
                 # and an orphaned task must not keep running (or holding a platform token).
                 if not finished:
                     cancel.cancel()
+                if on_task_done is not None:
+                    on_task_done()
 
         return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -194,8 +211,32 @@ def main() -> int:
         return 2
     python = os.environ.get("BOOTH_PIPELINE_RUNNER_PYTHON") or None
     passthrough = tuple(x.strip() for x in os.environ.get("BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH", "").split(",") if x.strip())
-    app = create_runner_app(secret, SubprocessRunner(python=python, env_passthrough=passthrough), int(os.environ.get("BOOTH_RUNNER_MAX_CONCURRENT", "16")))
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("BOOTH_RUNNER_PORT", "8080")), log_level="info")  # noqa: S104
+    one_shot = os.environ.get("BOOTH_RUNNER_ONE_SHOT", "").lower() in ("1", "true", "yes")
+    server: uvicorn.Server | None = None
+    started = threading.Event()
+
+    def task_done() -> None:
+        # One task per pod (ADR 0096): once its stream ends, exit so the Job completes and is cleaned
+        # up even if the API/scheduler pod that should delete it is gone.
+        if server is not None:
+            server.should_exit = True
+
+    app = create_runner_app(
+        secret,
+        SubprocessRunner(python=python, env_passthrough=passthrough),
+        int(os.environ.get("BOOTH_RUNNER_MAX_CONCURRENT", "16")),
+        on_task_done=task_done if one_shot else None,
+        on_task_start=started.set if one_shot else None,
+    )
+    if one_shot:
+        # Nobody ever connected (the API/scheduler pod died between creating this Job and calling
+        # it): don't sit idle until the Job's deadline.
+        idle = int(os.environ.get("BOOTH_RUNNER_IDLE_EXIT_SECONDS", "300"))
+        timer = threading.Timer(idle, lambda: started.is_set() or task_done())
+        timer.daemon = True  # never keeps the process alive after a normal exit
+        timer.start()
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("BOOTH_RUNNER_PORT", "8080")), log_level="info"))  # noqa: S104
+    server.run()
     return 0
 
 

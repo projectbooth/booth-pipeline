@@ -34,8 +34,8 @@ spec:
   {{- if .Values.workloadIdentity.enabled }}
   # ADR 0056: this module runs unattended work (scheduled jobs) whose tasks call booth-storage and
   # booth-catalog, so core provisions a minting credential (the Secret
-  # booth-workload-minting-credentials). It is mounted ONLY into the API/scheduler pod, never the
-  # runner pod that executes task code (ADR 0057). Omitting this field means no credential at all.
+  # booth-workload-minting-credentials). It is mounted ONLY into the API/scheduler pod, never a
+  # task pod that executes task code (ADR 0057/0096). Omitting this field means no credential at all.
   workloadIdentity:
     mint: true
   {{- end }}
