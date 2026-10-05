@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +51,7 @@ jobs:
         run: docker compose -f hack/docker-compose.test.yml logs --tail=100
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -81,7 +81,7 @@ jobs:
   image:
     # Catches a broken Dockerfile on the PR that breaks it, and proves tasks execute inside the
     # chart's lockdown (non-root, read-only root filesystem) — the part /healthz cannot show.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
