@@ -42,6 +42,9 @@ class TaskAccess:
     storage_url: str
     catalog_url: str
     refresh: Callable[[], str] | None = field(default=None, compare=False, repr=False)
+    # The role core actually granted (the mint response's `role`, possibly below the ceiling).
+    # What the credential sidecar asks for follows it: the broker refuses `readwrite` to a viewer.
+    role: str = ""
 
 
 @dataclass(frozen=True)

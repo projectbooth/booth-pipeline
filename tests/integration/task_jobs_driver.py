@@ -16,6 +16,10 @@ Modes (each prints a JSON report and exits non-zero on any violation):
 * ``probe HOST:PORT ...`` — a task that tries a TCP connect to each address; reports which connected.
 * ``sleep N`` — one task that just sleeps N seconds (a live task pod to aim at).
 * ``refresh`` — how long a refreshed platform token takes to reach a running task.
+* ``db WORKSPACE ROLE|none`` — a task's view of the database: DATABASE_URL, what it can reach, and a
+  real round trip through the credential sidecar when it has one (ADR 0095).
+* ``rotation WORKSPACE`` — a connection held open through the sidecar survives its renewal onto a
+  new lease.
 """
 
 from __future__ import annotations
@@ -263,6 +267,81 @@ def probe(addrs: list[str]) -> int:
     return 0
 
 
+DB_TASK = r'''
+import os, socket
+def run(ctx):
+    def tcp(host, port):
+        try:
+            socket.create_connection((host, port), timeout=5).close()
+            return True
+        except OSError:
+            return False
+    out = {
+        "database_url": os.environ.get("DATABASE_URL"),
+        "sidecar_listening": tcp("127.0.0.1", 5432),
+        "booth_database_direct": tcp("booth-database-postgres.booth-database.svc.cluster.local", 5432),
+        "own_module_database": tcp("postgres.booth-pipeline.svc.cluster.local", 5432),
+    }
+    if out["database_url"]:
+        import psycopg
+        with psycopg.connect(out["database_url"], connect_timeout=10) as c:
+            c.execute("CREATE TABLE IF NOT EXISTS ci_rows (n int)")
+            c.execute("INSERT INTO ci_rows VALUES (42)")
+            out["rows"] = c.execute("SELECT count(*) FROM ci_rows WHERE n = 42").fetchone()[0]
+            out["session_user"], out["database"] = c.execute("SELECT session_user, current_database()").fetchone()
+    return out
+'''
+
+
+def db(workspace: str, role: str) -> int:
+    """One task, as ``workspace`` with ``role`` (or with no platform access when role is "none"),
+    reporting what it can reach and, through DATABASE_URL if it has one, a real round trip."""
+    access = None if role == "none" else TaskAccess(workspace, f"tok-{workspace}-{uuid.uuid4().hex}", "http://unused", "http://unused", role=role)
+    lines = Lines()
+    try:
+        out = runner(max_concurrent=1).run(inv(DB_TASK, "db", {}, access), lines, Cancellation())
+    except Exception:
+        print("\n".join(f"[{s}] {m}" for s, m in lines.out), file=sys.stderr)  # the task's own traceback
+        raise
+    out["system"] = [m for s, m in lines.out if s == "system"]
+    print(json.dumps(out))
+    return 0
+
+
+# Holds one connection open through the sidecar while the sidecar renews onto a NEW lease (a new
+# Postgres role), then proves that connection is still the same live backend.
+ROTATION = r'''
+import os, time
+import psycopg
+def run(ctx):
+    url = os.environ["DATABASE_URL"]
+    held = psycopg.connect(url, autocommit=True)
+    first_user, first_pid = held.execute("SELECT session_user, pg_backend_pid()").fetchone()
+    deadline = time.time() + ctx.params["within"]
+    rotated_to = None
+    while time.time() < deadline and rotated_to is None:
+        time.sleep(1)
+        with psycopg.connect(url, connect_timeout=10) as fresh:  # a NEW connection must never fail meanwhile
+            user = fresh.execute("SELECT session_user").fetchone()[0]
+        if user != first_user:
+            rotated_to = user
+    still_user, still_pid = held.execute("SELECT session_user, pg_backend_pid()").fetchone()
+    held.execute("SELECT 1")
+    held.close()
+    return {"first_user": first_user, "rotated_to": rotated_to, "held_user": still_user,
+            "same_backend": still_pid == first_pid, "held_pid": first_pid}
+'''
+
+
+def rotation(workspace: str) -> int:
+    access = TaskAccess(workspace, f"tok-{workspace}-{uuid.uuid4().hex}", "http://unused", "http://unused", role="editor")
+    out = runner(max_concurrent=1).run(inv(ROTATION, "rotation", {"within": 90}, access, timeout=300), Lines(), Cancellation())
+    print(json.dumps(out))
+    ok = out["rotated_to"] and out["same_backend"] and out["held_user"] == out["first_user"]
+    print("rotation: OK — the held connection survived the sidecar's renewal onto a new lease" if ok else "ROTATION FAILED")
+    return 0 if ok else 1
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -278,6 +357,10 @@ def main() -> int:
         return coldstart(int(args[0]) if args else 5)
     if mode == "refresh":
         return refresh()
+    if mode == "db":
+        return db(args[0], args[1])
+    if mode == "rotation":
+        return rotation(args[0])
     if mode == "probe":
         return probe(args)
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")

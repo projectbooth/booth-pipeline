@@ -28,6 +28,9 @@ import os
 import queue
 import sys
 import threading
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from typing import Any
 
@@ -36,7 +39,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from .runners.base import Cancellation, TaskAccess, TaskCanceled, TaskFailed, TaskInvocation
+from .runners.base import Cancellation, TaskAccess, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
 from .runners.subprocess_runner import SubprocessRunner
 
 log = logging.getLogger(__name__)
@@ -199,6 +202,39 @@ def create_runner_app(
     return app
 
 
+def sidecar_wait(healthz: str, seconds: float, poll: float = 0.5) -> Callable[[TaskInvocation, TaskLog], None]:
+    """Before a task with platform access starts, wait (bounded) for the pod's credential sidecar to
+    hold a lease (its /healthz, loopback-only, so only reachable from inside this pod). The contract:
+    a task that starts before its sidecar has a lease "should wait, not fail". A task that never
+    touches DATABASE_URL must still run, so after ``seconds`` it starts anyway, with a note."""
+
+    def wait(inv: TaskInvocation, log_: TaskLog) -> None:
+        if inv.access is None:
+            return
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                with urllib.request.urlopen(healthz, timeout=2) as r:  # noqa: S310 - a fixed loopback URL from the chart
+                    if r.status == 200:
+                        return
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                log_.line("system", f"the database credential sidecar has no lease after {seconds:.0f}s; starting the task anyway (DATABASE_URL will fail until it does)")
+                return
+            time.sleep(poll)
+
+    return wait
+
+
+def loopback_database_url(url: str) -> str:
+    """DATABASE_URL may reach a task only as the credential-free loopback address of its sidecar."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("postgresql", "postgres") or parsed.hostname not in ("localhost", "127.0.0.1") or parsed.password or parsed.username:
+        raise ValueError("DATABASE_URL must be postgresql://localhost:<port>/<db> with no credentials (ADR 0095)")
+    return url
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     path = os.environ.get("BOOTH_RUNNER_AUTH_TOKEN_FILE", "")
@@ -221,9 +257,21 @@ def main() -> int:
         if server is not None:
             server.should_exit = True
 
+    # ADR 0095: the pod's credential sidecar, when the chart adds one (one-task Job pods only).
+    task_env = {}
+    if os.environ.get("DATABASE_URL"):
+        task_env["DATABASE_URL"] = loopback_database_url(os.environ["DATABASE_URL"])
+    healthz = os.environ.get("BOOTH_RUNNER_SIDECAR_HEALTHZ", "")
     app = create_runner_app(
         secret,
-        SubprocessRunner(python=python, env_passthrough=passthrough),
+        SubprocessRunner(
+            python=python,
+            env_passthrough=passthrough,
+            shared_token_file=os.environ.get("BOOTH_RUNNER_SIDECAR_TOKEN_FILE") or None,
+            task_env=task_env,
+            # After the token is written (the sidecar authenticates with it), before the task starts.
+            before_start=sidecar_wait(healthz, float(os.environ.get("BOOTH_RUNNER_SIDECAR_WAIT_SECONDS", "60"))) if healthz else None,
+        ),
         int(os.environ.get("BOOTH_RUNNER_MAX_CONCURRENT", "16")),
         on_task_done=task_done if one_shot else None,
         on_task_start=started.set if one_shot else None,

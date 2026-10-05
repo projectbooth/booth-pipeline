@@ -1,0 +1,128 @@
+# A stand-in for booth-core's credential broker (contracts/credential-broker.md), for the ADR 0095
+# credential-sidecar checks in .github/workflows/integration.yml. Test fixture only.
+#
+# It speaks the broker's wire format to the REAL, digest-pinned credential-sidecar, and behaves like
+# booth-database's postgres provider where it matters to the test: every lease is a brand-new Postgres
+# LOGIN role with its own password and a short expiry (so the sidecar really rotates onto a different
+# credential), granted on the workspace's own database. It does not verify the bearer (no core here
+# to have minted one); it does insist on X-Workspace matching the requested scope and on the
+# read/readwrite rule. GET /leases lists what it issued, for the test to assert on.
+#
+# Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
+# NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fake-core-broker
+data:
+  broker.py: |
+    import hashlib, json, os, secrets, threading, time, uuid
+    from datetime import datetime, timedelta, timezone
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import psycopg
+    from psycopg import sql
+
+    ADMIN = os.environ["ADMIN_DSN"]  # superuser on the booth-database stand-in
+    PG_HOST, PG_PORT = os.environ["PG_HOST"], int(os.environ.get("PG_PORT", "5432"))
+    LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "30"))
+    leases, lock = [], threading.Lock()
+
+    def dbname(ws):  # booth-database internal/naming.ForWorkspace
+        return "bdb_ws_" + hashlib.sha256(f"booth-database/workspace/{ws}".encode()).hexdigest()[:24]
+
+    def issue(ws, access):
+        db = dbname(ws)
+        user = "bdb_lease_" + secrets.token_hex(6)
+        password = secrets.token_urlsafe(18)
+        expires = datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)
+        with psycopg.connect(ADMIN, autocommit=True) as c:
+            if not c.execute("SELECT 1 FROM pg_database WHERE datname=%s", (db,)).fetchone():
+                c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db)))
+            c.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(sql.Identifier(user), sql.Literal(password)))
+            c.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(db), sql.Identifier(user)))
+        with psycopg.connect(ADMIN.rsplit("/", 1)[0] + "/" + db, autocommit=True) as c:
+            c.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(user)) if access == "readwrite"
+                      else sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(user)))
+            c.execute(sql.SQL("GRANT {} ON ALL TABLES IN SCHEMA public TO {}").format(
+                sql.SQL("ALL") if access == "readwrite" else sql.SQL("SELECT"), sql.Identifier(user)))
+        lease = {"leaseId": str(uuid.uuid4()), "workspace": ws, "access": access, "user": user, "at": time.time()}
+        with lock:
+            leases.append(lease)
+        return {"leaseId": lease["leaseId"], "kind": "postgres", "expiresAt": expires.isoformat().replace("+00:00", "Z"),
+                "scope": {"workspace": ws},
+                "credential": {"host": PG_HOST, "port": PG_PORT, "database": db, "username": user, "password": password, "sslMode": "disable"}}
+
+    class H(BaseHTTPRequestHandler):
+        def reply(self, code, body):
+            raw = json.dumps(body).encode()
+            self.send_response(code); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path == "/leases":
+                with lock:
+                    return self.reply(200, leases)
+            return self.reply(200 if self.path == "/healthz" else 404, {"status": "ok"})
+
+        def do_POST(self):
+            if self.path != "/api/credentials":
+                return self.reply(404, {"error": "not found"})
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                return self.reply(401, {"error": "missing bearer token"})
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            ws = self.headers.get("X-Workspace", "")
+            if req.get("kind") != "postgres" or (req.get("scope") or {}).get("workspace") != ws:
+                return self.reply(422, {"error": "scope_not_supported"})
+            if req.get("access") not in ("read", "readwrite"):
+                return self.reply(400, {"error": "bad access"})
+            try:
+                return self.reply(201, issue(ws, req["access"]))
+            except Exception as e:  # a provider outage, as the sidecar would see one
+                return self.reply(503, {"error": f"provider unavailable: {e.__class__.__name__}"})
+
+        def log_message(self, *a):
+            pass
+
+    ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booth-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: booth-core}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: booth-core}
+    spec:
+      containers:
+        - name: broker
+          image: booth-pipeline:ci
+          imagePullPolicy: Never
+          command: ["python", "/app/broker.py"]
+          env:
+            - {name: ADMIN_DSN, value: "postgresql://booth:booth-test@booth-database-postgres.booth-database.svc.cluster.local:5432/postgres"}
+            - {name: PG_HOST, value: booth-database-postgres.booth-database.svc.cluster.local}
+            - {name: LEASE_SECONDS, value: "30"}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: app, mountPath: /app}
+      volumes:
+        - name: app
+          configMap: {name: fake-core-broker}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: booth-core
+spec:
+  selector: {app.kubernetes.io/name: booth-core}
+  ports:
+    - port: 8080

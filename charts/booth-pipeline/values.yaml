@@ -40,8 +40,36 @@ core:
 # booth-database-postgres.booth-database.svc:5432) to let tasks reach it: that adds one egress rule
 # to its Postgres pod on port 5432 (selector: runner.networkPolicy.egress.boothDatabase). Bundled
 # mode only — an external booth-database has no in-cluster pod to select; use egress.extra for it.
+#
+# ADR 0095: with core.url also set, a task that has platform access additionally gets booth-core's
+# credential sidecar in its pod (credentialSidecar below), proxying on 127.0.0.1:5432 with a
+# short-lived lease issued as that task, and DATABASE_URL=postgresql://localhost:5432/<db> in its
+# environment — no host, no credential in it. A task without platform access gets neither.
 boothDatabase:
   url: ""
+
+# ADR 0095 amendment: a workspace's booth-storage S3 backend (e.g. a self-hosted MinIO), for native
+# s3 access. Empty by default: task pods stay closed. Set it to the backend's in-cluster address
+# (e.g. minio.storage.svc:9000) to add ONE egress rule to that backend's pods on
+# runner.networkPolicy.egress.boothStorage.port. There is no standard backend to default to, so its
+# pod selector is required when this is set. (Network reachability only: the s3-kind credential
+# sidecar is not part of this release — see docs/decisions/0019.)
+boothStorage:
+  url: ""
+
+# ADR 0095 / contracts/credential-sidecar.md: booth-core's credential sidecar image, PINNED BY DIGEST
+# (the chart refuses a tag). booth-core@eb24bb3, publish run 37012736996.
+credentialSidecar:
+  image: ghcr.io/projectbooth/credential-sidecar@sha256:05e96332a0c721b20aaddd6616f902e02e81261dbdc798242cbabfea1b34e49f
+  # A task with platform access waits up to this long for the sidecar's first lease before it starts
+  # anyway (a task that never uses DATABASE_URL must not be blocked by a database outage).
+  waitSeconds: 60
+  # 0 = the sidecar's own defaults (contracts/credential-sidecar.md's RENEW_* knobs).
+  renewMarginSeconds: 0
+  renewIntervalSeconds: 0
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 64Mi}
 
 # Where workspace members' code runs (ADR 0057, ADR 0096): one Kubernetes Job — its own pod — per
 # task attempt, holding NO module credentials and no service-account token. This is the only mode.
@@ -69,6 +97,12 @@ runner:
       boothDatabase:
         namespaceSelector: {kubernetes.io/metadata.name: booth-database}
         podSelector: {app.kubernetes.io/name: booth-database, app.kubernetes.io/component: postgres}
+      # A workspace's booth-storage S3 backend. Only rendered when boothStorage.url is set, and then
+      # podSelector is required: match your backend's own pods.
+      boothStorage:
+        namespaceSelector: {}
+        podSelector: {}
+        port: 9000
       # Raw NetworkPolicy egress rules. Empty by default: tasks reach storage and the catalog through
       # booth-core's gateway (the rule above, ADR 0059). Only needed if you point the runner at modules
       # directly with BOOTH_PIPELINE_STORAGE_URL / _CATALOG_URL.

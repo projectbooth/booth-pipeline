@@ -15,6 +15,7 @@ seam (``Runner``) that lets a stronger runner replace this one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,10 +47,21 @@ class SubprocessRunner:
         python: str | None = None,
         env_passthrough: tuple[str, ...] = (),
         workdir_root: str | None = None,
+        shared_token_file: str | None = None,
+        task_env: dict[str, str] | None = None,
+        before_start: Callable[[TaskInvocation, TaskLog], None] | None = None,
     ) -> None:
         self._python = python or sys.executable
         self._passthrough = env_passthrough
         self._workdir_root = workdir_root
+        # One-task Job pods only (ADR 0095/0096): also keep the task's token at this fixed path, on a
+        # volume the pod's credential sidecar reads with --token-file. Never set in a shared process,
+        # where it would hand every task's token to one place.
+        self._shared_token_file = shared_token_file
+        self._task_env = dict(task_env or {})  # extra, credential-free variables for the task (DATABASE_URL)
+        # Called once the task's token is in place and before its process starts: where the one-task
+        # pod waits for its credential sidecar's lease, which needs that token to exist first.
+        self._before_start = before_start
         # (run_id, task_key) -> the token file of the attempt currently running, so a fresh token
         # can be swapped in while a long task is still going.
         self._token_files: dict[tuple[str, str], str] = {}
@@ -62,10 +75,13 @@ class SubprocessRunner:
         if path is None:
             return False
         _write_token(path, token)
+        if self._shared_token_file:
+            _write_token(self._shared_token_file, token)
         return True
 
     def _env(self, inv: TaskInvocation, workdir: str) -> dict[str, str]:
         env = {k: os.environ[k] for k in (*_BASE_ENV_KEYS, *self._passthrough) if k in os.environ}
+        env.update(self._task_env)
         if inv.access is not None:
             env["BOOTH_TOKEN_FILE"] = os.path.join(workdir, TOKEN_FILE)
         env.update(
@@ -93,6 +109,9 @@ class SubprocessRunner:
             with self._token_lock:
                 self._token_files.pop((inv.run_id, inv.task_key), None)
             shutil.rmtree(workdir, ignore_errors=True)
+            if self._shared_token_file and inv.access is not None:
+                with contextlib.suppress(OSError):
+                    os.remove(self._shared_token_file)
 
     def _run_in(self, workdir: str, inv: TaskInvocation, log: TaskLog, cancel: Cancellation) -> Any:
         handler = languages.get(inv.language)
@@ -103,6 +122,8 @@ class SubprocessRunner:
             # The token goes in a private file, NOT the environment or the payload: it is replaced
             # while the task runs, and a file is what the harness re-reads on every request.
             _write_token(os.path.join(workdir, TOKEN_FILE), inv.access.token)
+            if self._shared_token_file:
+                _write_token(self._shared_token_file, inv.access.token)
             access_meta = {"workspace": inv.access.workspace, "storageUrl": inv.access.storage_url, "catalogUrl": inv.access.catalog_url}
             with self._token_lock:
                 self._token_files[token_key] = os.path.join(workdir, TOKEN_FILE)
@@ -121,6 +142,8 @@ class SubprocessRunner:
             encoding="utf-8",
         )
         result_path = os.path.join(workdir, "result.json")
+        if self._before_start is not None:
+            self._before_start(inv, log)
 
         popen_kwargs: dict[str, Any] = {}
         if os.name == "posix":

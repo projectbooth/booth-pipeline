@@ -22,8 +22,10 @@ How, per attempt (everything after step 4 is the existing, tested ``RemoteRunner
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -42,6 +44,10 @@ TASK_JOB_LABEL = "booth.projectbooth.io/task-job"
 RUN_LABEL = "booth.projectbooth.io/run-id"
 KEY_LABEL = "booth.projectbooth.io/task-key"
 AUTH_VOLUME = "runner-auth"  # the template's volume whose Secret this runner fills in per task
+# The chart's postgres credential sidecar (ADR 0095), and the task-container variables that exist only
+# for it; KubernetesJobRunner personalizes it per task, or removes it from a task with no identity.
+POSTGRES_SIDECAR = "credential-sidecar-postgres"
+_SIDECAR_TASK_ENV = {"DATABASE_URL", "BOOTH_RUNNER_SIDECAR_TOKEN_FILE", "BOOTH_RUNNER_SIDECAR_HEALTHZ", "BOOTH_RUNNER_SIDECAR_WAIT_SECONDS"}
 
 # A pod that is waiting for one of these will not start on its own: fail the task with the reason
 # rather than sit out the whole start timeout.
@@ -137,6 +143,7 @@ class KubernetesJobRunner:
         tpl.setdefault("metadata", {}).setdefault("labels", {}).update(labels)
         pod = tpl["spec"]
         pod["restartPolicy"] = "Never"
+        _personalize_sidecars(pod, inv)
         for v in pod["volumes"]:
             if v["name"] == AUTH_VOLUME:
                 # Default file mode on purpose: a 0400 file is root-owned and unreadable by the
@@ -164,6 +171,36 @@ class KubernetesJobRunner:
             if time.monotonic() >= deadline:
                 raise TaskFailed(f"the task's pod did not become ready within {self._start_timeout}s")
             time.sleep(self._poll)
+
+
+def workspace_database(workspace: str) -> str:
+    """The workspace's database name in booth-database (its internal/naming.ForWorkspace; the same
+    derivation booth-notebooks uses). Informational: the sidecar connects to whatever database its
+    credential names, so this only makes DATABASE_URL agree with current_database()."""
+    return "bdb_ws_" + hashlib.sha256(f"booth-database/workspace/{workspace}".encode()).hexdigest()[:24]
+
+
+def _personalize_sidecars(pod: dict[str, Any], inv: TaskInvocation) -> None:
+    """Fill in the chart-rendered credential sidecar (ADR 0095) for THIS task's identity, or remove it.
+
+    The sidecar authenticates as the task (its --token-file is the task's own platform token), so a
+    task with no platform access has no identity to give it: it gets no sidecar and no DATABASE_URL.
+    """
+    inits = pod.get("initContainers", [])
+    sidecar = next((c for c in inits if c.get("name") == POSTGRES_SIDECAR), None)
+    if sidecar is None:
+        return
+    task = pod["containers"][0]
+    if inv.access is None:
+        pod["initContainers"] = [c for c in inits if c is not sidecar]
+        task["env"] = [e for e in task.get("env", []) if e["name"] not in _SIDECAR_TASK_ENV]
+        return
+    ws = inv.access.workspace
+    # A viewer's token may only read: the broker refuses `readwrite` to it, and a refusal makes the
+    # sidecar exit (contracts/credential-sidecar.md).
+    access = "read" if inv.access.role == "viewer" else "readwrite"
+    sidecar["args"] = [*sidecar.get("args", []), f"--workspace={ws}", "--scope=" + json.dumps({"workspace": ws}), f"--access={access}"]
+    task.setdefault("env", []).append({"name": "DATABASE_URL", "value": f"postgresql://localhost:5432/{workspace_database(ws)}"})
 
 
 def _why_ended(status: dict[str, Any]) -> str:
@@ -218,3 +255,13 @@ def _check_template(t: dict[str, Any]) -> None:
         raise ValueError("task Job template must set automountServiceAccountToken: false (ADR 0057/0096)")
     if not containers:
         raise ValueError("task Job template has no container")
+    for c in pod.get("initContainers", []):
+        if c.get("name") != POSTGRES_SIDECAR:
+            continue
+        if not re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", c.get("image", "")):
+            raise ValueError("the credential sidecar image must be pinned by digest (…/credential-sidecar@sha256:<64 hex>), never a tag (ADR 0095)")
+        if c.get("restartPolicy") != "Always":
+            raise ValueError("the credential sidecar must be a native sidecar (restartPolicy: Always), or it keeps the task's pod alive after the task")
+        listen = next((a.split("=", 1)[1] for a in c.get("args", []) if a.startswith("--listen=")), "")
+        if not listen.startswith(("127.0.0.1:", "localhost:")):
+            raise ValueError(f"the credential sidecar must listen on loopback only, not {listen or 'its default'!r} (contracts/credential-sidecar.md)")

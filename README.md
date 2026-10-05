@@ -59,6 +59,9 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   `run` is executed top to bottom. **Do not put secrets in params** (stored in the spec in clear). A task that turns on
   *Platform access* also gets `ctx.storage` (`backends/list/read/read_text/write/delete`) and `ctx.catalog`
   (`datasets/dataset/register_dataset`), acting as the run — see [0007](docs/decisions/0007-workload-identity-adoption.md).
+  With `boothDatabase.url` and `core.url` set, such a task also gets `DATABASE_URL` for its workspace's
+  booth-database, through booth-core's credential sidecar in its pod — no credential in the URL, a short-lived lease
+  issued as the run ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md); s3 mode is not built yet).
 - **Catalog code** is referenced as `{entryId, version}` and snapshotted at save; runs never call the catalog
   ([0001](docs/decisions/0001-code-catalog-reference.md)).
 
