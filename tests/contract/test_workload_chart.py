@@ -286,7 +286,7 @@ def test_setting_booth_database_url_adds_a_pinned_native_loopback_sidecar():
     task_c = p["containers"][0]
     env = {e["name"]: e.get("value") for e in task_c["env"]}
     assert env["BOOTH_RUNNER_SIDECAR_TOKEN_FILE"] == "/var/run/booth-sidecar/token"
-    assert env["BOOTH_RUNNER_SIDECAR_HEALTHZ"] == "http://127.0.0.1:5432/healthz"
+    assert "BOOTH_RUNNER_SIDECAR_HEALTHZ" not in env  # which leases to wait for is decided per task, by the runner
     assert "DATABASE_URL" not in env  # it names the workspace's database: added per task by the runner
     assert secret_names(task_job(docs(*BOOTH_DB_URL))) == {"per-task"}  # still no module credential
 
@@ -332,7 +332,40 @@ def test_booth_storage_url_without_selectors_is_refused_rather_than_opened_wide(
     assert out.returncode != 0 and "podSelector are required" in out.stderr
 
 
-def test_booth_storage_url_adds_no_sidecar_and_no_credential():
-    """The s3 sidecar is not part of this release (docs/decisions/0019): the value only opens a route."""
+def test_setting_booth_storage_url_adds_a_pinned_native_s3_sidecar():
+    """ADR 0095 third amendment: gated on boothStorage.url AND core.url, like postgres."""
     t = task_job(docs(*BOOTH_STORAGE))
-    assert "initContainers" not in pod(t) and secret_names(t) == {"per-task"}
+    p = pod(t)
+    (sc,) = p["initContainers"]
+    assert sc["name"] == "credential-sidecar-s3" and sc["image"] == PINNED and sc["restartPolicy"] == "Always"
+    assert {
+        "--kind=s3",
+        "--credentials-file=/var/run/booth-sidecar-s3/credentials",
+        "--token-file=/var/run/booth-sidecar/token",
+        "--core-url=http://booth-core.booth-system.svc:8080",
+    } <= set(sc["args"])
+    # Never the sidecar's default health listener (127.0.0.1:8080): the runner listens on :8080 in this pod.
+    assert "--health-listen=127.0.0.1:8081" in sc["args"]
+    assert not [a for a in sc["args"] if a.startswith(("--workspace", "--scope", "--access", "--token="))]  # per task, by the runner
+    assert {"name": "booth-sidecar-s3", "mountPath": "/var/run/booth-sidecar-s3"} in sc["volumeMounts"]  # it writes here
+    task_c = p["containers"][0]
+    env = {e["name"]: e.get("value") for e in task_c["env"]}
+    assert env["AWS_SHARED_CREDENTIALS_FILE"] == "/var/run/booth-sidecar-s3/credentials"
+    assert env["AWS_CONFIG_FILE"] == "/var/run/booth-sidecar-s3/credentials.config"  # the contract's two-file output
+    assert {"name": "booth-sidecar-s3", "mountPath": "/var/run/booth-sidecar-s3", "readOnly": True} in task_c["volumeMounts"]
+    assert {"name": "booth-sidecar-s3", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}} in p["volumes"]
+    assert "DATABASE_URL" not in env and secret_names(t) == {"per-task"}
+
+
+def test_no_s3_sidecar_without_core():
+    p = pod(task_job(docs(*BOOTH_STORAGE, "--set", "core.url=")))
+    assert "initContainers" not in p
+    assert not {e["name"] for e in p["containers"][0]["env"]} & {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+
+
+def test_both_sidecars_share_the_token_volume_and_nothing_else():
+    p = pod(task_job(docs(*BOOTH_DB_URL, *BOOTH_STORAGE)))
+    pg, s3 = p["initContainers"]
+    assert (pg["name"], s3["name"]) == ("credential-sidecar-postgres", "credential-sidecar-s3")
+    assert {m["name"] for m in pg["volumeMounts"]} == {"booth-sidecar"}  # the postgres one can't touch the s3 files
+    assert {m["name"] for m in s3["volumeMounts"]} == {"booth-sidecar", "booth-sidecar-s3"}

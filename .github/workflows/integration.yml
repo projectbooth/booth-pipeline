@@ -204,6 +204,50 @@ jobs:
         run: |
           kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - rotation acme < tests/integration/task_jobs_driver.py
 
+      - name: A task gets s3 credentials scoped to its workspace's lakehouse warehouse only once boothStorage.url is set — blocked before, reachable after (ADR 0095)
+        # The real s3-mode sidecar. The stand-in core also stands in for booth-lakehouse's
+        # GET /api/warehouse (acme has a warehouse, globex has none), and issues s3 leases only for
+        # exactly acme's {backendId, path}.
+        run: |
+          kubectl create namespace booth-storage-ci
+          kubectl apply -n booth-storage-ci -f tests/integration/fixtures/s3-backend.yaml
+          kubectl -n booth-storage-ci rollout status deployment/s3-backend --timeout=180s
+          s3task() { kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - s3 "$@" < tests/integration/task_jobs_driver.py; }
+          field() { python -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2]))' "$1" "$2"; }
+          before="$(s3task acme editor)"; echo "before: $before"
+          test "$(field "$before" credentials_file)" = "None" || { echo "a task had s3 credentials before boothStorage.url was set"; exit 1; }
+          test "$(field "$before" backend_reachable)" = "False" || { echo "the s3 backend was reachable before opting in"; exit 1; }
+          helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values \
+            --set boothStorage.url=s3-backend.booth-storage-ci.svc:9000 \
+            --set runner.networkPolicy.egress.boothStorage.namespaceSelector."kubernetes\.io/metadata\.name"=booth-storage-ci \
+            --set runner.networkPolicy.egress.boothStorage.podSelector.app=s3-backend-ci \
+            --wait --timeout 5m
+          kubectl -n booth-pipeline rollout status deploy/booth-pipeline --timeout=180s
+          after="$(s3task acme editor)"; echo "after: $after"
+          test "$(field "$after" backend_reachable)" = "True" || { echo "the s3 backend is still unreachable after setting boothStorage.url"; exit 1; }
+          test "$(field "$after" has_secret)" = "True" || { echo "the sidecar wrote no usable credentials"; exit 1; }
+          key="$(field "$after" access_key_id)"
+          # The keys the task sees are exactly a lease issued for acme's warehouse, read/write as an editor.
+          kubectl -n booth-system exec deploy/booth-core -- python -c 'import json,sys,urllib.request
+          l=[x for x in json.load(urllib.request.urlopen("http://127.0.0.1:8080/leases")) if x.get("kind")=="s3"]
+          m=[x for x in l if x["accessKeyId"]==sys.argv[1]]
+          assert m, ("no lease issued these keys", l)
+          assert m[0]["workspace"]=="acme" and m[0]["access"]=="readwrite" and m[0]["scope"]=={"backendId":"minio-ci","path":"lakehouse/acme"}, m
+          print(len(l), "s3 lease(s); the task holds", m[0]["leaseId"])' "$key"
+          echo "endpoint/region file written: $(field "$after" config_written) (expected True only once the chart pins booth-core's sidecar with the .config output)"
+          # A workspace with no warehouse gets no s3 sidecar, exactly like a task without platform access.
+          nowh="$(s3task globex editor)"; echo "no warehouse: $nowh"
+          test "$(field "$nowh" credentials_file)" = "None" && test "$(field "$nowh" sidecar_health)" = "False" \
+            || { echo "a workspace without a warehouse got an s3 sidecar"; exit 1; }
+          none="$(s3task acme none)"; echo "no access: $none"
+          test "$(field "$none" credentials_file)" = "None" || { echo "a task without platform access got an s3 sidecar"; exit 1; }
+
+      - name: The s3 sidecar renews onto new keys while a task runs, and the file is never seen half-written (ADR 0095)
+        run: |
+          out="$(kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - s3 acme editor 60 < tests/integration/task_jobs_driver.py)"
+          echo "$out"
+          python -c 'import json,sys; o=json.loads(sys.argv[1]); assert o["rotated_to"] and o["rotated_to"]!=o["access_key_id"], o; print("s3 rotation: OK —", o["access_key_id"], "->", o["rotated_to"])' "$out"
+
       - name: Dump logs on failure
         if: failure()
         run: |

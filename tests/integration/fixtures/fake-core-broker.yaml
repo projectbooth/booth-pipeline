@@ -8,6 +8,14 @@
 # to have minted one); it does insist on X-Workspace matching the requested scope and on the
 # read/readwrite rule. GET /leases lists what it issued, for the test to assert on.
 #
+# For s3 (ADR 0095, third amendment) it also stands in for booth-lakehouse behind core's gateway:
+# GET /modules/lakehouse/api/warehouse returns a warehouse for workspace "acme" and 404 for any other,
+# and an s3 lease is issued only for exactly that warehouse's {backendId, path}. Each s3 lease has fresh
+# keys. S3_CREDENTIAL_SHAPE=keys (the default) returns only the keys: the sidecar pinned today
+# (booth-core@eb24bb3) decodes the credential strictly and refuses booth-storage's real response,
+# which also carries endpoint/bucket/region/keyPrefix/pathStyle. Set it to "full" (booth-storage's real
+# shape) once the chart pins booth-core's sidecar that writes <credentials-file>.config.
+#
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
 # NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
 apiVersion: v1
@@ -26,7 +34,27 @@ data:
     ADMIN = os.environ["ADMIN_DSN"]  # superuser on the booth-database stand-in
     PG_HOST, PG_PORT = os.environ["PG_HOST"], int(os.environ.get("PG_PORT", "5432"))
     LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "30"))
+    S3_SHAPE = os.environ.get("S3_CREDENTIAL_SHAPE", "keys")
+    WAREHOUSES = {"acme": {"workspace": "acme", "backendId": "minio-ci", "path": "lakehouse/acme",
+                           "warehouseName": "acme", "storageRoot": "s3://booth-ci/lakehouse/acme"}}
     leases, lock = [], threading.Lock()
+
+    def issue_s3(ws, access, scope):
+        wh = WAREHOUSES.get(ws)
+        if wh is None or scope != {"backendId": wh["backendId"], "path": wh["path"]}:
+            return None
+        expires = datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)
+        cred = {"accessKeyId": "AKCI" + secrets.token_hex(8).upper(), "secretAccessKey": secrets.token_urlsafe(30),
+                "sessionToken": secrets.token_urlsafe(24)}
+        if S3_SHAPE == "full":
+            cred.update({"endpoint": "http://s3-backend.booth-storage-ci.svc.cluster.local:9000", "region": "us-east-1",
+                         "bucket": "booth-ci", "keyPrefix": wh["path"], "pathStyle": True})
+        lease = {"leaseId": str(uuid.uuid4()), "kind": "s3", "workspace": ws, "access": access, "scope": scope,
+                 "accessKeyId": cred["accessKeyId"], "at": time.time()}
+        with lock:
+            leases.append(lease)
+        return {"leaseId": lease["leaseId"], "kind": "s3", "expiresAt": expires.isoformat().replace("+00:00", "Z"),
+                "scope": scope, "credential": cred}
 
     def dbname(ws):  # booth-database internal/naming.ForWorkspace
         return "bdb_ws_" + hashlib.sha256(f"booth-database/workspace/{ws}".encode()).hexdigest()[:24]
@@ -46,7 +74,7 @@ data:
                       else sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(user)))
             c.execute(sql.SQL("GRANT {} ON ALL TABLES IN SCHEMA public TO {}").format(
                 sql.SQL("ALL") if access == "readwrite" else sql.SQL("SELECT"), sql.Identifier(user)))
-        lease = {"leaseId": str(uuid.uuid4()), "workspace": ws, "access": access, "user": user, "at": time.time()}
+        lease = {"leaseId": str(uuid.uuid4()), "kind": "postgres", "workspace": ws, "access": access, "user": user, "at": time.time()}
         with lock:
             leases.append(lease)
         return {"leaseId": lease["leaseId"], "kind": "postgres", "expiresAt": expires.isoformat().replace("+00:00", "Z"),
@@ -63,6 +91,12 @@ data:
             if self.path == "/leases":
                 with lock:
                     return self.reply(200, leases)
+            if self.path == "/modules/lakehouse/api/warehouse":  # booth-lakehouse, through the gateway
+                if not self.headers.get("Authorization", "").startswith("Bearer "):
+                    return self.reply(401, {"detail": "a bearer token is required"})
+                ws = self.headers.get("X-Workspace", "")
+                wh = WAREHOUSES.get(ws)
+                return self.reply(200, wh) if wh else self.reply(404, {"detail": f"workspace {ws!r} has no warehouse yet"})
             return self.reply(200 if self.path == "/healthz" else 404, {"status": "ok"})
 
         def do_POST(self):
@@ -72,10 +106,13 @@ data:
                 return self.reply(401, {"error": "missing bearer token"})
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             ws = self.headers.get("X-Workspace", "")
-            if req.get("kind") != "postgres" or (req.get("scope") or {}).get("workspace") != ws:
-                return self.reply(422, {"error": "scope_not_supported"})
             if req.get("access") not in ("read", "readwrite"):
                 return self.reply(400, {"error": "bad access"})
+            if req.get("kind") == "s3":
+                out = issue_s3(ws, req["access"], req.get("scope") or {})
+                return self.reply(201, out) if out else self.reply(422, {"error": "scope_not_supported"})
+            if req.get("kind") != "postgres" or (req.get("scope") or {}).get("workspace") != ws:
+                return self.reply(422, {"error": "scope_not_supported"})
             try:
                 return self.reply(201, issue(ws, req["access"]))
             except Exception as e:  # a provider outage, as the sidecar would see one

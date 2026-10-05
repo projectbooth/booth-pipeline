@@ -203,28 +203,51 @@ def create_runner_app(
 
 
 def sidecar_wait(healthz: str, seconds: float, poll: float = 0.5) -> Callable[[TaskInvocation, TaskLog], None]:
-    """Before a task with platform access starts, wait (bounded) for the pod's credential sidecar to
-    hold a lease (its /healthz, loopback-only, so only reachable from inside this pod). The contract:
-    a task that starts before its sidecar has a lease "should wait, not fail". A task that never
-    touches DATABASE_URL must still run, so after ``seconds`` it starts anyway, with a note."""
+    """Before a task with platform access starts, wait (bounded) for each of the pod's credential
+    sidecars to hold a lease. ``healthz`` is a comma-separated list of their /healthz URLs, all
+    loopback-only, so only reachable from inside this pod. The contract: a task that starts before its
+    sidecar has a lease "should wait, not fail". A task that never touches the database or s3 must
+    still run, so after ``seconds`` it starts anyway, with a note naming what is still missing."""
+    urls = [u.strip() for u in healthz.split(",") if u.strip()]
+
+    def ready(url: str) -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:  # noqa: S310 - fixed loopback URLs from the Job
+                return r.status == 200
+        except OSError:
+            return False
 
     def wait(inv: TaskInvocation, log_: TaskLog) -> None:
-        if inv.access is None:
+        if inv.access is None or not urls:
             return
         deadline = time.monotonic() + seconds
+        pending = list(urls)
         while True:
-            try:
-                with urllib.request.urlopen(healthz, timeout=2) as r:  # noqa: S310 - a fixed loopback URL from the chart
-                    if r.status == 200:
-                        return
-            except OSError:
-                pass
+            pending = [u for u in pending if not ready(u)]
+            if not pending:
+                return
             if time.monotonic() >= deadline:
-                log_.line("system", f"the database credential sidecar has no lease after {seconds:.0f}s; starting the task anyway (DATABASE_URL will fail until it does)")
+                which = ", ".join(_sidecar_name(u) for u in pending)
+                log_.line("system", f"the {which} credential sidecar has no lease after {seconds:.0f}s; starting the task anyway (it will fail to connect until it does)")
                 return
             time.sleep(poll)
 
     return wait
+
+
+def _sidecar_name(healthz_url: str) -> str:
+    return "database" if urllib.parse.urlsplit(healthz_url).port == 5432 else "s3"
+
+
+SIDECAR_FILES_DIR = "/var/run/booth-sidecar-s3/"
+
+
+def sidecar_file_path(name: str, path: str) -> str:
+    """AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE may reach a task only as paths on the s3
+    sidecar's private volume: a path, never a credential, and never somewhere else on the pod."""
+    if not path.startswith(SIDECAR_FILES_DIR) or ".." in path.split("/"):
+        raise ValueError(f"{name} must be a file under {SIDECAR_FILES_DIR} (ADR 0095)")
+    return path
 
 
 def loopback_database_url(url: str) -> str:
@@ -261,6 +284,9 @@ def main() -> int:
     task_env = {}
     if os.environ.get("DATABASE_URL"):
         task_env["DATABASE_URL"] = loopback_database_url(os.environ["DATABASE_URL"])
+    for name in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"):
+        if os.environ.get(name):
+            task_env[name] = sidecar_file_path(name, os.environ[name])
     healthz = os.environ.get("BOOTH_RUNNER_SIDECAR_HEALTHZ", "")
     app = create_runner_app(
         secret,

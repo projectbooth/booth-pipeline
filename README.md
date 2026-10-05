@@ -61,7 +61,9 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   (`datasets/dataset/register_dataset`), acting as the run — see [0007](docs/decisions/0007-workload-identity-adoption.md).
   With `boothDatabase.url` and `core.url` set, such a task also gets `DATABASE_URL` for its workspace's
   booth-database, through booth-core's credential sidecar in its pod — no credential in the URL, a short-lived lease
-  issued as the run ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md); s3 mode is not built yet).
+  issued as the run. With `boothStorage.url` set too, a task whose workspace has a lakehouse warehouse gets s3 credentials
+  the same way, via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md);
+  end to end once booth-core publishes its corrected sidecar).
 - **Catalog code** is referenced as `{entryId, version}` and snapshotted at save; runs never call the catalog
   ([0001](docs/decisions/0001-code-catalog-reference.md)).
 

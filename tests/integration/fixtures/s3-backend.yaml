@@ -1,0 +1,35 @@
+# A stand-in for a workspace's booth-storage S3 backend (e.g. a self-hosted MinIO), for the
+# boothStorage.url egress rule (ADR 0095 amendment): something listening on the S3 port, with labels the
+# chart's boothStorage selector is pointed at, in its own namespace. Test fixture only: it proves the
+# NetworkPolicy route (blocked before, reachable after), not S3 itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: s3-backend-ci}
+  template:
+    metadata:
+      labels: {app: s3-backend-ci}
+    spec:
+      containers:
+        - name: backend
+          image: booth-pipeline:ci
+          imagePullPolicy: Never
+          command: ["python", "-m", "http.server", "9000", "--directory", "/tmp"]
+          ports:
+            - containerPort: 9000
+          readinessProbe:
+            tcpSocket: {port: 9000}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3-backend
+spec:
+  selector: {app: s3-backend-ci}
+  ports:
+    - port: 9000
