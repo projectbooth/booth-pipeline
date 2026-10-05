@@ -166,6 +166,44 @@ jobs:
           after="$(probe)"; echo "after: $after"
           test "$after" = "{\"$bdb\": true, \"$own\": false}" || { echo "expected booth-database reachable and this module's own database not"; exit 1; }
 
+      - name: A task uses its workspace's booth-database through the credential sidecar only once opted in — blocked before, reachable after (ADR 0095)
+        # The REAL digest-pinned credential-sidecar, in real task pods on a CNI that enforces the
+        # policy, against a stand-in broker that issues a fresh Postgres role per lease
+        # (tests/integration/fixtures/fake-core-broker.yaml), at booth-core's address and labels.
+        run: |
+          kubectl create namespace booth-system
+          kubectl apply -n booth-system -f tests/integration/fixtures/fake-core-broker.yaml
+          kubectl -n booth-system rollout status deployment/booth-core --timeout=180s
+          dbtask() { kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - db "$@" < tests/integration/task_jobs_driver.py; }
+          field() { python -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2]))' "$1" "$2"; }
+          # Before: booth-database is open (previous step) but there is no core, so no sidecar.
+          before="$(dbtask acme editor)"; echo "before: $before"
+          test "$(field "$before" database_url)" = "None" || { echo "a task had DATABASE_URL before the sidecar was enabled"; exit 1; }
+          test "$(field "$before" sidecar_listening)" = "False" || { echo "something listened on 127.0.0.1:5432 before the sidecar was enabled"; exit 1; }
+          # After: core.url set too, so a task with platform access gets the sidecar.
+          helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values \
+            --set core.url=http://booth-core.booth-system.svc:8080 \
+            --set credentialSidecar.renewMarginSeconds=20 --set credentialSidecar.renewIntervalSeconds=2 \
+            --wait --timeout 5m
+          kubectl -n booth-pipeline rollout status deploy/booth-pipeline --timeout=180s
+          after="$(dbtask acme editor)"; echo "after: $after"
+          case "$(field "$after" database_url)" in postgresql://localhost:5432/bdb_ws_*) ;; *) echo "no loopback DATABASE_URL"; exit 1;; esac
+          test "$(field "$after" rows)" = "1" || { echo "the round trip through the sidecar failed"; exit 1; }
+          case "$(field "$after" session_user)" in bdb_lease_*) ;; *) echo "not connected as a broker lease"; exit 1;; esac
+          test "$(field "$after" own_module_database)" = "False" || { echo "a task reached this module's OWN database"; exit 1; }
+          # The lease was issued for this task's workspace, read/write as an editor.
+          kubectl -n booth-system exec deploy/booth-core -- python -c 'import json,urllib.request; l=json.load(urllib.request.urlopen("http://127.0.0.1:8080/leases")); assert l and l[-1]["workspace"]=="acme" and l[-1]["access"]=="readwrite", l; print(len(l), "lease(s)")'
+          # A task with no platform access has no identity to give a sidecar: none, and no DATABASE_URL.
+          none="$(dbtask acme none)"; echo "no access: $none"
+          test "$(field "$none" database_url)" = "None" && test "$(field "$none" sidecar_listening)" = "False" \
+            || { echo "a task without platform access got a sidecar"; exit 1; }
+
+      - name: A connection held open through the sidecar survives its forced renewal onto a new lease (ADR 0095)
+        # Leases last 30s and the sidecar renews 20s before expiry, so it rotates every ~10s; the task
+        # keeps one connection open until a NEW connection shows a different lease role.
+        run: |
+          kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - rotation acme < tests/integration/task_jobs_driver.py
+
       - name: Dump logs on failure
         if: failure()
         run: |

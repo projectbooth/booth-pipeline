@@ -152,4 +152,5 @@ class AccessProvider:
             storage_url=self._storage_url,
             catalog_url=self._catalog_url,
             refresh=lambda: self._mint().token,
+            role=t.role,
         )

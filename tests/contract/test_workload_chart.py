@@ -252,3 +252,87 @@ def test_opening_booth_database_gives_task_pods_no_credential_and_leaves_its_own
 
 def test_the_service_selects_the_api_pod_only(chart):
     assert by_kind(chart, "Service")["spec"]["selector"]["app.kubernetes.io/component"] == "api"
+
+
+# ---- ADR 0095: the postgres credential sidecar, and the boothStorage.url egress rule -------------
+
+PINNED = "ghcr.io/projectbooth/credential-sidecar@sha256:05e96332a0c721b20aaddd6616f902e02e81261dbdc798242cbabfea1b34e49f"
+
+
+def test_no_sidecar_by_default(task):
+    assert "initContainers" not in pod(task)
+    env = {e["name"] for e in pod(task)["containers"][0]["env"]}
+    assert not {n for n in env if "SIDECAR" in n or n == "DATABASE_URL"}
+
+
+def test_no_sidecar_without_core_even_with_booth_database():
+    """The sidecar calls core's broker; with no core there is only ADR 0092's egress rule."""
+    assert "initContainers" not in pod(task_job(docs(*BOOTH_DB_URL, "--set", "core.url=")))
+
+
+def test_setting_booth_database_url_adds_a_pinned_native_loopback_sidecar():
+    p = pod(task_job(docs(*BOOTH_DB_URL)))
+    (sc,) = p["initContainers"]
+    assert sc["name"] == "credential-sidecar-postgres"
+    assert sc["image"] == PINNED  # booth-core@eb24bb3, never a tag
+    assert sc["restartPolicy"] == "Always"  # native: stops with the task, never keeps the Job alive
+    assert {"--kind=postgres", "--listen=127.0.0.1:5432", "--token-file=/var/run/booth-sidecar/token"} <= set(sc["args"])
+    assert "--core-url=http://booth-core.booth-system.svc:8080" in sc["args"]
+    assert not [a for a in sc["args"] if a.startswith(("--workspace", "--scope", "--access", "--token="))]  # per task, by the runner
+    assert sc["securityContext"]["readOnlyRootFilesystem"] is True and sc["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    assert sc["volumeMounts"] == [{"name": "booth-sidecar", "mountPath": "/var/run/booth-sidecar", "readOnly": True}]
+    assert not [e for e in sc.get("env", []) if "valueFrom" in e] and "envFrom" not in sc
+    assert {"name": "booth-sidecar", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}} in p["volumes"]
+    task_c = p["containers"][0]
+    env = {e["name"]: e.get("value") for e in task_c["env"]}
+    assert env["BOOTH_RUNNER_SIDECAR_TOKEN_FILE"] == "/var/run/booth-sidecar/token"
+    assert env["BOOTH_RUNNER_SIDECAR_HEALTHZ"] == "http://127.0.0.1:5432/healthz"
+    assert "DATABASE_URL" not in env  # it names the workspace's database: added per task by the runner
+    assert secret_names(task_job(docs(*BOOTH_DB_URL))) == {"per-task"}  # still no module credential
+
+
+def test_the_sidecar_image_must_be_pinned_by_digest():
+    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, *BOOTH_DB_URL, "--set", "credentialSidecar.image=ghcr.io/projectbooth/credential-sidecar:latest")
+    assert out.returncode != 0 and "pinned by digest" in out.stderr
+
+
+def test_the_sidecar_reaches_core_and_booth_database_through_the_existing_rules():
+    np = by_kind(docs(*BOOTH_DB_URL), "NetworkPolicy", "-task")
+    assert len(booth_database_rules(np)) == 1 and len(np["spec"]["egress"]) == 3  # DNS, core, booth-database: nothing new
+
+
+BOOTH_STORAGE = (
+    "--set", "boothStorage.url=minio.e2e-minio.svc:9000",
+    "--set", "runner.networkPolicy.egress.boothStorage.namespaceSelector.kubernetes\.io/metadata\.name=e2e-minio",
+    "--set", "runner.networkPolicy.egress.boothStorage.podSelector.app=minio",
+)  # fmt: skip
+
+
+def booth_storage_rules(np: dict) -> list[dict]:
+    return [r for r in np["spec"]["egress"] for t in r.get("to", []) if t.get("podSelector", {}).get("matchLabels", {}).get("app") == "minio"]
+
+
+def test_booth_storage_egress_is_closed_by_default(chart):
+    np = by_kind(chart, "NetworkPolicy", "-task")
+    assert booth_storage_rules(np) == [] and len(np["spec"]["egress"]) == 2
+
+
+def test_setting_booth_storage_url_opens_exactly_its_backend_on_its_port():
+    np = by_kind(docs(*BOOTH_STORAGE), "NetworkPolicy", "-task")
+    (rule,) = booth_storage_rules(np)
+    (to,) = rule["to"]
+    assert to["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "e2e-minio"}
+    assert to["podSelector"]["matchLabels"] == {"app": "minio"}
+    assert rule["ports"] == [{"protocol": "TCP", "port": 9000}]
+    assert len(np["spec"]["egress"]) == 3 and "ipBlock" not in yaml.safe_dump(np["spec"]["egress"])
+
+
+def test_booth_storage_url_without_selectors_is_refused_rather_than_opened_wide():
+    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", "boothStorage.url=minio:9000")
+    assert out.returncode != 0 and "podSelector are required" in out.stderr
+
+
+def test_booth_storage_url_adds_no_sidecar_and_no_credential():
+    """The s3 sidecar is not part of this release (docs/decisions/0019): the value only opens a route."""
+    t = task_job(docs(*BOOTH_STORAGE))
+    assert "initContainers" not in pod(t) and secret_names(t) == {"per-task"}
