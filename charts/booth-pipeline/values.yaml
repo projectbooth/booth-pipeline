@@ -52,8 +52,15 @@ boothDatabase:
 # s3 access. Empty by default: task pods stay closed. Set it to the backend's in-cluster address
 # (e.g. minio.storage.svc:9000) to add ONE egress rule to that backend's pods on
 # runner.networkPolicy.egress.boothStorage.port. There is no standard backend to default to, so its
-# pod selector is required when this is set. (Network reachability only: the s3-kind credential
-# sidecar is not part of this release — see docs/decisions/0019.)
+# pod selector is required when this is set.
+#
+# ADR 0095 (third amendment): with core.url also set, a task with platform access whose workspace has
+# a lakehouse warehouse also gets the s3-mode credential sidecar. It writes short-lived keys, and the
+# endpoint/region, to files the task's S3 client finds through AWS_SHARED_CREDENTIALS_FILE /
+# AWS_CONFIG_FILE. The warehouse is looked up per task from booth-lakehouse (GET /api/warehouse, as
+# the task), so booth-lakehouse must be installed; a workspace without a warehouse gets no s3 sidecar.
+# The endpoint/region file needs a booth-core sidecar newer than the digest pinned below
+# (docs/decisions/0019).
 boothStorage:
   url: ""
 

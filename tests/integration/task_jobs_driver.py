@@ -18,6 +18,8 @@ Modes (each prints a JSON report and exits non-zero on any violation):
 * ``refresh`` — how long a refreshed platform token takes to reach a running task.
 * ``db WORKSPACE ROLE|none`` — a task's view of the database: DATABASE_URL, what it can reach, and a
   real round trip through the credential sidecar when it has one (ADR 0095).
+* ``s3 WORKSPACE ROLE|none [WATCH_SECONDS]`` — a task's view of the s3 credential sidecar: the AWS
+  file variables, the keys it wrote, whether the backend is reachable; optionally waits for a renewal.
 * ``rotation WORKSPACE`` — a connection held open through the sidecar survives its renewal onto a
   new lease.
 """
@@ -342,6 +344,60 @@ def rotation(workspace: str) -> int:
     return 0 if ok else 1
 
 
+S3_TASK = r'''
+import configparser, os, socket, time
+def run(ctx):
+    def tcp(host, port):
+        try:
+            socket.create_connection((host, port), timeout=5).close()
+            return True
+        except OSError:
+            return False
+    creds, conf = os.environ.get("AWS_SHARED_CREDENTIALS_FILE"), os.environ.get("AWS_CONFIG_FILE")
+    out = {"credentials_file": creds, "config_file": conf,
+           "backend_reachable": tcp("s3-backend.booth-storage-ci.svc.cluster.local", 9000),
+           "sidecar_health": tcp("127.0.0.1", 8081)}
+    if creds:
+        p = configparser.ConfigParser()
+        p.read(creds)
+        out["access_key_id"] = p.get("default", "aws_access_key_id", fallback=None)
+        out["has_secret"] = bool(p.get("default", "aws_secret_access_key", fallback=""))
+        out["config_written"] = os.path.exists(conf)  # needs booth-core's sidecar with the .config output
+        if out["config_written"]:
+            c = configparser.ConfigParser()
+            c.read(conf)
+            out["config"] = {s: dict(c[s]) for s in c.sections()}
+    if ctx.params.get("watch_rotation"):
+        # The sidecar renews and rewrites the file atomically: every read parses, and the key changes.
+        first, seen, deadline = out["access_key_id"], set(), time.time() + ctx.params["watch_rotation"]
+        while time.time() < deadline:
+            p = configparser.ConfigParser()
+            p.read(creds)
+            key = p.get("default", "aws_access_key_id")  # raises on a torn/partial file
+            seen.add(key)
+            if key != first:
+                break
+            time.sleep(0.2)
+        out["rotated_to"] = next((k for k in seen if k != first), None)
+    return out
+'''
+
+
+def s3(workspace: str, role: str, watch_rotation: int = 0) -> int:
+    """One task, as ``workspace`` with ``role`` (or "none"), reporting what it sees of the s3
+    credential sidecar (ADR 0095): the AWS file variables, the keys it wrote, the backend's reachability."""
+    access = None if role == "none" else TaskAccess(workspace, f"tok-{workspace}-{uuid.uuid4().hex}", "http://unused", "http://unused", role=role)
+    lines = Lines()
+    try:
+        out = runner(max_concurrent=1).run(inv(S3_TASK, "s3", {"watch_rotation": watch_rotation}, access, timeout=300), lines, Cancellation())
+    except Exception:
+        print("\n".join(f"[{s}] {m}" for s, m in lines.out), file=sys.stderr)
+        raise
+    out["system"] = [m for s, m in lines.out if s == "system"]
+    print(json.dumps(out))
+    return 0
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -361,6 +417,8 @@ def main() -> int:
         return db(args[0], args[1])
     if mode == "rotation":
         return rotation(args[0])
+    if mode == "s3":
+        return s3(args[0], args[1], int(args[2]) if len(args) > 2 else 0)
     if mode == "probe":
         return probe(args)
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")

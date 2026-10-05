@@ -1,9 +1,13 @@
-# 0019: Adopting booth-core's credential sidecar (ADR 0095) — postgres built, s3 held back
+# 0019: Adopting booth-core's credential sidecar (ADR 0095) — postgres and s3
 
-Status: **postgres mode built**, verified on a real CNI by `.github/workflows/integration.yml` against
-the real digest-pinned sidecar. **The `boothStorage.url` egress rule built.** **The s3-mode sidecar
-not built**: two gaps outside this repo, the same ones booth-notebooks recorded in its own 0008, still
-unruled (below).
+Status:
+- **postgres mode built**, verified on a real CNI by `.github/workflows/integration.yml` against the
+  real digest-pinned sidecar.
+- **The `boothStorage.url` egress rule built.**
+- **s3 mode built (2026-10-05) to ADR 0095's third amendment**, with the scope resolved per task from
+  booth-lakehouse. It is verified on a real CNI against the same sidecar, but it is **only usable end
+  to end once the chart pins booth-core's corrected sidecar**. The pinned eb24bb3 refuses
+  booth-storage's real s3 credential and writes no endpoint/region file (below).
 
 ## What was built (postgres)
 
@@ -62,26 +66,68 @@ configured), so there are no labels to default to. Its namespace and pod selecto
 **required** when the URL is set: the chart refuses to render rather than guess, because an empty
 selector would match far more than the backend. It opens a route only: no sidecar, no credential.
 
-## Not built: the s3-mode sidecar
+## s3 mode (ADR 0095, third amendment)
 
-These are the same gaps booth-notebooks' 0008 records. None has been ruled on as of 2026-10-05, and
-booth-core is still at eb24bb3.
+The two gaps this record first raised were ruled on 2026-10-05. The scope is resolved through
+booth-lakehouse. The endpoint and region become booth-core's job: a second file next to the keys.
 
-1. **The sidecar writes keys only.** `--kind=s3` writes `aws_access_key_id`, the secret and the
-   session token. booth-storage's s3 grant also carries the location (`MintedCredential`: endpoint,
-   bucket, key prefix, region, path style). With an in-cluster MinIO, PyIceberg and DuckDB can do
-   nothing with keys alone. Needs booth-core: write the endpoint too (e.g. an AWS config file beside
-   the credentials), or expose the grant's location some other way.
-2. **The scope is not derivable here.** booth-storage's s3 scope is `{backendId, path}`: the
-   workspace's lakehouse warehouse location. A pipeline task knows its workspace, not where
-   booth-lakehouse put that workspace's warehouse. Needs a ruling on who supplies it: a lookup
-   against booth-lakehouse (a new module-to-module dependency nobody has specified), or a warehouse
-   location that can be derived from the workspace.
+- **Gate**: `boothStorage.url` **and** `core.url`, the same pattern as postgres. A second native init
+  container, `credential-sidecar-s3`, with these args:
+  - `--kind=s3`
+  - `--credentials-file=/var/run/booth-sidecar-s3/credentials`, on its own memory-backed volume:
+    writable by the sidecar, read-only to the task, and not mounted by the postgres sidecar
+  - `--health-listen=127.0.0.1:8081`
+  - `--token-file` (the same task token) and `--core-url`
+- **The task gets** `AWS_SHARED_CREDENTIALS_FILE=…/credentials` and
+  `AWS_CONFIG_FILE=…/credentials.config`, the contract's two-file output and the standard variables
+  every S3 client honors. They are paths, never credentials, and the runner service refuses anything
+  outside the sidecar's directory.
+- **The scope**:
+  - `KubernetesJobRunner` asks booth-lakehouse's `GET /api/warehouse` through core's gateway
+    (`<core.url>/modules/lakehouse/api/warehouse`). It sends the **task's own token** and
+    `X-Workspace`, before creating the Job, and only for a task with platform access.
+  - The sidecar gets `--scope={"backendId":…,"path":…}`, taken from the response and nothing else,
+    plus the task's `--workspace` and `--access` (`read` for a viewer).
+  - **A 404 (no warehouse yet) means no s3 sidecar and no AWS variables**, exactly as for a task
+    without platform access, and with no log note: it is an ordinary state.
+- **Any other lookup failure** (booth-lakehouse or core down, a 403, an unexpected body): the task
+  still runs, without s3 credentials, with a note in its log. This is a judgment call, for the same
+  reason the lease wait doesn't block: a task that never touches s3 must not fail because
+  booth-lakehouse is down.
+- **New runtime coupling, called out per the brief**: with `boothStorage.url` and `core.url` set,
+  starting a task with platform access now calls booth-lakehouse, through core's gateway, from the
+  API pod. That adds up to 10s on a task start if booth-lakehouse hangs. An install without
+  `boothStorage.url` makes no such call.
+- **Waiting for leases**: the runner now waits for every sidecar the task actually has. The Job
+  carries the list in `BOOTH_RUNNER_SIDECAR_HEALTHZ`, set per task. The note on a timeout names which
+  sidecar is still waiting.
 
-A third gap, the missing gate, is now answered by `boothStorage.url`. Building the container
-anyway would ship a sidecar that cannot be configured correctly. Once the two gaps are ruled on,
-the s3 sidecar is a second native init container next to the postgres one, `--credentials-file` on
-the same private volume, personalized per task the same way.
+**Found while building it — a port clash the contract's defaults would cause.** The s3 sidecar's
+`--health-listen` defaults to `127.0.0.1:8080`, and the runner already listens on `0.0.0.0:8080` in
+the same pod. The chart sets `:8081`, and `KubernetesJobRunner` refuses a template whose sidecar
+health port equals the runner's.
+
+**Found while building it — today's pinned sidecar can't take booth-storage's real s3
+credential.** eb24bb3's `S3Credential` has only the three key fields, and the sidecar decodes the
+broker's credential with `DisallowUnknownFields`. booth-storage's real response also carries
+`endpoint`, `region`, `bucket`, `keyPrefix` and `pathStyle`. So against real booth-storage the
+pinned sidecar refuses every s3 lease as unparseable and writes **no** file at all, which is worse
+than "keys only". booth-core's planned change (adding the location fields to `S3Credential`)
+removes this as a side effect. Its tests should use booth-storage's real response shape so this
+can't recur.
+
+**What is verified now, and what waits for booth-core.** The Integration workflow runs the real
+pinned sidecar against a stand-in broker. That broker issues keys-only s3 credentials (fixture
+`S3_CREDENTIAL_SHAPE=keys`) because that's all eb24bb3 accepts. It shows, on a real CNI:
+- blocked before `boothStorage.url` and reachable after;
+- keys written for exactly the lease scoped to the workspace's warehouse;
+- no s3 sidecar for a workspace without a warehouse, or for a task without access;
+- the file rewritten with new keys while a task runs, never seen half-written.
+
+When booth-core publishes the corrected sidecar, two changes make it end to end:
+- bump `credentialSidecar.image` to the new digest;
+- set the fixture's `S3_CREDENTIAL_SHAPE=full`, and turn the step's "endpoint/region file written"
+  report into an assertion on `credentials.config`.
 
 ## Known limit, inherited (booth-notebooks' Finding 1)
 
