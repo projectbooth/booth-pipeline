@@ -1,7 +1,13 @@
-# A stand-in for a workspace's booth-storage S3 backend (e.g. a self-hosted MinIO), for the
-# boothStorage.url egress rule (ADR 0095 amendment): something listening on the S3 port, with labels the
-# chart's boothStorage selector is pointed at, in its own namespace. Test fixture only: it proves the
-# NetworkPolicy route (blocked before, reachable after), not S3 itself.
+# A workspace's booth-storage S3 backend, for the boothStorage.url egress rule and the s3 credential
+# sidecar (ADR 0095): a real MinIO, so a task's DuckDB can actually read and write through the
+# sidecar's credentials, not just reach a port. Test fixture only.
+#
+# Not reinvented: the platform's one pinned MinIO test image (ADR 0087/0091), the same one
+# booth-lakehouse's tests and booth-e2e use, with their booth-test root credentials. Its postStart
+# hook makes the booth-ci bucket and a pool of ordinary MinIO users, AKCILEASE01..40, each with the
+# readwrite policy. The stand-in broker (fake-core-broker.yaml) hands one out per s3 lease, so every
+# lease carries different, real keys and a renewal is a real key rotation. The labels are what the
+# chart's boothStorage selector is pointed at by the workflow.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,15 +21,32 @@ spec:
       labels: {app: s3-backend-ci}
     spec:
       containers:
-        - name: backend
-          image: booth-pipeline:ci
-          imagePullPolicy: Never
-          command: ["python", "-m", "http.server", "9000", "--directory", "/tmp"]
+        - name: minio
+          image: ghcr.io/projectbooth/minio-test@sha256:04c918e8877a410f40ccab0842f724177af453f236a5fda96df219867aefe3c3 # ADR 0087/0091
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data"]
+          env:
+            - {name: MINIO_ROOT_USER, value: booth-test}
+            - {name: MINIO_ROOT_PASSWORD, value: booth-test-secret}
           ports:
             - containerPort: 9000
           readinessProbe:
-            tcpSocket: {port: 9000}
+            httpGet: {path: /minio/health/ready, port: 9000}
             periodSeconds: 2
+          lifecycle:
+            postStart:
+              exec:
+                # The container isn't Running until this finishes, so rollout status waits for it.
+                command:
+                  - sh
+                  - -c
+                  - |
+                    for i in $(seq 1 60); do mc alias set l http://127.0.0.1:9000 booth-test booth-test-secret >/dev/null 2>&1 && break; sleep 1; done
+                    mc mb -p l/booth-ci || exit 1
+                    for n in $(seq -w 1 40); do
+                      mc admin user add l "AKCILEASE$n" "booth-ci-lease-secret-$n" >/dev/null || exit 1
+                      mc admin policy attach l readwrite --user "AKCILEASE$n" >/dev/null || exit 1
+                    done
 ---
 apiVersion: v1
 kind: Service

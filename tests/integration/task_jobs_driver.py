@@ -20,6 +20,8 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   real round trip through the credential sidecar when it has one (ADR 0095).
 * ``s3 WORKSPACE ROLE|none [WATCH_SECONDS]`` — a task's view of the s3 credential sidecar: the AWS
   file variables, the keys it wrote, whether the backend is reachable; optionally waits for a renewal.
+* ``duckdb WORKSPACE`` — DuckDB through the s3 sidecar: a Python task writes Parquet with ctx.s3,
+  a SQL task reads it back with no setup.
 * ``rotation WORKSPACE`` — a connection held open through the sidecar survives its renewal onto a
   new lease.
 """
@@ -398,6 +400,43 @@ def s3(workspace: str, role: str, watch_rotation: int = 0) -> int:
     return 0
 
 
+DUCKDB_WRITE = r'''
+import duckdb
+def run(ctx):
+    con = duckdb.connect(":memory:")
+    loc = ctx.s3.duckdb(con)  # the helper: location from the sidecar's config file, keys from its credentials
+    url = ctx.params["url"]
+    con.execute(f"COPY (SELECT 42 AS answer, 'acme' AS ws) TO '{url}' (FORMAT parquet)")
+    back = con.execute(f"SELECT answer FROM '{url}'").fetchone()[0]
+    return {"location": [loc.endpoint_url, loc.region, loc.addressing_style], "read_back": back}
+'''
+
+
+def duckdb_e2e(workspace: str) -> int:
+    """DuckDB through the credential sidecar, both ways a task uses it (ADR 0095, docs/decisions/0019):
+    a Python task writes Parquet to the real MinIO with ctx.s3, then a SQL task (its own pod, its own
+    lease) reads it back with no setup at all. Both run with no internet: the extensions are baked."""
+    url = f"s3://booth-ci/lakehouse/{workspace}/ci-{uuid.uuid4().hex[:8]}.parquet"
+
+    def access() -> TaskAccess:
+        return TaskAccess(workspace, f"tok-{workspace}-{uuid.uuid4().hex}", "http://unused", "http://unused", role="editor")
+
+    out: dict = {}
+    for name, source, language in (("python", DUCKDB_WRITE, "python"), ("sql", f"SELECT answer, ws FROM '{url}'", "sql")):
+        lines = Lines()
+        i = TaskInvocation(f"ci-{uuid.uuid4().hex[:8]}", f"duckdb_{name}", "transform", 1, source, {"url": url}, {}, 300, access(), language=language)
+        try:
+            out[name] = runner(max_concurrent=1).run(i, lines, Cancellation())
+        except Exception:
+            print("\n".join(f"[{s}] {m}" for s, m in lines.out), file=sys.stderr)
+            raise
+        out[name + "_log"] = [m for s, m in lines.out if s != "stdout"]
+    print(json.dumps(out))
+    ok = out["python"]["read_back"] == 42 and out["sql"] == [{"answer": 42, "ws": workspace}]
+    print("duckdb s3: OK — written by a Python task with ctx.s3, read back by a SQL task" if ok else "DUCKDB S3 FAILED")
+    return 0 if ok else 1
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -417,6 +456,8 @@ def main() -> int:
         return db(args[0], args[1])
     if mode == "rotation":
         return rotation(args[0])
+    if mode == "duckdb":
+        return duckdb_e2e(args[0])
     if mode == "s3":
         return s3(args[0], args[1], int(args[2]) if len(args) > 2 else 0)
     if mode == "probe":

@@ -14,6 +14,11 @@ FROM python:3.13-slim-bookworm
 RUN groupadd --gid 65532 nonroot && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links /wheels booth-pipeline && rm -rf /wheels
+# DuckDB's httpfs and aws extensions, baked in: a task reading s3:// through its credential sidecar
+# (ADR 0095) runs in a pod with no internet by default, so it can only LOAD them, never INSTALL.
+# The directory matches booth_pipeline.runners._s3.EXTENSION_DIR; read-only at run time.
+RUN python -c "import duckdb; c = duckdb.connect(config={'extension_directory': '/opt/duckdb-extensions'}); [c.install_extension(e) for e in ('httpfs', 'aws')]; [c.load_extension(e) for e in ('httpfs', 'aws')]" \
+ && chmod -R a+rX /opt/duckdb-extensions
 # The root filesystem is read-only in the chart; /tmp is an emptyDir. Everything that wants to
 # write (task working directories, Dagster's scratch space, Python's bytecode cache) must go there.
 ENV HOME=/tmp \
