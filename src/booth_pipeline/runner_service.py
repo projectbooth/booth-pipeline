@@ -63,6 +63,9 @@ class RunBody(BaseModel):
     kind: str
     attempt: int
     source: str
+    # ADR 0064's language dispatch. Missing from this protocol until 2026-10-06, so every SQL task run
+    # through a runner service ran as Python; "python" stays the default for an older caller.
+    language: str = "python"
     params: dict[str, Any]
     inputs: dict[str, Any]
     timeoutSeconds: int  # noqa: N815
@@ -147,6 +150,7 @@ def create_runner_app(
             inputs=body.inputs,
             timeout_seconds=body.timeoutSeconds,
             access=access,
+            language=body.language,
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()
