@@ -256,7 +256,7 @@ def test_the_service_selects_the_api_pod_only(chart):
 
 # ---- ADR 0095: the postgres credential sidecar, and the boothStorage.url egress rule -------------
 
-PINNED = "ghcr.io/projectbooth/credential-sidecar@sha256:05e96332a0c721b20aaddd6616f902e02e81261dbdc798242cbabfea1b34e49f"
+PINNED = "ghcr.io/projectbooth/credential-sidecar@sha256:decd3031f8deeae19a0213f2eef63a7480b1bfce2829834ebb483d16a8875865"
 
 
 def test_no_sidecar_by_default(task):
@@ -274,7 +274,7 @@ def test_setting_booth_database_url_adds_a_pinned_native_loopback_sidecar():
     p = pod(task_job(docs(*BOOTH_DB_URL)))
     (sc,) = p["initContainers"]
     assert sc["name"] == "credential-sidecar-postgres"
-    assert sc["image"] == PINNED  # booth-core@eb24bb3, never a tag
+    assert sc["image"] == PINNED  # booth-core@330a178, never a tag
     assert sc["restartPolicy"] == "Always"  # native: stops with the task, never keeps the Job alive
     assert {"--kind=postgres", "--listen=127.0.0.1:5432", "--token-file=/var/run/booth-sidecar/token"} <= set(sc["args"])
     assert "--core-url=http://booth-core.booth-system.svc:8080" in sc["args"]

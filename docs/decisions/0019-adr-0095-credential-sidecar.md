@@ -5,9 +5,9 @@ Status:
   real digest-pinned sidecar.
 - **The `boothStorage.url` egress rule built.**
 - **s3 mode built (2026-10-05) to ADR 0095's third amendment**, with the scope resolved per task from
-  booth-lakehouse. It is verified on a real CNI against the same sidecar, but it is **only usable end
-  to end once the chart pins booth-core's corrected sidecar**. The pinned eb24bb3 refuses
-  booth-storage's real s3 credential and writes no endpoint/region file (below).
+  booth-lakehouse. Since 2026-10-06 the chart pins booth-core@330a178, which accepts booth-storage's
+  real s3 credential and writes the endpoint/region/addressing-style file. Verified on a real CNI
+  (below).
 
 ## What was built (postgres)
 
@@ -18,8 +18,8 @@ sidecar calls core's broker; with no core there is only the egress rule, as befo
 - **A native sidecar**: an init container with `restartPolicy: Always` (Kubernetes ≥ 1.29). It
   starts before the task and is stopped when the task's container exits. A plain second container
   would keep a Job's pod running after its task ends.
-- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:05e96332…` (booth-core@eb24bb3, publish run
-  37012736996). The chart refuses a tag, and so does `KubernetesJobRunner` at startup. Its args are
+- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:decd3031…8865` (booth-core@330a178, publish
+  run 37378106842; first pinned at eb24bb3, run 37012736996). The chart refuses a tag, and so does `KubernetesJobRunner` at startup. Its args are
   `--kind=postgres --listen=127.0.0.1:5432 --token-file=/var/run/booth-sidecar/token --core-url=…`.
   It is non-root, has a read-only root filesystem and drops all capabilities.
 - **Per task, by `KubernetesJobRunner`**:
@@ -107,8 +107,8 @@ booth-lakehouse. The endpoint and region become booth-core's job: a second file 
 the same pod. The chart sets `:8081`, and `KubernetesJobRunner` refuses a template whose sidecar
 health port equals the runner's.
 
-**Found while building it — today's pinned sidecar can't take booth-storage's real s3
-credential.** eb24bb3's `S3Credential` has only the three key fields, and the sidecar decodes the
+**Found while building it — the first pinned sidecar couldn't take booth-storage's real s3
+credential (fixed by the repin).** eb24bb3's `S3Credential` has only the three key fields, and the sidecar decodes the
 broker's credential with `DisallowUnknownFields`. booth-storage's real response also carries
 `endpoint`, `region`, `bucket`, `keyPrefix` and `pathStyle`. So against real booth-storage the
 pinned sidecar refuses every s3 lease as unparseable and writes **no** file at all, which is worse
@@ -116,18 +116,20 @@ than "keys only". booth-core's planned change (adding the location fields to `S3
 removes this as a side effect. Its tests should use booth-storage's real response shape so this
 can't recur.
 
-**What is verified now, and what waits for booth-core.** The Integration workflow runs the real
-pinned sidecar against a stand-in broker. That broker issues keys-only s3 credentials (fixture
-`S3_CREDENTIAL_SHAPE=keys`) because that's all eb24bb3 accepts. It shows, on a real CNI:
+**Verified, against the repinned sidecar (booth-core@330a178).** The Integration workflow runs the
+real sidecar against a stand-in broker that issues s3 credentials in booth-storage's real shape. It
+shows, on a real CNI:
 - blocked before `boothStorage.url` and reachable after;
 - keys written for exactly the lease scoped to the workspace's warehouse;
+- `credentials.config` written alongside: `endpoint_url`, `region` and `addressing_style = path`;
 - no s3 sidecar for a workspace without a warehouse, or for a task without access;
-- the file rewritten with new keys while a task runs, never seen half-written.
+- the files rewritten with new keys while a task runs, never seen half-written.
 
-When booth-core publishes the corrected sidecar, two changes make it end to end:
-- bump `credentialSidecar.image` to the new digest;
-- set the fixture's `S3_CREDENTIAL_SHAPE=full`, and turn the step's "endpoint/region file written"
-  report into an assertion on `credentials.config`.
+**Still to do for engines that don't read the config file.** DuckDB (which the task image ships for
+SQL tasks) and pyarrow don't take `endpoint_url` from `AWS_CONFIG_FILE` on their own
+(contracts/credential-sidecar.md, "Known limitation"). A DuckDB task reading s3 needs a small helper
+that hands it the endpoint and path-style addressing explicitly, like booth-notebooks' in its
+`docs/decisions/0009`. Not built yet.
 
 ## Known limit, inherited (booth-notebooks' Finding 1)
 

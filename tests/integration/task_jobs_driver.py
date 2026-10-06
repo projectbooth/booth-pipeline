@@ -362,7 +362,7 @@ def run(ctx):
         p.read(creds)
         out["access_key_id"] = p.get("default", "aws_access_key_id", fallback=None)
         out["has_secret"] = bool(p.get("default", "aws_secret_access_key", fallback=""))
-        out["config_written"] = os.path.exists(conf)  # needs booth-core's sidecar with the .config output
+        out["config_written"] = os.path.exists(conf)  # <credentials>.config: endpoint_url, region, addressing_style
         if out["config_written"]:
             c = configparser.ConfigParser()
             c.read(conf)
