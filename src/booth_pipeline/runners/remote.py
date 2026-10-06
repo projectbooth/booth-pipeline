@@ -78,6 +78,7 @@ class RemoteRunner:
             "kind": inv.kind,
             "attempt": inv.attempt,
             "source": inv.source,
+            "language": inv.language,  # ADR 0064: without it the far side runs every task as Python
             "params": inv.params,
             "inputs": inv.inputs,
             "timeoutSeconds": inv.timeout_seconds,

@@ -180,3 +180,17 @@ def test_a_task_with_no_access_gets_no_token_file():
         lines = Lines()
         remote(url).run(inv("import os\nprint('BOOTH_TOKEN_FILE' in os.environ)\n"), lines, Cancellation())
     assert lines.stdout == ["False"]
+
+
+def test_a_sql_task_runs_as_sql_through_the_runner_service(runner_url):
+    """ADR 0064's language crossed the wire to nowhere until 2026-10-06: the runner service ran every
+    task as Python, so a SQL task died with a SyntaxError in every deployment. Found by Integration."""
+    sql = TaskInvocation("r1", "q", "transform", 1, "SELECT 40 + $two AS n", {"two": 2}, {}, 60, None, language="sql")
+    lines = Lines()
+    assert remote(runner_url).run(sql, lines, Cancellation()) == [{"n": 42}]
+
+
+def test_an_unknown_language_is_refused_by_the_runner_service_not_run_as_python(runner_url):
+    bad = TaskInvocation("r1", "q", "transform", 1, "SELECT 1", {}, {}, 60, None, language="cobol")
+    with pytest.raises(TaskFailed):
+        remote(runner_url).run(bad, Lines(), Cancellation())
