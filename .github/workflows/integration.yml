@@ -234,7 +234,12 @@ jobs:
           assert m, ("no lease issued these keys", l)
           assert m[0]["workspace"]=="acme" and m[0]["access"]=="readwrite" and m[0]["scope"]=={"backendId":"minio-ci","path":"lakehouse/acme"}, m
           print(len(l), "s3 lease(s); the task holds", m[0]["leaseId"])' "$key"
-          echo "endpoint/region file written: $(field "$after" config_written) (expected True only once the chart pins booth-core's sidecar with the .config output)"
+          # The endpoint, region and addressing style, next to the keys (ADR 0095 third/fourth amendments).
+          python -c 'import json,sys; o=json.loads(sys.argv[1]); c=(o.get("config") or {}).get("default", {})
+          assert o["config_written"], ("no endpoint/region file", o)
+          assert c.get("endpoint_url")=="http://s3-backend.booth-storage-ci.svc.cluster.local:9000" and c.get("region")=="us-east-1", c
+          assert c.get("addressing_style")=="path", ("addressing_style is not path", c)
+          print("endpoint/region file:", c)' "$after"
           # A workspace with no warehouse gets no s3 sidecar, exactly like a task without platform access.
           nowh="$(s3task globex editor)"; echo "no warehouse: $nowh"
           test "$(field "$nowh" credentials_file)" = "None" && test "$(field "$nowh" sidecar_health)" = "False" \

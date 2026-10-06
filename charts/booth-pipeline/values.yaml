@@ -59,15 +59,16 @@ boothDatabase:
 # endpoint/region, to files the task's S3 client finds through AWS_SHARED_CREDENTIALS_FILE /
 # AWS_CONFIG_FILE. The warehouse is looked up per task from booth-lakehouse (GET /api/warehouse, as
 # the task), so booth-lakehouse must be installed; a workspace without a warehouse gets no s3 sidecar.
-# The endpoint/region file needs a booth-core sidecar newer than the digest pinned below
-# (docs/decisions/0019).
+# Engines that don't read AWS_CONFIG_FILE's endpoint themselves (DuckDB, pyarrow) need it passed
+# explicitly (contracts/credential-sidecar.md, docs/decisions/0019).
 boothStorage:
   url: ""
 
 # ADR 0095 / contracts/credential-sidecar.md: booth-core's credential sidecar image, PINNED BY DIGEST
-# (the chart refuses a tag). booth-core@eb24bb3, publish run 37012736996.
+# (the chart refuses a tag). booth-core@330a178, publish run 37378106842: writes the s3 keys AND
+# <credentials-file>.config (endpoint_url, region, addressing_style; ADR 0095 third/fourth amendments).
 credentialSidecar:
-  image: ghcr.io/projectbooth/credential-sidecar@sha256:05e96332a0c721b20aaddd6616f902e02e81261dbdc798242cbabfea1b34e49f
+  image: ghcr.io/projectbooth/credential-sidecar@sha256:decd3031f8deeae19a0213f2eef63a7480b1bfce2829834ebb483d16a8875865
   # A task with platform access waits up to this long for the sidecar's first lease before it starts
   # anyway (a task that never uses DATABASE_URL must not be blocked by a database outage).
   waitSeconds: 60

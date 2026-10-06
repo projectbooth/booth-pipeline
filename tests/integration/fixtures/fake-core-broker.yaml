@@ -11,10 +11,10 @@
 # For s3 (ADR 0095, third amendment) it also stands in for booth-lakehouse behind core's gateway:
 # GET /modules/lakehouse/api/warehouse returns a warehouse for workspace "acme" and 404 for any other,
 # and an s3 lease is issued only for exactly that warehouse's {backendId, path}. Each s3 lease has fresh
-# keys. S3_CREDENTIAL_SHAPE=keys (the default) returns only the keys: the sidecar pinned today
-# (booth-core@eb24bb3) decodes the credential strictly and refuses booth-storage's real response,
-# which also carries endpoint/bucket/region/keyPrefix/pathStyle. Set it to "full" (booth-storage's real
-# shape) once the chart pins booth-core's sidecar that writes <credentials-file>.config.
+# keys. Its credential is booth-storage's real shape (keys plus endpoint/region/bucket/keyPrefix/
+# pathStyle, internal/credentialbroker/provider.go). The sidecar decodes it strictly, so a shape the
+# pinned sidecar doesn't know fails the test, not silently. S3_CREDENTIAL_SHAPE=keys sends only the
+# keys (what booth-core@eb24bb3 accepted), kept for comparing against an older sidecar.
 #
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
 # NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
@@ -34,7 +34,7 @@ data:
     ADMIN = os.environ["ADMIN_DSN"]  # superuser on the booth-database stand-in
     PG_HOST, PG_PORT = os.environ["PG_HOST"], int(os.environ.get("PG_PORT", "5432"))
     LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "30"))
-    S3_SHAPE = os.environ.get("S3_CREDENTIAL_SHAPE", "keys")
+    S3_SHAPE = os.environ.get("S3_CREDENTIAL_SHAPE", "full")
     WAREHOUSES = {"acme": {"workspace": "acme", "backendId": "minio-ci", "path": "lakehouse/acme",
                            "warehouseName": "acme", "storageRoot": "s3://booth-ci/lakehouse/acme"}}
     leases, lock = [], threading.Lock()
