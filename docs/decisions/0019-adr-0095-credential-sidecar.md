@@ -18,7 +18,7 @@ sidecar calls core's broker; with no core there is only the egress rule, as befo
 - **A native sidecar**: an init container with `restartPolicy: Always` (Kubernetes ≥ 1.29). It
   starts before the task and is stopped when the task's container exits. A plain second container
   would keep a Job's pod running after its task ends.
-- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:decd3031…8865` (booth-core@330a178, publish
+- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:decd3031…5865` (booth-core@330a178, publish
   run 37378106842; first pinned at eb24bb3, run 37012736996). The chart refuses a tag, and so does `KubernetesJobRunner` at startup. Its args are
   `--kind=postgres --listen=127.0.0.1:5432 --token-file=/var/run/booth-sidecar/token --core-url=…`.
   It is non-root, has a read-only root filesystem and drops all capabilities.
@@ -125,20 +125,55 @@ shows, on a real CNI:
 - no s3 sidecar for a workspace without a warehouse, or for a task without access;
 - the files rewritten with new keys while a task runs, never seen half-written.
 
-**Still to do for engines that don't read the config file.** DuckDB (which the task image ships for
-SQL tasks) and pyarrow don't take `endpoint_url` from `AWS_CONFIG_FILE` on their own
-(contracts/credential-sidecar.md, "Known limitation"). A DuckDB task reading s3 needs a small helper
-that hands it the endpoint and path-style addressing explicitly, like booth-notebooks' in its
-`docs/decisions/0009`. Not built yet.
+## DuckDB: `ctx.s3`, and SQL tasks set up for free
 
-## Known limit, inherited (booth-notebooks' Finding 1)
+DuckDB and pyarrow don't take `endpoint_url` from `AWS_CONFIG_FILE` on their own
+(contracts/credential-sidecar.md, "Known limitation"), so against a self-hosted backend they would
+go to real AWS. The task image ships DuckDB, which runs every SQL task, but not pyarrow or boto3.
+The helper follows booth-notebooks' `booth.s3` (its `docs/decisions/0009`):
 
-The sidecar contract says a connection opened on an earlier lease "is left alone until it closes
-naturally". booth-database's reaper, however, terminates sessions when their lease expires. Through
-real booth-database, a connection therefore lives at most one lease (an hour by default), whatever
-renewal does. The forced-rotation check here proves what the sidecar promises: a connection held
-open survives the sidecar's renewal onto a new lease, and new connections never fail meanwhile. Its
-stand-in provider doesn't reap, so the check does not cover booth-database's expiry behavior. A
-pipeline task that runs longer than a lease and holds one connection throughout would see it
-dropped. That is a coordinator question between booth-core's contract and booth-database, not
-something this module can fix.
+- **`runners/_s3.py`** (standard library only; it takes a DuckDB connection, never imports DuckDB)
+  reads the sidecar's config file into a location (endpoint, region, addressing style). It builds a
+  `CREATE SECRET … PROVIDER credential_chain, REFRESH auto` holding **only the location**. The keys
+  stay with DuckDB's own AWS credential chain, which reads the sidecar's credentials file, so
+  renewals reach it with no code here and no key ever enters SQL text.
+  - `addressing_style` is accepted in **both** forms: the top-level key booth-core@330a178 writes,
+    and the nested `s3 =` form booth-core moves to (ADR 0095, sixth amendment). The nested one wins
+    if both are present, since it is the one botocore honors.
+  - `virtual` maps to DuckDB's `URL_STYLE 'vhost'`, `path` to `'path'`; `auto` or unstated leaves
+    DuckDB's default.
+- **Python tasks** get `ctx.s3.duckdb(con)` and `ctx.s3.location()`. Without s3 credentials they
+  raise `PlatformError` with the fix, like `ctx.storage`.
+- **SQL tasks** can't call a helper, so the SQL harness creates the secret itself whenever the task
+  has s3 credentials, and `SELECT * FROM 's3://bucket/key'` just works. If that fails (no lease yet),
+  the query still runs, and the task log says why `s3://` paths won't resolve.
+- **The `httpfs` and `aws` extensions are baked into the image** (`/opt/duckdb-extensions`) and only
+  LOADed. booth-notebooks installs them on first use, but a pipeline task pod has no internet by
+  default, so `INSTALL` would fail in exactly the pods that need it. Measured: both load with
+  `--network none` under the chart's lockdown. The image grows by about 73 MB.
+- **Verified end to end in Integration** against a real MinIO (the platform's pinned test image, ADR
+  0087/0091), with real per-lease MinIO users so a renewal is a real key rotation. A Python task
+  writes Parquet with `ctx.s3`; a SQL task in its own pod, on its own lease, reads it back with no
+  setup.
+
+## Connection lifetime (ADR 0095, fifth amendment) — what a task author can rely on
+
+Ruled 2026-10-06: booth-database's reaper stays strict, so a credential dies at its lease's expiry
+(ADR 0080), and the sidecar contract is corrected to match (contracts/credential-sidecar.md,
+"Connection lifetime"). For a pipeline task using `DATABASE_URL`:
+
+- **A connection ends no later than its lease's expiry** (one hour today). Renewal doesn't extend
+  it; renewal only means the *next* connection gets a fresh lease.
+- **A connection is guaranteed at least the renewal margin** before it can be cut. The chart leaves
+  `credentialSidecar.renewMarginSeconds` at the sidecar's own default on purpose. booth-core is
+  changing the postgres default to half a lease (about 30 minutes) and will re-publish; until that
+  pin lands, the default guarantee is about one minute.
+- **So a task must not hold one database connection across a long idle gap or a multi-hour run, and
+  should reconnect when a connection is dropped**: open a connection per unit of work, or use a pool
+  that recycles connections (for example SQLAlchemy's `pool_pre_ping=True` with `pool_recycle`
+  under 30 minutes).
+- The forced-rotation check here proves the sidecar's side of this: a connection held open survives
+  the sidecar's renewal onto a new lease, and new connections never fail meanwhile. Its stand-in
+  provider doesn't reap, so it doesn't exercise booth-database's expiry itself.
+- A task that genuinely needs one uninterrupted multi-hour connection is the case that would justify
+  revisiting the reaper. It goes back to the coordinator, not worked around here.

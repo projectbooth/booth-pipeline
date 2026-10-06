@@ -49,6 +49,16 @@ def main() -> int:
     import duckdb  # imported after the payload/source are read: a missing dependency fails as this task, not before argv is even parsed
 
     con = duckdb.connect(":memory:")
+    if os.environ.get("AWS_CONFIG_FILE"):
+        # The task has s3 credentials from its pod's sidecar (ADR 0095): point DuckDB at the backend,
+        # so `SELECT * FROM 's3://bucket/key'` just works. A SQL task can't call ctx.s3 itself.
+        from booth_pipeline.runners import _s3
+
+        try:
+            _s3.duckdb_secret(con)
+        except (_s3.S3Unavailable, duckdb.Error) as e:
+            # The query may never touch s3: run it anyway, and say why s3:// paths won't resolve.
+            print("s3 is not set up for this query: " + str(e), file=sys.stderr)
     for key, value in payload["inputs"].items():
         if not isinstance(value, list):
             continue  # not tabular; simply not exposed as a table (see module docstring)

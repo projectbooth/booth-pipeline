@@ -11,7 +11,7 @@
 # For s3 (ADR 0095, third amendment) it also stands in for booth-lakehouse behind core's gateway:
 # GET /modules/lakehouse/api/warehouse returns a warehouse for workspace "acme" and 404 for any other,
 # and an s3 lease is issued only for exactly that warehouse's {backendId, path}. Each s3 lease has fresh
-# keys. Its credential is booth-storage's real shape (keys plus endpoint/region/bucket/keyPrefix/
+# keys (real ones: a pool of MinIO users, see s3-backend.yaml). Its credential is booth-storage's real shape (keys plus endpoint/region/bucket/keyPrefix/
 # pathStyle, internal/credentialbroker/provider.go). The sidecar decodes it strictly, so a shape the
 # pinned sidecar doesn't know fails the test, not silently. S3_CREDENTIAL_SHAPE=keys sends only the
 # keys (what booth-core@eb24bb3 accepted), kept for comparing against an older sidecar.
@@ -35,6 +35,8 @@ data:
     PG_HOST, PG_PORT = os.environ["PG_HOST"], int(os.environ.get("PG_PORT", "5432"))
     LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "30"))
     S3_SHAPE = os.environ.get("S3_CREDENTIAL_SHAPE", "full")
+    S3_USERS = 40  # the MinIO user pool s3-backend.yaml creates
+    s3_next = 0
     WAREHOUSES = {"acme": {"workspace": "acme", "backendId": "minio-ci", "path": "lakehouse/acme",
                            "warehouseName": "acme", "storageRoot": "s3://booth-ci/lakehouse/acme"}}
     leases, lock = [], threading.Lock()
@@ -44,8 +46,13 @@ data:
         if wh is None or scope != {"backendId": wh["backendId"], "path": wh["path"]}:
             return None
         expires = datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)
-        cred = {"accessKeyId": "AKCI" + secrets.token_hex(8).upper(), "secretAccessKey": secrets.token_urlsafe(30),
-                "sessionToken": secrets.token_urlsafe(24)}
+        # Real keys: the next of the MinIO users s3-backend.yaml created (AKCILEASE01..40), so each
+        # lease's keys differ and actually work. No session token: those are plain MinIO users.
+        global s3_next
+        with lock:
+            s3_next += 1
+            n = (s3_next - 1) % S3_USERS + 1
+        cred = {"accessKeyId": f"AKCILEASE{n:02d}", "secretAccessKey": f"booth-ci-lease-secret-{n:02d}"}
         if S3_SHAPE == "full":
             cred.update({"endpoint": "http://s3-backend.booth-storage-ci.svc.cluster.local:9000", "region": "us-east-1",
                          "bucket": "booth-ci", "keyPrefix": wh["path"], "pathStyle": True})

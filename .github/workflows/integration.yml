@@ -247,6 +247,13 @@ jobs:
           none="$(s3task acme none)"; echo "no access: $none"
           test "$(field "$none" credentials_file)" = "None" || { echo "a task without platform access got an s3 sidecar"; exit 1; }
 
+      - name: DuckDB reads and writes the real MinIO through the s3 sidecar, from a Python task (ctx.s3) and a SQL task (no setup) (ADR 0095)
+        # The engine that doesn't read AWS_CONFIG_FILE's endpoint on its own: the helper hands it the
+        # location, the keys come from the sidecar's file. No internet in task pods: the httpfs/aws
+        # extensions are baked into the image.
+        run: |
+          kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - duckdb acme < tests/integration/task_jobs_driver.py
+
       - name: The s3 sidecar renews onto new keys while a task runs, and the file is never seen half-written (ADR 0095)
         run: |
           out="$(kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - s3 acme editor 60 < tests/integration/task_jobs_driver.py)"

@@ -157,6 +157,32 @@ class Catalog:
         )
 
 
+class S3:
+    """ctx.s3: the task's object storage through its pod's credential sidecar (ADR 0095).
+
+    ``ctx.s3.duckdb(con)`` points a DuckDB connection at it (``s3://bucket/key`` then just works),
+    ``ctx.s3.location()`` gives the endpoint/region/addressing style for any other client. boto3
+    needs neither: it reads AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE itself. Keys never pass
+    through here; renewals reach DuckDB on their own. Raises PlatformError with the fix when the task
+    has no s3 credentials."""
+
+    def location(self):
+        from booth_pipeline.runners import _s3
+
+        try:
+            return _s3.location()
+        except _s3.S3Unavailable as e:
+            raise PlatformError(str(e)) from None
+
+    def duckdb(self, con, name="booth_s3"):
+        from booth_pipeline.runners import _s3
+
+        try:
+            return _s3.duckdb_secret(con, name)
+        except _s3.S3Unavailable as e:
+            raise PlatformError(str(e)) from None
+
+
 class Context:
     def __init__(self, payload: dict) -> None:
         self.run_id = payload["runId"]
@@ -172,6 +198,7 @@ class Context:
             self.catalog = Catalog(_Http(access["catalogUrl"], access["workspace"], token_file))
         else:
             self.storage, self.catalog = _NoAccess("storage"), _NoAccess("catalog")
+        self.s3 = S3()
         logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(message)s")
         self.log = logging.getLogger("task." + self.task_key)
 

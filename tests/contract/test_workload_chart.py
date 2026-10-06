@@ -369,3 +369,26 @@ def test_both_sidecars_share_the_token_volume_and_nothing_else():
     assert (pg["name"], s3["name"]) == ("credential-sidecar-postgres", "credential-sidecar-s3")
     assert {m["name"] for m in pg["volumeMounts"]} == {"booth-sidecar"}  # the postgres one can't touch the s3 files
     assert {m["name"] for m in s3["volumeMounts"]} == {"booth-sidecar", "booth-sidecar-s3"}
+
+
+def effective_uid(pod_spec: dict, container: dict):
+    """What the container actually runs as: its own runAsUser, else the pod's."""
+    return container.get("securityContext", {}).get("runAsUser", pod_spec.get("securityContext", {}).get("runAsUser"))
+
+
+def test_the_s3_sidecar_runs_as_the_same_uid_as_the_task():
+    """contracts/credential-sidecar.md: the s3 files are written 0600, owned by the sidecar's uid, so
+    the task can read them only as that same uid. Pinned here so a later chart change (a per-container
+    runAsUser, a different image default) can't silently break the task's access to its credentials."""
+    for values in (BOOTH_STORAGE, (*BOOTH_DB_URL, *BOOTH_STORAGE)):
+        p = pod(task_job(docs(*values)))
+        task_c = p["containers"][0]
+        task_uid = effective_uid(p, task_c)
+        assert task_uid == 65532  # set explicitly: the image default must never be what decides this
+        for sc in p["initContainers"]:
+            assert effective_uid(p, sc) == task_uid, sc["name"]
+
+
+def test_overriding_the_pod_uid_moves_task_and_sidecar_together():
+    p = pod(task_job(docs(*BOOTH_STORAGE, "--set", "podSecurityContext.runAsUser=1234")))
+    assert {effective_uid(p, c) for c in (*p["initContainers"], *p["containers"])} == {1234}
