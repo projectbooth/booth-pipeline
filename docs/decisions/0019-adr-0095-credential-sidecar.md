@@ -5,7 +5,7 @@ Status:
   real digest-pinned sidecar.
 - **The `boothStorage.url` egress rule built.**
 - **s3 mode built (2026-10-05) to ADR 0095's third amendment**, with the scope resolved per task from
-  booth-lakehouse. Since 2026-10-06 the chart pins booth-core@330a178, which accepts booth-storage's
+  booth-lakehouse. Since 2026-10-06 the chart pins booth-core@8f0c6b4, which accepts booth-storage's
   real s3 credential and writes the endpoint/region/addressing-style file. Verified on a real CNI
   (below).
 
@@ -18,8 +18,8 @@ sidecar calls core's broker; with no core there is only the egress rule, as befo
 - **A native sidecar**: an init container with `restartPolicy: Always` (Kubernetes ≥ 1.29). It
   starts before the task and is stopped when the task's container exits. A plain second container
   would keep a Job's pod running after its task ends.
-- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:decd3031…5865` (booth-core@330a178, publish
-  run 37378106842; first pinned at eb24bb3, run 37012736996). The chart refuses a tag, and so does `KubernetesJobRunner` at startup. Its args are
+- **Image**: `ghcr.io/projectbooth/credential-sidecar@sha256:6a0a795e…ce14` (booth-core@8f0c6b4, publish
+  run 37464892322; earlier pins: eb24bb3, run 37012736996; 330a178 `decd3031…5865`, run 37378106842). The chart refuses a tag, and so does `KubernetesJobRunner` at startup. Its args are
   `--kind=postgres --listen=127.0.0.1:5432 --token-file=/var/run/booth-sidecar/token --core-url=…`.
   It is non-root, has a read-only root filesystem and drops all capabilities.
 - **Per task, by `KubernetesJobRunner`**:
@@ -116,7 +116,7 @@ than "keys only". booth-core's planned change (adding the location fields to `S3
 removes this as a side effect. Its tests should use booth-storage's real response shape so this
 can't recur.
 
-**Verified, against the repinned sidecar (booth-core@330a178).** The Integration workflow runs the
+**Verified, against the repinned sidecar (booth-core@8f0c6b4).** The Integration workflow runs the
 real sidecar against a stand-in broker that issues s3 credentials in booth-storage's real shape. It
 shows, on a real CNI:
 - blocked before `boothStorage.url` and reachable after;
@@ -137,8 +137,8 @@ The helper follows booth-notebooks' `booth.s3` (its `docs/decisions/0009`):
   `CREATE SECRET … PROVIDER credential_chain, REFRESH auto` holding **only the location**. The keys
   stay with DuckDB's own AWS credential chain, which reads the sidecar's credentials file, so
   renewals reach it with no code here and no key ever enters SQL text.
-  - `addressing_style` is accepted in **both** forms: the top-level key booth-core@330a178 writes,
-    and the nested `s3 =` form booth-core moves to (ADR 0095, sixth amendment). The nested one wins
+  - `addressing_style` is accepted in **both** forms: nested under `s3 =`, which booth-core@8f0c6b4
+    writes (ADR 0095, sixth amendment), and the top-level key 330a178 wrote. The nested one wins
     if both are present, since it is the one botocore honors.
   - `virtual` maps to DuckDB's `URL_STYLE 'vhost'`, `path` to `'path'`; `auto` or unstated leaves
     DuckDB's default.
@@ -165,9 +165,11 @@ Ruled 2026-10-06: booth-database's reaper stays strict, so a credential dies at 
 - **A connection ends no later than its lease's expiry** (one hour today). Renewal doesn't extend
   it; renewal only means the *next* connection gets a fresh lease.
 - **A connection is guaranteed at least the renewal margin** before it can be cut. The chart leaves
-  `credentialSidecar.renewMarginSeconds` at the sidecar's own default on purpose. booth-core is
-  changing the postgres default to half a lease (about 30 minutes) and will re-publish; until that
-  pin lands, the default guarantee is about one minute.
+  `credentialSidecar.renewMarginSeconds` at 0 on purpose, so the chart never sets
+  `RENEW_MARGIN_SECONDS`. With booth-core@8f0c6b4 (pinned), postgres mode then renews at **half the
+  lease's lifetime**, so a connection is guaranteed about 30 minutes of a one-hour lease. Setting
+  `renewMarginSeconds` replaces that with a fixed margin, which shortens the guarantee: don't, except
+  in tests that need fast rotation (the Integration workflow sets 20s for exactly that).
 - **So a task must not hold one database connection across a long idle gap or a multi-hour run, and
   should reconnect when a connection is dropped**: open a connection per unit of work, or use a pool
   that recycles connections (for example SQLAlchemy's `pool_pre_ping=True` with `pool_recycle`

@@ -2,8 +2,8 @@
 
 DuckDB doesn't read the endpoint from AWS_CONFIG_FILE, so the helper reads the credential sidecar's
 config file and hands DuckDB the location; the keys stay with DuckDB's own credential chain. Both
-forms of addressing_style are accepted: the top-level key booth-core@330a178 writes, and the nested
-`s3 =` form botocore documents (ADR 0095, sixth amendment)."""
+forms of addressing_style are accepted: the nested `s3 =` form botocore documents, which
+booth-core@8f0c6b4 writes (ADR 0095, sixth amendment), and the top-level key 330a178 wrote."""
 
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ NESTED = "[default]\nendpoint_url = https://s3.example.test\nregion = eu-west-1\
 
 
 def test_the_top_level_addressing_style_is_read(tmp_path):
-    """What booth-core@330a178 writes today."""
+    """What booth-core@330a178 wrote; kept working for a sidecar of that age."""
     loc = _s3.location(files(tmp_path, TOP))
     assert loc == _s3.Location("http://minio.storage.svc:9000", "us-east-1", "path")
     assert (loc.host, loc.scheme) == ("minio.storage.svc:9000", "http")
 
 
 def test_the_nested_addressing_style_is_read(tmp_path):
-    """botocore's form, which booth-core moves to (ADR 0095, sixth amendment)."""
+    """botocore's form, which booth-core@8f0c6b4 writes (ADR 0095, sixth amendment)."""
     assert _s3.location(files(tmp_path, NESTED)) == _s3.Location("https://s3.example.test", "eu-west-1", "virtual")
 
 
