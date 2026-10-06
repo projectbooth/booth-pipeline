@@ -238,7 +238,11 @@ jobs:
           python -c 'import json,sys; o=json.loads(sys.argv[1]); c=(o.get("config") or {}).get("default", {})
           assert o["config_written"], ("no endpoint/region file", o)
           assert c.get("endpoint_url")=="http://s3-backend.booth-storage-ci.svc.cluster.local:9000" and c.get("region")=="us-east-1", c
-          assert c.get("addressing_style")=="path", ("addressing_style is not path", c)
+          # Nested under "s3 =", botocore's form (ADR 0095 sixth amendment), and "path" because the
+          # stand-in's credential says pathStyle: true. Never the old top-level key.
+          nested = dict(l.split("=", 1) for l in c.get("s3", "").splitlines() if "=" in l)
+          assert {k.strip(): v.strip() for k, v in nested.items()} == {"addressing_style": "path"}, ("not nested path", c)
+          assert "addressing_style" not in c, ("top-level addressing_style is still written", c)
           print("endpoint/region file:", c)' "$after"
           # A workspace with no warehouse gets no s3 sidecar, exactly like a task without platform access.
           nowh="$(s3task globex editor)"; echo "no warehouse: $nowh"

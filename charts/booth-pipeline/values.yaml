@@ -65,14 +65,18 @@ boothStorage:
   url: ""
 
 # ADR 0095 / contracts/credential-sidecar.md: booth-core's credential sidecar image, PINNED BY DIGEST
-# (the chart refuses a tag). booth-core@330a178, publish run 37378106842: writes the s3 keys AND
-# <credentials-file>.config (endpoint_url, region, addressing_style; ADR 0095 third/fourth amendments).
+# (the chart refuses a tag). booth-core@8f0c6b4, publish run 37464892322: writes the s3 keys AND
+# <credentials-file>.config (endpoint_url, region, and addressing_style nested under "s3 =", from the
+# credential's pathStyle), and renews postgres leases at half their lifetime (ADR 0095 third to sixth
+# amendments).
 credentialSidecar:
-  image: ghcr.io/projectbooth/credential-sidecar@sha256:decd3031f8deeae19a0213f2eef63a7480b1bfce2829834ebb483d16a8875865
+  image: ghcr.io/projectbooth/credential-sidecar@sha256:6a0a795efd27f165e0714beb163d91f5c2feff55cfdc6f287aee979ae02cce14
   # A task with platform access waits up to this long for the sidecar's first lease before it starts
   # anyway (a task that never uses DATABASE_URL must not be blocked by a database outage).
   waitSeconds: 60
-  # 0 = the sidecar's own defaults (contracts/credential-sidecar.md's RENEW_* knobs).
+  # 0 = the sidecar's own defaults (contracts/credential-sidecar.md's RENEW_* knobs). Leave the margin
+  # at 0: postgres then renews at half the lease's lifetime, which is what guarantees a task's open
+  # connection about 30 minutes (ADR 0095 fifth amendment); any fixed margin replaces and shortens it.
   renewMarginSeconds: 0
   renewIntervalSeconds: 0
   resources:

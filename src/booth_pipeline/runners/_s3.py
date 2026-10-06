@@ -83,9 +83,9 @@ def location(env=None) -> Location:
     exists, a config file with no section for the profile means real AWS S3 (the sidecar writes none,
     having no endpoint to set): ``Location(None, None, None)``, the engine's own defaults.
 
-    ``addressing_style`` is accepted both as a top-level key (what booth-core@330a178 writes) and
-    nested under ``s3 =`` (botocore's documented form, which booth-core moves to per ADR 0095's sixth
-    amendment), so the switch needs no change here."""
+    ``addressing_style`` is accepted both nested under ``s3 =`` (botocore's documented form, which
+    booth-core@8f0c6b4 writes, ADR 0095's sixth amendment) and as a top-level key (what 330a178
+    wrote), so a sidecar of either age works."""
     env = os.environ if env is None else env
     conf_path, cred_path = env.get("AWS_CONFIG_FILE", ""), env.get("AWS_SHARED_CREDENTIALS_FILE", "")
     if not conf_path or not cred_path:
