@@ -422,7 +422,7 @@ def duckdb_e2e(workspace: str) -> int:
         return TaskAccess(workspace, f"tok-{workspace}-{uuid.uuid4().hex}", "http://unused", "http://unused", role="editor")
 
     out: dict = {}
-    for name, source, language in (("python", DUCKDB_WRITE, "python"), ("sql", f"SELECT answer, ws FROM '{url}'", "sql")):
+    for name, source, language in (("python", DUCKDB_WRITE, "python"), ("sql", "SELECT answer, ws FROM read_parquet($url)", "sql")):
         lines = Lines()
         i = TaskInvocation(f"ci-{uuid.uuid4().hex[:8]}", f"duckdb_{name}", "transform", 1, source, {"url": url}, {}, 300, access(), language=language)
         try:
