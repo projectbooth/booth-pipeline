@@ -45,6 +45,10 @@ spec:
               value: "8080"
             - name: BOOTH_OIDC_ISSUER_URL
               value: {{ required "oidc.issuerUrl is required: every module verifies tokens itself (core-platform-api.md)" .Values.oidc.issuerUrl | quote }}
+            # ADR 0108: where signing keys are fetched from, instead of the issuer's discovery document.
+            # Empty = discovery. `iss` is still checked against oidc.issuerUrl exactly.
+            - name: BOOTH_OIDC_JWKS_URL
+              value: {{ .Values.oidc.jwksUrl | quote }}
             - name: BOOTH_OIDC_CLIENT_ID
               value: {{ .Values.oidc.clientId | quote }}
             - name: BOOTH_OIDC_REQUIRE_AUDIENCE

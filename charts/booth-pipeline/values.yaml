@@ -14,6 +14,12 @@ oidc:
   # Required: the same OIDC issuer/client every module verifies against independently
   # (core-platform-api.md's defense-in-depth requirement). Left empty by default.
   issuerUrl: ""
+  # ADR 0108: optional. Fetch the IdP's signing keys from this URL directly instead of via the
+  # issuer's discovery document; `iss` is still checked against issuerUrl exactly. The bundled
+  # install sets it to the IdP's in-cluster Service over plain http, so no pod needs to trust the
+  # Ingress certificate. That fetch is unauthenticated: it relies on NetworkPolicy and cluster trust.
+  # Leave empty for an external provider (ordinary discovery).
+  jwksUrl: ""
   clientId: ""
   requireAudience: true
   # The token claim carrying workspace memberships (ADR 0025). Must match booth-core's
