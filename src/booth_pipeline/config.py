@@ -43,6 +43,9 @@ class Config:
     # Identity — the same provider booth-core is configured against (ADR 0004). Every module
     # re-verifies the token itself (core-platform-api.md "Auth enforcement").
     oidc_issuer_url: str = ""
+    # ADR 0108: fetch signing keys from here instead of the issuer's discovery document (the bundled
+    # install's in-cluster IdP Service). `iss` is still checked against oidc_issuer_url. Empty = discovery.
+    oidc_jwks_url: str = ""
     oidc_client_id: str = ""
     oidc_require_audience: bool = True
     oidc_groups_claim: str = "groups"  # must match booth-core's (ADR 0025)
@@ -88,6 +91,7 @@ class Config:
             database_dsn=dsn,
             dev_memory=dev_memory,
             oidc_issuer_url=os.environ.get("BOOTH_OIDC_ISSUER_URL", "").rstrip("/"),
+            oidc_jwks_url=os.environ.get("BOOTH_OIDC_JWKS_URL", ""),
             oidc_client_id=os.environ.get("BOOTH_OIDC_CLIENT_ID", ""),
             oidc_require_audience=_bool("BOOTH_OIDC_REQUIRE_AUDIENCE", True),
             oidc_groups_claim=os.environ.get("BOOTH_OIDC_GROUPS_CLAIM", "") or "groups",
@@ -141,6 +145,8 @@ class Config:
                 "BOOTH_PIPELINE_DATABASE_DSN is required (core provisions it as the "
                 "booth-database-credentials Secret); set BOOTH_PIPELINE_DEV_MEMORY=true for a throwaway local run"
             )
+        if self.oidc_jwks_url and not self.oidc_issuer_url:
+            raise ConfigError("BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty: the issuer is still required to validate `iss`")
         if not self.oidc_issuer_url:
             raise ConfigError("BOOTH_OIDC_ISSUER_URL is required: every module verifies tokens itself")
         if self.oidc_require_audience and not self.oidc_client_id:

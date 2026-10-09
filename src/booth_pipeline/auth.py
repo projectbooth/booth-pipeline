@@ -16,6 +16,7 @@ fails closed the same way. This matters more here than most: a pipeline is code 
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ import httpx
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
 from jwt import PyJWKClient
+
+log = logging.getLogger(__name__)
 
 HEADER_WORKSPACE = "X-Booth-Workspace"
 HEADER_ROLE = "X-Booth-Role"
@@ -61,18 +64,30 @@ class OIDCVerifier:
     Discovery is lazy and retried: the module must come up (and answer its health check) even if
     the identity provider is momentarily unreachable, and start verifying once it is — rather than
     crash-looping at boot on a dependency that has nothing to do with being healthy.
+
+    ``jwks_url`` (ADR 0108, ``oidc.jwksUrl``): when set, discovery is skipped entirely and signing
+    keys are fetched from that URL directly (the bundled install points it at the IdP's in-cluster
+    Service over plain http). ``iss`` is still validated against ``issuer`` exactly; only where the
+    keys come from changes. Empty means discovery, as before.
     """
 
-    def __init__(self, issuer: str, client_id: str, require_audience: bool, groups_claim: str) -> None:
+    def __init__(self, issuer: str, client_id: str, require_audience: bool, groups_claim: str, jwks_url: str = "") -> None:
+        if jwks_url and not issuer:
+            raise ValueError("oidc.jwksUrl is set but oidc.issuerUrl is empty: the issuer is still required to validate `iss`")
         self._issuer = issuer.rstrip("/")
         self._client_id = client_id
         self._require_audience = require_audience
         self._groups_claim = groups_claim or "groups"
+        self._jwks_url = jwks_url
         self._jwks: PyJWKClient | None = None
         self._lock = threading.Lock()
+        keys_from = jwks_url or f"discovery ({self._issuer}/.well-known/openid-configuration)"
+        log.info("oidc: verifying tokens with issuer=%s keys-from=%s", self._issuer, keys_from)
 
     def _client(self) -> PyJWKClient:
         with self._lock:
+            if self._jwks is None and self._jwks_url:
+                self._jwks = PyJWKClient(self._jwks_url, cache_keys=True, lifespan=300)
             if self._jwks is None:
                 resp = httpx.get(f"{self._issuer}/.well-known/openid-configuration", timeout=10)
                 resp.raise_for_status()

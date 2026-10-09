@@ -103,6 +103,17 @@ def test_the_role_is_rederived_from_the_token_so_the_groups_claim_reaches_the_po
     assert env2["BOOTH_OIDC_GROUPS_CLAIM"] == "memberships"
 
 
+def test_the_key_fetch_override_passes_through_and_defaults_to_discovery(deployment):
+    """ADR 0108: oidc.jwksUrl reaches the pod as BOOTH_OIDC_JWKS_URL; empty (discovery) by default."""
+    env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["BOOTH_OIDC_JWKS_URL"] == ""
+    certs = "http://keycloak.booth-system.svc:8080/realms/booth/protocol/openid-connect/certs"
+    other = yaml.safe_load(render("templates/deployment.yaml", "--set", f"oidc.jwksUrl={certs}"))
+    env2 = {e["name"]: e.get("value") for e in other["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env2["BOOTH_OIDC_JWKS_URL"] == certs
+    assert env2["BOOTH_OIDC_ISSUER_URL"] == env["BOOTH_OIDC_ISSUER_URL"]  # the issuer it is checked against is unchanged
+
+
 def test_kubernetes_api_access_is_namespaced_and_only_the_api_pod_has_a_token():
     """ADR 0096: the API/scheduler pod creates one Job per task, so it — and only it — gets a
     service-account token, bound to a namespace Role (tests/contract/test_workload_chart.py pins its

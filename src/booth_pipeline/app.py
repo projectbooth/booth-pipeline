@@ -164,7 +164,7 @@ def create_app(
     app.state.store = store
     app.state.service = service
     app.state.scheduler = scheduler
-    app.state.verifier = verifier or OIDCVerifier(cfg.oidc_issuer_url, cfg.oidc_client_id, cfg.oidc_require_audience, cfg.oidc_groups_claim)
+    app.state.verifier = verifier or OIDCVerifier(cfg.oidc_issuer_url, cfg.oidc_client_id, cfg.oidc_require_audience, cfg.oidc_groups_claim, cfg.oidc_jwks_url)
 
     @app.middleware("http")
     async def limit_body(request: Request, call_next):

@@ -48,3 +48,15 @@ def test_bad_numbers_and_unsafe_timing_are_rejected(monkeypatch):
 
 def test_runner_env_passthrough_is_a_trimmed_list(monkeypatch):
     assert load(monkeypatch, BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH=" HTTPS_PROXY, NO_PROXY ,").runner_env_passthrough == ("HTTPS_PROXY", "NO_PROXY")
+
+
+def test_jwks_url_is_read_and_defaults_to_empty(monkeypatch):
+    """ADR 0108: optional; empty means discovery, exactly as before."""
+    assert load(monkeypatch).oidc_jwks_url == ""
+    certs = "http://keycloak.booth.svc:8080/realms/b/protocol/openid-connect/certs"
+    assert load(monkeypatch, BOOTH_OIDC_JWKS_URL=certs).oidc_jwks_url == certs
+
+
+def test_jwks_url_without_an_issuer_is_a_startup_error():
+    with pytest.raises(ConfigError, match="BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty"):
+        Config(dev_memory=True, oidc_client_id="c", oidc_jwks_url="http://k/certs").validate()

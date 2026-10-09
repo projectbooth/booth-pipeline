@@ -117,6 +117,17 @@ Local run: `BOOTH_PIPELINE_DEV_MEMORY=true BOOTH_OIDC_ISSUER_URL=… BOOTH_OIDC_
 (in-memory, vanishes on exit). `web`'s `npm run dev` is a harness: paste a token (`hack/dev-keycloak.sh token bob`); its
 Vite proxy strips the gateway prefix and turns `X-Workspace` into `X-Booth-Workspace`, as the real gateway does.
 
+## Operations
+
+**Where token-signing keys come from (`oidc.jwksUrl`, env `BOOTH_OIDC_JWKS_URL`; ADR 0108).** Empty (the
+default, and the right setting for any external identity provider), the module finds the provider's keys through its
+discovery document at `oidc.issuerUrl`. Set, it skips discovery and fetches keys directly from that URL; a token's
+`iss` is still checked exactly against `oidc.issuerUrl`, and setting it without `oidc.issuerUrl` stops the module at
+startup. The startup log names the issuer and where keys come from. The bundled install sets it to Keycloak's
+in-cluster Service over plain http, so no pod has to reach the Ingress or trust its certificate. That fetch is
+unauthenticated and unencrypted: it trusts the cluster network, so it relies on NetworkPolicy keeping anything else
+from answering at that address. Don't point it outside the cluster.
+
 ## Wiring into booth-design
 
 Add `@projectbooth/pipeline-ui`, import `…/dist/style.css`, and `registerNativeModule("pipeline", PipelineApp)`. The

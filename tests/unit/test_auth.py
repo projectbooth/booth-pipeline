@@ -160,3 +160,86 @@ def test_effective_role_never_exceeds_either_input():
     assert effective_role("viewer", "owner") == "viewer"
     assert effective_role("owner", "viewer") == "viewer"
     assert effective_role("bogus", "owner") == ""
+
+
+# ---- ADR 0108: oidc.jwksUrl, keys fetched directly instead of via discovery -------------------
+
+# An issuer that can't be reached at all: https, and the reserved .invalid TLD. Any discovery
+# attempt would fail, so a passing verification proves discovery was skipped.
+UNREACHABLE_ISSUER = "https://keycloak.booth.invalid/realms/booth"
+
+
+class KeysOnly(BaseHTTPRequestHandler):
+    """A plain-http JWKS endpoint, like Keycloak's in-cluster Service. Records every path asked for."""
+
+    seen: list[str] = []
+
+    def do_GET(self):  # noqa: N802
+        KeysOnly.seen.append(self.path)
+        if self.path != "/realms/booth/protocol/openid-connect/certs":
+            self.send_response(404)
+            self.end_headers()
+            return
+        jwk = json.loads(RSAAlgorithm.to_jwk(KEY.public_key()))
+        data = json.dumps({"keys": [{**jwk, "kid": KID, "use": "sig", "alg": "RS256"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_):
+        pass
+
+
+@pytest.fixture()
+def jwks_url():
+    KeysOnly.seen = []
+    srv = HTTPServer(("127.0.0.1", 0), KeysOnly)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}/realms/booth/protocol/openid-connect/certs"
+    srv.shutdown()
+
+
+def test_with_jwks_url_a_valid_token_verifies_without_reaching_the_issuer(jwks_url):
+    v = OIDCVerifier(UNREACHABLE_ISSUER, "booth-pipeline", True, "groups", jwks_url=jwks_url)
+    c = v.verify(token(UNREACHABLE_ISSUER))
+    assert c.subject == "u1"
+
+
+def test_with_jwks_url_iss_is_still_checked_exactly(jwks_url):
+    v = OIDCVerifier(UNREACHABLE_ISSUER, "booth-pipeline", True, "groups", jwks_url=jwks_url)
+    for wrong in ("https://evil.example/realms/booth", UNREACHABLE_ISSUER + "x", "http://keycloak.booth.invalid/realms/booth"):
+        with pytest.raises(AuthError):
+            v.verify(token(UNREACHABLE_ISSUER, iss=wrong))  # same key, wrong iss
+
+
+def test_with_jwks_url_discovery_is_never_contacted(jwks_url):
+    v = OIDCVerifier(UNREACHABLE_ISSUER, "booth-pipeline", True, "groups", jwks_url=jwks_url)
+    v.verify(token(UNREACHABLE_ISSUER))
+    assert KeysOnly.seen and all(p == "/realms/booth/protocol/openid-connect/certs" for p in KeysOnly.seen)
+    assert not [p for p in KeysOnly.seen if "well-known" in p]
+
+
+def test_jwks_url_without_an_issuer_is_refused():
+    with pytest.raises(ValueError, match="oidc.issuerUrl is empty"):
+        OIDCVerifier("", "booth-pipeline", True, "groups", jwks_url="http://keycloak.internal/certs")
+
+
+def test_startup_logs_the_issuer_and_where_keys_come_from(jwks_url, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="booth_pipeline.auth"):
+        OIDCVerifier(UNREACHABLE_ISSUER, "c", False, "groups", jwks_url=jwks_url)
+        OIDCVerifier("http://idp.test/realms/booth", "c", False, "groups")
+    lines = [r.getMessage() for r in caplog.records if r.name == "booth_pipeline.auth"]
+    assert lines == [
+        f"oidc: verifying tokens with issuer={UNREACHABLE_ISSUER} keys-from={jwks_url}",
+        "oidc: verifying tokens with issuer=http://idp.test/realms/booth keys-from=discovery (http://idp.test/realms/booth/.well-known/openid-configuration)",
+    ]
+
+
+def test_without_jwks_url_discovery_is_used_as_before(issuer):
+    """Unset is today's behaviour: keys found through the issuer's discovery document."""
+    assert verifier(issuer)._jwks_url == ""
+    verifier(issuer).verify(token(issuer))
