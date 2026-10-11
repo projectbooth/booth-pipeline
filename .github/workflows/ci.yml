@@ -46,6 +46,17 @@ jobs:
           eval "$(sh hack/test-env.sh)"
           pytest tests/unit tests/contract
 
+      - name: The release's chart step still works (ADR 0111)
+        # The same `helm package` release.yml runs on a tag, then lint and render the packaged .tgz,
+        # so a change that breaks it fails here instead of on the next release. oidc.issuerUrl is
+        # the one value the chart requires (every module verifies tokens itself).
+        run: |
+          helm package charts/booth-pipeline --version 0.0.0-ci --app-version 0.0.0-ci --destination dist
+          helm lint dist/booth-pipeline-0.0.0-ci.tgz --set oidc.issuerUrl=https://idp.example/realms/booth
+          helm template booth-pipeline dist/booth-pipeline-0.0.0-ci.tgz --set oidc.issuerUrl=https://idp.example/realms/booth \
+            | grep -q 'image: "ghcr.io/projectbooth/booth-pipeline:0.0.0-ci"' \
+            || { echo "the packaged chart does not pin its image to its appVersion"; exit 1; }
+
       - name: Database logs on failure
         if: failure()
         run: docker compose -f hack/docker-compose.test.yml logs --tail=100

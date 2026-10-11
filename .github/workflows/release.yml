@@ -1,38 +1,71 @@
 name: Release
 
-# Tagging vX.Y.Z publishes the container image and the Helm chart (as an OCI artifact, the form
-# booth-core's install API resolves — ADR 0028), so booth-module-store can point at a real chart.
+# ADR 0111: pushing a vX.Y.Z tag publishes the container image and the Helm chart at that version.
+# The chart goes to a GitHub release (for offline use) and to ghcr as an OCI artifact,
+# oci://ghcr.io/projectbooth/charts/booth-pipeline, the only form booth-core's install API resolves
+# (ADR 0028) and what an install pins to. Modelled on booth-core's release workflow. One image: the
+# UI ships separately as the @projectbooth/pipeline-ui npm package (publish.yml, pipeline-ui-v* tags).
 on:
   push:
     tags:
       - "v*.*.*"
 
 permissions:
-  contents: read
-  packages: write
+  contents: write # the GitHub release
+  packages: write # the image and the OCI chart
 
 jobs:
-  release:
+  image:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Version from the tag
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/projectbooth/booth-pipeline:${{ env.VERSION }}
+            ghcr.io/projectbooth/booth-pipeline:${{ steps.version.outputs.version }}
+            ghcr.io/projectbooth/booth-pipeline:latest
+
+  chart:
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: azure/setup-helm@v4
-      - name: Package and push the chart
+
+      # The chart's image.tag defaults to its appVersion, so the packaged chart pulls exactly the
+      # image the job above pushed.
+      - name: Package chart at the release version
         run: |
-          helm package charts/booth-pipeline --version "$VERSION" --app-version "$VERSION"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm push "booth-pipeline-${VERSION}.tgz" oci://ghcr.io/projectbooth/charts
+          helm package charts/booth-pipeline \
+            --version "${{ needs.image.outputs.version }}" \
+            --app-version "${{ needs.image.outputs.version }}" \
+            --destination dist
+
+      - name: Attach chart to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz
+          generate_release_notes: true
+
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart as an OCI artifact (ADR 0111)
+        run: helm push dist/booth-pipeline-${{ needs.image.outputs.version }}.tgz oci://ghcr.io/projectbooth/charts
