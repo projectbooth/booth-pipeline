@@ -17,4 +17,4 @@ home: https://github.com/projectbooth/booth-pipeline
 # iframeIssuerUrl.
 annotations:
   booth.projectbooth.io/identity-keys: |
-    {"issuerUrl":"oidc.issuerUrl","clientId":"oidc.clientId","jwksUrl":"oidc.jwksUrl","groupsClaim":"oidc.groupsClaim"}
+    {"issuerUrl":"oidc.issuerUrl","clientId":"oidc.clientId","jwksUrl":"oidc.jwksUrl","groupsClaim":"oidc.groupsClaim","coreUrl":"core.url"}

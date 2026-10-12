@@ -164,7 +164,7 @@ def test_helm_lint_is_clean():
     assert out.returncode == 0, out.stdout + out.stderr
 
 
-SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl"}
+SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl", "coreUrl"}
 
 
 def test_identity_keys_annotation_maps_to_real_values_paths():
@@ -193,4 +193,13 @@ def test_identity_keys_annotation_maps_to_real_values_paths():
         "clientId": "oidc.clientId",
         "jwksUrl": "oidc.jwksUrl",
         "groupsClaim": "oidc.groupsClaim",
+        "coreUrl": "core.url",  # ADR 0113 amendment 1
     }
+
+
+def test_the_core_url_core_supplies_reaches_the_deployment():
+    """ADR 0113 amendment 1: core.url (the annotation's coreUrl) is the address the module calls core on."""
+    stub = "http://stub-core.elsewhere.svc:9999"
+    d = yaml.safe_load(render("templates/deployment.yaml", "--set", f"core.url={stub}"))
+    env = {e["name"]: e.get("value") for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["BOOTH_CORE_URL"] == stub
