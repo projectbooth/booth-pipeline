@@ -7,6 +7,7 @@ BOOTH_TEST_REQUIRE_EMULATORS=1 so a missing helm FAILS the build instead of skip
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -161,3 +162,35 @@ def test_runner_env_passthrough_is_opt_in_and_empty_by_default(deployment):
 def test_helm_lint_is_clean():
     out = helm("lint", str(CHART), *REQUIRED)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+SHARED_IDENTITY_KEYS = {"issuerUrl", "clientId", "jwksUrl", "workloadIssuerUrl", "groupsClaim", "iframeIssuerUrl"}
+
+
+def test_identity_keys_annotation_maps_to_real_values_paths():
+    """ADR 0113 / module-manifest.md "Chart annotation: identity keys": valid JSON, only shared
+    setting names, and every mapped path has a default in values.yaml, or core's install-time merge
+    (and a plain CLI install) would silently do nothing for a typo'd path."""
+    chart = yaml.safe_load((CHART / "Chart.yaml").read_text())
+    raw = (chart.get("annotations") or {}).get("booth.projectbooth.io/identity-keys")
+    assert raw, "Chart.yaml is missing the booth.projectbooth.io/identity-keys annotation (ADR 0113)"
+    try:
+        mapping = json.loads(raw)
+    except json.JSONDecodeError as e:
+        pytest.fail(f"booth.projectbooth.io/identity-keys is not valid JSON: {e}\nvalue: {raw}")
+    assert isinstance(mapping, dict) and mapping, "identity-keys must be a non-empty JSON object"
+
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    for key, path in mapping.items():
+        assert key in SHARED_IDENTITY_KEYS, f"unknown shared setting {key!r}"
+        node = values
+        for part in path.split("."):
+            assert isinstance(node, dict) and part in node, f"{key!r} maps to {path!r}, which has no default in values.yaml"
+            node = node[part]
+
+    assert mapping == {
+        "issuerUrl": "oidc.issuerUrl",
+        "clientId": "oidc.clientId",
+        "jwksUrl": "oidc.jwksUrl",
+        "groupsClaim": "oidc.groupsClaim",
+    }
