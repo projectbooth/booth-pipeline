@@ -103,8 +103,17 @@ def build_store(cfg: Config) -> Store:
 
         log.warning("BOOTH_PIPELINE_DEV_MEMORY is set: state lives in memory and vanishes on exit")
         return MemoryStore()
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    from .store import dbwait
     from .store.postgres import PostgresStore
 
+    # ARCHITECTURE.md item 66 (c): a new pod's first connections can be refused for a few seconds.
+    # Wait for one real connection (bounded, logged) before the pool opens and migrations run.
+    info = conninfo_to_dict(cfg.database_dsn)
+    where = f"connecting to PostgreSQL at {info.get('host', '?')}:{info.get('port', 5432)}"
+    dbwait.retry(where, lambda: psycopg.connect(cfg.database_dsn, connect_timeout=5).close())
     store = PostgresStore(cfg.database_dsn)
     store.migrate()
     return store
