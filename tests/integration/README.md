@@ -11,7 +11,10 @@ It uses a *vendored copy* of booth-core's `BoothModule` CRD and a stand-in Postg
 pinned `booth-core`, so it proves the chart deploys, registers the right fields (checked on the live resource, since a
 CRD that doesn't know a field prunes it), serves `/healthz` and refuses unauthenticated calls. It then runs real
 task Jobs (ADR 0096) from inside the API pod with **`task_jobs_driver.py`** — the API pod's own token, Role and the
-chart's Job template, on a CNI that enforces the task NetworkPolicy — to prove the isolation property (two concurrent
+chart's Job template, on Calico (`cni/`, digest-pinned: kind's default kindnet does not reliably enforce egress) — to prove the isolation property (two concurrent
 tasks from different workspaces cannot reach each other's token, Secret, pod or logs), that finished tasks leave nothing
-behind, the ADR 0092 booth-database opt-in, and to measure task-pod cold start (written to the job summary). It does
+behind, the ADR 0092 booth-database opt-in, and to measure task-pod cold start (written to the job summary). **`egress.sh`** proves the task pods' egress policy (ADR 0057) from inside real task pods: every
+denial is reachable with the policy deleted, blocked while it is applied, and reachable once it is deleted again, on
+the same address and port, in the default closed mode and with `allowInternet`, including a LAN host in each private
+range (`cni/lan-targets.sh`). It does
 **not** prove core reconciles the module or that the shell mounts the UI: that is `booth-e2e`.

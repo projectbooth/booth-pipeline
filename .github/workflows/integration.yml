@@ -23,11 +23,28 @@ permissions:
 jobs:
   kind-deploy:
     runs-on: ubuntu-24.04
+    env:
+      # kind and its node image for the Calico cluster, pinned as booth-spark and booth-streamlit pin them.
+      KIND_VERSION: v0.33.0
+      KIND_NODE_IMAGE: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
     steps:
       - uses: actions/checkout@v4
+      # Calico, not kind's default CNI: kindnet does not reliably enforce egress NetworkPolicy
+      # (ARCHITECTURE.md item 60), and the task pods' egress policy is this module's security boundary
+      # (ADR 0057/0096). Same pins as booth-streamlit (tests/integration/cni/).
       - uses: helm/kind-action@v1
         with:
+          version: ${{ env.KIND_VERSION }}
+          node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: booth-pipeline-ci
+          config: tests/integration/cni/kind-calico.yaml
+
+      - name: Calico (pinned manifest and image digests), for NetworkPolicy egress enforcement
+        run: tests/integration/cni/calico.sh
+
+      - name: LAN hosts for egress.sh (one answering address per private range, on the kind host)
+        run: tests/integration/cni/lan-targets.sh booth-pipeline-ci
+
       - uses: azure/setup-helm@v4
 
       - name: Build and load the image
@@ -122,6 +139,12 @@ jobs:
           bash hack/incluster-curl.sh booth-pipeline -s --max-time 5 -o /dev/null -w 'status=%{http_code}' -X POST "http://$ip:8080/v1/run" \
             | grep -q 'status=000' || { echo "a pod that is not the API reached a task pod"; exit 1; }
           wait
+
+      - name: Task pod egress is enforced, each denial works-blocked-works on the same target, closed and with allowInternet (ADR 0057, item 60)
+        # From real task pods: this module's database, the API pod, the Kubernetes API, the kubelet,
+        # the internet and a LAN host per private range, each reachable with the task policy deleted,
+        # blocked while it is applied, reachable once it is deleted again. See the script's header.
+        run: bash tests/integration/egress.sh .
 
       - name: Finished tasks leave no Job, pod or Secret behind
         run: |
@@ -268,5 +291,6 @@ jobs:
         if: failure()
         run: |
           kubectl -n booth-pipeline get all,jobs,secrets,networkpolicies
+          kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
           kubectl -n booth-pipeline logs deployment/booth-pipeline --tail=200 || true
           kubectl -n booth-pipeline describe pods -l app.kubernetes.io/component=task || true
