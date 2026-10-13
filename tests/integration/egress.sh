@@ -70,23 +70,20 @@ expect() { # RESULT-JSON REGEX PHASE NAME...: each named verdict must match
   done
 }
 
-policy_save() {
-  kubectl -n "$ns" get networkpolicy "$np" -o json | python3 -c '
-import json, sys
-o = json.load(sys.stdin); m = o["metadata"]
-keep = {k: m[k] for k in ("name", "namespace", "labels", "annotations") if k in m}
-keep.get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
-print(json.dumps({"apiVersion": o["apiVersion"], "kind": o["kind"], "metadata": keep, "spec": o["spec"]}))' >/tmp/task-np.json
-}
-# Calico programs a policy change within about a second; each probe is a new task pod created after
-# the change, and the wait makes that margin explicit rather than retrying a verdict.
+# Applied by the chart itself (helm re-creates the deleted object), so the policy under test is exactly
+# what the chart renders and helm keeps ownership of it. Calico programs a policy change within about a
+# second; each probe is a new task pod created after the change, and the wait makes that margin
+# explicit rather than retrying a verdict.
 policy_off() { kubectl -n "$ns" delete networkpolicy "$np" --wait=true >/dev/null; sleep 5; echo "(task policy deleted)"; }
-policy_on() { kubectl -n "$ns" apply -f /tmp/task-np.json >/dev/null; sleep 5; echo "(task policy applied)"; }
+policy_on() {
+  helm upgrade booth-pipeline "$repo/charts/booth-pipeline" --namespace "$ns" --reuse-values --wait --timeout 5m >/dev/null
+  kubectl -n "$ns" get networkpolicy "$np" >/dev/null || fail "helm did not re-create $np"
+  sleep 5; echo "(task policy applied by helm)"
+}
 
 sequence() { # MODE "DENIED..." "ALLOWED...": off -> on -> off on the same targets, then the policy restored
   local mode=$1 denied=$2 allowed=$3 all r tl
   all="$denied $allowed"
-  policy_save
   tl=$(targets) || exit 1
   read -r -a t <<<"$tl"
   echo "targets: ${t[*]}"
