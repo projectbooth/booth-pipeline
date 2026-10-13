@@ -14,6 +14,8 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   (3) a direct connection to the other task's pod on its runner port.
 * ``coldstart N`` — N sequential trivial tasks; reports Job-created -> pod-Ready latency.
 * ``probe HOST:PORT ...`` — a task that tries a TCP connect to each address; reports which connected.
+* ``egress NAME=HOST:PORT ...`` — the same, but reports HOW each attempt ended (``open``, ``timeout``,
+  ``refused`` or ``error:<Class>``) plus whether DNS resolves, for tests/integration/egress.sh.
 * ``sleep N`` — one task that just sleeps N seconds (a live task pod to aim at).
 * ``refresh`` — how long a refreshed platform token takes to reach a running task.
 * ``db WORKSPACE ROLE|none`` — a task's view of the database: DATABASE_URL, what it can reach, and a
@@ -271,6 +273,38 @@ def probe(addrs: list[str]) -> int:
     return 0
 
 
+EGRESS = r'''
+import socket
+from concurrent.futures import ThreadPoolExecutor
+def run(ctx):
+    def attempt(addr):
+        host, port = addr.rsplit(":", 1)
+        try:
+            socket.create_connection((host, int(port)), timeout=ctx.params["timeout"]).close()
+            return "open"
+        except (TimeoutError, socket.timeout):
+            return "timeout"
+        except ConnectionRefusedError:
+            return "refused"
+        except OSError as e:
+            return f"error:{e.__class__.__name__}:{e.errno}"
+    targets = ctx.params["targets"]
+    with ThreadPoolExecutor(len(targets)) as pool:
+        out = dict(zip(targets, pool.map(attempt, targets.values())))
+    try:
+        out["dns"] = "resolves" if socket.gethostbyname("kubernetes.default.svc.cluster.local") else "no"
+    except OSError as e:
+        out["dns"] = f"error:{e.__class__.__name__}"
+    return out
+'''
+
+
+def egress(pairs: list[str]) -> int:
+    targets = dict(p.split("=", 1) for p in pairs)
+    print(json.dumps(runner(max_concurrent=1).run(inv(EGRESS, "egress", {"targets": targets, "timeout": 5}), Lines(), Cancellation())))
+    return 0
+
+
 DB_TASK = r'''
 import os, socket
 def run(ctx):
@@ -462,6 +496,8 @@ def main() -> int:
         return s3(args[0], args[1], int(args[2]) if len(args) > 2 else 0)
     if mode == "probe":
         return probe(args)
+    if mode == "egress":
+        return egress(args)
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")
 
 
