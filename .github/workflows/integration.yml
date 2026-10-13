@@ -182,6 +182,13 @@ jobs:
           kubectl -n booth-pipeline exec deploy/booth-pipeline -- \
             python -c 'import socket; socket.create_connection(("postgres.booth-pipeline.svc.cluster.local", 5432), timeout=5)' \
             || { echo "control failed: the API pod cannot reach its own database"; exit 1; }
+          # Item 60: the same targets from a task pod with the task policy deleted must connect, so the
+          # "false" below is the policy (then helm re-applies it, as the chart renders it).
+          kubectl -n booth-pipeline delete networkpolicy booth-pipeline-task --wait=true; sleep 5
+          open="$(probe)"; echo "no policy: $open"
+          test "$open" = "{\"$bdb\": true, \"$own\": true}" || { echo "positive control failed: a task pod with no policy could not reach both databases"; exit 1; }
+          helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values --wait --timeout 5m
+          kubectl -n booth-pipeline get networkpolicy booth-pipeline-task >/dev/null; sleep 5
           before="$(probe)"; echo "before: $before"
           test "$before" = "{\"$bdb\": false, \"$own\": false}" || { echo "a task reached a database before opting in"; exit 1; }
           helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values \
@@ -237,6 +244,14 @@ jobs:
           kubectl -n booth-storage-ci rollout status deployment/s3-backend --timeout=180s
           s3task() { kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - s3 "$@" < tests/integration/task_jobs_driver.py; }
           field() { python -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2]))' "$1" "$2"; }
+          # Item 60: the backend from a task pod with the task policy deleted must connect, so
+          # backend_reachable=False below is the policy (then helm re-applies it).
+          s3be=s3-backend.booth-storage-ci.svc.cluster.local:9000
+          kubectl -n booth-pipeline delete networkpolicy booth-pipeline-task --wait=true; sleep 5
+          open="$(kubectl -n booth-pipeline exec -i deploy/booth-pipeline -- python - probe "$s3be" < tests/integration/task_jobs_driver.py)"; echo "no policy: $open"
+          test "$open" = "{\"$s3be\": true}" || { echo "positive control failed: a task pod with no policy could not reach the s3 backend"; exit 1; }
+          helm upgrade booth-pipeline charts/booth-pipeline --namespace booth-pipeline --reuse-values --wait --timeout 5m
+          kubectl -n booth-pipeline get networkpolicy booth-pipeline-task >/dev/null; sleep 5
           before="$(s3task acme editor)"; echo "before: $before"
           test "$(field "$before" credentials_file)" = "None" || { echo "a task had s3 credentials before boothStorage.url was set"; exit 1; }
           test "$(field "$before" backend_reachable)" = "False" || { echo "the s3 backend was reachable before opting in"; exit 1; }
