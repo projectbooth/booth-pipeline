@@ -198,7 +198,9 @@ def test_the_network_policy_selects_exactly_the_pods_the_job_template_makes(char
 def test_internet_egress_is_opt_in_and_never_covers_private_ranges():
     np = by_kind(docs("--set", "runner.networkPolicy.egress.allowInternet=true"), "NetworkPolicy", "-task")
     (blk,) = [t["ipBlock"] for r in np["spec"]["egress"] for t in r.get("to", []) if "ipBlock" in t]
-    assert blk["cidr"] == "0.0.0.0/0" and {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} <= set(blk["except"])
+    assert blk["cidr"] == "0.0.0.0/0"
+    # RFC 1918, shared/CGNAT (100.64.0.0/10) and link-local/metadata, as streamlit, notebooks and spark exclude.
+    assert set(blk["except"]) == {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"}
 
 
 BOOTH_DB_URL = ("--set", "boothDatabase.url=booth-database-postgres.booth-database.svc:5432")

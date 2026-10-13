@@ -83,10 +83,12 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- end }}
     {{- if .Values.runner.networkPolicy.egress.allowInternet }}
-    # Opt-in: tasks may reach the public internet (never the private ranges, so still not the database).
+    # Opt-in: tasks may reach the public internet, never the private (RFC 1918), shared/CGNAT
+    # (100.64.0.0/10, e.g. Tailscale) or link-local and metadata ranges, so still not the database
+    # or the LAN. The same exclusions as booth-streamlit, booth-notebooks and booth-spark.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
     {{- end }}
 {{- end }}

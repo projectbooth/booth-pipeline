@@ -125,7 +125,8 @@ runner:
       # booth-core's gateway (the rule above, ADR 0059). Only needed if you point the runner at modules
       # directly with BOOTH_PIPELINE_STORAGE_URL / _CATALOG_URL.
       extra: []
-      # Tasks may reach the public internet (never private ranges). Off unless you need it.
+      # Tasks may reach the public internet, never 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+      # 100.64.0.0/10 (CGNAT) or 169.254.0.0/16. Off unless you need it.
       allowInternet: false
 
 # ADR 0056/0058: let tasks that opt in call booth-storage / booth-catalog as their run. Core mints

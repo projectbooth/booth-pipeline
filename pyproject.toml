@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "booth-pipeline"
-version = "0.1.0"
+version = "0.1.4"
 description = "Project Booth's pipeline module: a graphical DAG builder for Tasks (standalone, independently versioned units of code) referenced by Pipelines, backed by Dagster, with a base runner that needs no other module."
 requires-python = ">=3.11,<3.15"
 dependencies = [
