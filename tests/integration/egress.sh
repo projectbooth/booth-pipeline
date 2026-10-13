@@ -14,14 +14,12 @@
 #   closed (the default: allowInternet off; no core.url, boothDatabase.url or boothStorage.url here):
 #     denied: this module's own PostgreSQL, the API pod, the Kubernetes API (Service ClusterIP), the
 #     node's kubelet, the internet, and a LAN host in each of 10.0.0.0/8, 172.16.0.0/12,
-#     192.168.0.0/16 and the metadata address 169.254.169.254 (cni/lan-targets.sh makes each answer);
+#     192.168.0.0/16, 100.64.0.0/10 (CGNAT) and the metadata address 169.254.169.254
+#     (cni/lan-targets.sh makes each answer);
 #     allowed: DNS.
 #   allowInternet=true:
 #     denied: everything above except the internet; allowed: the internet and a LAN-path control
 #     address outside every excluded range (it reaches the same host listener the LAN hosts do).
-#
-# 100.64.0.0/10 (CGNAT) is probed and reported, not asserted: the chart's allowInternet rule does
-# not exclude it, and no ADR says it must.
 #
 #   egress.sh REPO-ROOT
 set -euo pipefail
@@ -92,7 +90,6 @@ sequence() { # MODE "DENIED..." "ALLOWED...": off -> on -> off on the same targe
   r=$(probe "${t[@]}"); echo "no policy: $r"
   # shellcheck disable=SC2086
   expect "$r" '^open$' "$mode, policy deleted (positive control)" $all
-  expect "$r" '.' "$mode, policy deleted (reported only)" lan-cgnat
 
   policy_on
   r=$(probe "${t[@]}"); echo "policy: $r"
@@ -101,7 +98,6 @@ sequence() { # MODE "DENIED..." "ALLOWED...": off -> on -> off on the same targe
   # shellcheck disable=SC2086
   [ -z "$allowed" ] || expect "$r" '^open$' "$mode, policy applied: allowed" $allowed
   expect "$r" '^resolves$' "$mode, policy applied: allowed" dns
-  expect "$r" '.' "$mode, policy applied (reported only)" lan-cgnat
 
   policy_off
   r=$(probe "${t[@]}"); echo "no policy again: $r"
@@ -112,7 +108,7 @@ sequence() { # MODE "DENIED..." "ALLOWED...": off -> on -> off on the same targe
   [ "$ok" = 1 ] || fail "$mode: see the FAIL lines above"
 }
 
-lan="lan-10 lan-172 lan-192 lan-metadata"
+lan="lan-10 lan-172 lan-192 lan-cgnat lan-metadata"
 
 step "closed (allowInternet off, the default): every destination but DNS is blocked, each with works-blocked-works"
 grep -q "ipBlock" <<<"$(kubectl -n "$ns" get networkpolicy "$np" -o yaml)" && fail "the default task policy has an ipBlock rule"
