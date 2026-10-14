@@ -483,6 +483,8 @@ Where the build differs from the proposal above, and details it didn't spell out
   (`runner.pip.egress` set), `internet` (`allowInternet`), `extra` (`egress.extra` non-empty; the chart can't tell
   whether it covers the index, so it doesn't fail fast), `unrestricted` (`networkPolicy.enabled=false`), or empty.
   `GET /api/config` reports `pip: {available, reason | route}`; local development (no task Jobs) reports unavailable.
+  Because the route is in the API pod's environment, changing `allowInternet`, `runner.pip.egress` or `egress.extra`
+  in a way that changes the route now restarts the API pod (a running task's Job is unaffected).
 - **Install output** appears in the task's log as `system` lines prefixed `pip: `, after `installing N Python
   requirement(s) before the task starts: …` and followed by `packages installed in Xs (N MiB)`.
 - **An installer that can't run at all** (an unwritable volume, a bad setting) fails with `pip install could not run:

@@ -69,6 +69,7 @@ step "allowInternet=true: the internet opens; this module's database, the cluste
 helm upgrade booth-pipeline "$repo/charts/booth-pipeline" --namespace "$ns" --reuse-values \
   --set runner.networkPolicy.egress.allowInternet=true --wait --timeout 5m >/dev/null
 kubectl -n "$ns" rollout status deploy/booth-pipeline --timeout=180s
+api_pod_ip >/dev/null  # the old pod is gone, so exec and targets reach the new one
 grep -q "0.0.0.0/0" <<<"$(kubectl -n "$ns" get networkpolicy "$np" -o yaml)" || fail "allowInternet did not add the internet rule"
 sequence allowInternet "own-database api-pod kubernetes-api kubelet $lan" "internet lan-control"
 
@@ -76,6 +77,7 @@ step "back to closed for the steps that follow"
 helm upgrade booth-pipeline "$repo/charts/booth-pipeline" --namespace "$ns" --reuse-values \
   --set runner.networkPolicy.egress.allowInternet=false --wait --timeout 5m >/dev/null
 kubectl -n "$ns" rollout status deploy/booth-pipeline --timeout=180s
+api_pod_ip >/dev/null  # the old pod is gone, so exec and targets reach the new one
 grep -q "ipBlock" <<<"$(kubectl -n "$ns" get networkpolicy "$np" -o yaml)" && fail "the internet rule is still there"
 echo
 echo "egress: OK — every denial held as works-blocked-works on the same target, on Calico"

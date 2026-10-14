@@ -59,6 +59,7 @@ helm upgrade booth-pipeline "$repo/charts/booth-pipeline" --namespace "$ns" --re
   --set runner.pip.timeoutSeconds=30 \
   --wait --timeout 5m >/dev/null
 kubectl -n "$ns" rollout status deploy/booth-pipeline --timeout=180s
+api_pod_ip >/dev/null  # the old pod is gone, so exec and targets reach the new one
 [ "$(route)" = index ] || fail "expected the pip route 'index', got '$(route)'"
 grep -q "ipBlock" <<<"$(kubectl -n "$ns" get networkpolicy "$np" -o yaml)" && fail "allowInternet is on: proof 1 needs it off"
 
@@ -114,6 +115,7 @@ step "5. requests and beautifulsoup4, with allowInternet=true, from the in-clust
 helm upgrade booth-pipeline "$repo/charts/booth-pipeline" --namespace "$ns" --reuse-values \
   --set runner.networkPolicy.egress.allowInternet=true --wait --timeout 5m >/dev/null
 kubectl -n "$ns" rollout status deploy/booth-pipeline --timeout=180s
+api_pod_ip >/dev/null  # the old pod is gone, so exec and targets reach the new one
 grep -q "0.0.0.0/0" <<<"$(kubectl -n "$ns" get networkpolicy "$np" -o yaml)" || fail "allowInternet did not add the internet rule"
 r=$(drv pip-scrape "http://$index_host:8080/page.html"); echo "$r"
 check "$r" '.error == null' "the task succeeded"

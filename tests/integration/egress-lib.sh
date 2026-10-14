@@ -23,10 +23,27 @@ check_lan_targets() {
   done
 }
 
+api_pod_ip() { # the one live API pod's address, once a rollout has finished replacing it
+  # A change to the API pod's environment (BOOTH_PIPELINE_PIP_ROUTE follows allowInternet and
+  # runner.pip) rolls it, and the old pod stays "Running" while it terminates: never aim at that one.
+  local ips _
+  for _ in $(seq 1 120); do
+    ips=$(kubectl -n "$ns" get pod -l app.kubernetes.io/component=api -o json \
+      | python3 -c 'import json,sys; print(" ".join(p["status"].get("podIP","") for p in json.load(sys.stdin)["items"]))')
+    if [ "$(wc -w <<<"$ips")" = 1 ]; then
+      kubectl -n "$ns" get pod -l app.kubernetes.io/component=api -o json \
+        | python3 -c 'import json,sys; (p,)=json.load(sys.stdin)["items"]; assert not p["metadata"].get("deletionTimestamp") and p["status"]["phase"]=="Running"; print(p["status"]["podIP"])' \
+        && return 0
+    fi
+    sleep 1
+  done
+  fail "the API pod did not settle to one running pod (addresses: $ips)"
+}
+
 targets() { # name=host:port pairs, by address so no DNS is involved in the verdicts
   local db api kube node
   db=$(kubectl -n "$ns" get endpoints postgres -o jsonpath='{.subsets[0].addresses[0].ip}')
-  api=$(kubectl -n "$ns" get pod -l app.kubernetes.io/component=api --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}')
+  api=$(api_pod_ip)
   kube=$(kubectl -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}')
   node=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
   for v in db api kube node; do [ -n "${!v}" ] || fail "no address for $v"; done
