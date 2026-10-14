@@ -203,11 +203,26 @@ class Context:
         self.log = logging.getLogger("task." + self.task_key)
 
 
+def _add_site(path: str) -> None:
+    """ADR 0115: the task's own packages, installed by its pod's pip init container. Ahead of the
+    image's site-packages, so the versions the task asked for are the ones it imports; addsitedir so
+    their .pth files are honoured, as in a normal environment."""
+    if not path:
+        return
+    import site
+
+    before = list(sys.path)
+    site.addsitedir(path)
+    added = [p for p in sys.path if p not in before]
+    sys.path[:] = added + before
+
+
 def main() -> int:
     workdir, result_path = sys.argv[1], sys.argv[2]
     with open(os.path.join(workdir, "invocation.json"), encoding="utf-8") as f:
         payload = json.load(f)
     ctx = Context(payload)
+    _add_site(os.environ.get("BOOTH_SITE_DIR", ""))
     sys.path.insert(0, workdir)
     try:
         namespace = runpy.run_path(os.path.join(workdir, "task.py"), run_name="__booth_task__")

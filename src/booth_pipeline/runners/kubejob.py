@@ -52,6 +52,19 @@ _POSTGRES_ENV = {"DATABASE_URL"}
 _S3_ENV = {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
 _COMMON_SIDECAR_ENV = {"BOOTH_RUNNER_SIDECAR_TOKEN_FILE", "BOOTH_RUNNER_SIDECAR_HEALTHZ", "BOOTH_RUNNER_SIDECAR_WAIT_SECONDS"}
 WAREHOUSE_TIMEOUT_SECONDS = 10.0
+# ADR 0115: the chart's pip init container, the volume it installs into, and the task container's
+# variable pointing at it. Present in the template always; removed from a task without requirements,
+# so such a task's Job is exactly what it was before packages existed.
+PIP_CONTAINER = "pip"
+SITE_VOLUME = "site"
+_SITE_ENV = "BOOTH_RUNNER_SITE_DIR"
+# Where a task's packages can come from (the chart's BOOTH_PIPELINE_PIP_ROUTE, from runner.pip and the
+# task NetworkPolicy): an in-cluster index by selector, the internet, egress.extra, or no policy at all.
+PIP_ROUTES = ("index", "internet", "extra", "unrestricted")
+NO_PIP_ROUTE = (
+    "this install has no route to a package index: set runner.pip.egress for an in-cluster index, "
+    "or runner.networkPolicy.egress.allowInternet=true for PyPI (ADR 0115)"
+)
 
 # A pod that is waiting for one of these will not start on its own: fail the task with the reason
 # rather than sit out the whole start timeout.
@@ -74,6 +87,7 @@ class KubernetesJobRunner:
         poll_seconds: float = 0.5,
         transport: httpx.BaseTransport | None = None,
         lakehouse_transport: httpx.BaseTransport | None = None,
+        pip_route: str = "",
     ) -> None:
         _check_template(job_template, task_port)
         self._kube = kube
@@ -86,6 +100,9 @@ class KubernetesJobRunner:
         self._poll = poll_seconds
         self._transport = transport  # tests only: how RemoteRunner reaches a "pod"
         self._lakehouse_transport = lakehouse_transport  # tests only: how the warehouse lookup reaches core
+        self._pip_route = pip_route
+        pip = _init_container(job_template["spec"]["template"]["spec"], PIP_CONTAINER)
+        self._pip_timeout = int(_env_value(pip, "BOOTH_PIP_TIMEOUT_SECONDS") or 0) if pip else 0
 
     @classmethod
     def from_template_file(cls, path: str, **kw: Any) -> KubernetesJobRunner:
@@ -112,6 +129,14 @@ class KubernetesJobRunner:
         name = f"{self._prefix}-{uuid4().hex[:12]}"
         bearer = secrets.token_urlsafe(32)
         t0 = time.monotonic()
+        if inv.requirements:
+            # ADR 0115 amendment 1: with no route to any index, fail now and say which value to set,
+            # rather than after pip's own connect timeouts.
+            if self._pip_route not in PIP_ROUTES:
+                raise TaskFailed(NO_PIP_ROUTE)
+            if not self._pip_timeout:
+                raise TaskFailed("this task has Python requirements, but the task Job template has no pip init container (ADR 0115)")
+            log_.line("system", f"installing {len(inv.requirements)} Python requirement(s) before the task starts: {', '.join(inv.requirements)}")
         warehouse = self._warehouse(inv, log_)
         try:
             job = self._kube.create_job(self._job(name, inv, warehouse))
@@ -122,7 +147,7 @@ class KubernetesJobRunner:
                 self._kube.create_secret(_secret(name, bearer, job))
             except KubeError as e:
                 raise TaskFailed(f"could not start the task's pod: {e}") from None
-            ip = self._wait_ready(name, cancel)
+            ip = self._wait_ready(name, cancel, self._start_timeout + (self._pip_timeout if inv.requirements else 0))
             log_.line("system", f"task pod ready in {time.monotonic() - t0:.1f}s")
             host = f"[{ip}]" if ":" in ip else ip
             remote = RemoteRunner(f"http://{host}:{self._port}", bearer, refresh_seconds=self._refresh, transport=self._transport)
@@ -172,11 +197,14 @@ class KubernetesJobRunner:
         spec = job.setdefault("spec", {})
         spec["backoffLimit"] = 0  # a retry is the engine's decision (retry policy), never Kubernetes'
         # The backstop if this pod's API/scheduler pod dies mid-task and never deletes it.
-        spec["activeDeadlineSeconds"] = inv.timeout_seconds + self._start_timeout + 120
+        spec["activeDeadlineSeconds"] = inv.timeout_seconds + self._start_timeout + 120 + (self._pip_timeout if inv.requirements else 0)
         tpl = spec.setdefault("template", {})
         tpl.setdefault("metadata", {}).setdefault("labels", {}).update(labels)
         pod = tpl["spec"]
         pod["restartPolicy"] = "Never"
+        # pip first: removing it from a template with no sidecars leaves no initContainers at all,
+        # exactly as before packages existed.
+        _personalize_pip(pod, inv)
         _personalize_sidecars(pod, inv, warehouse)
         for v in pod["volumes"]:
             if v["name"] == AUTH_VOLUME:
@@ -186,14 +214,17 @@ class KubernetesJobRunner:
                 v["secret"] = {"secretName": _secret_name(name)}
         return job
 
-    def _wait_ready(self, name: str, cancel: Cancellation) -> str:
-        deadline = time.monotonic() + self._start_timeout
+    def _wait_ready(self, name: str, cancel: Cancellation, timeout: int) -> str:
+        deadline = time.monotonic() + timeout
         while True:
             if cancel.canceled:
                 raise TaskCanceled()
             for pod in self._kube.list_pods(f"{TASK_JOB_LABEL}={name}"):
                 status = pod.get("status", {})
                 if status.get("phase") in ("Failed", "Succeeded"):
+                    pip_failed = _pip_failure(status)
+                    if pip_failed:
+                        raise TaskFailed(pip_failed)
                     raise TaskFailed(f"the task's pod ended before the task started ({status.get('phase')}: {_why_ended(status)})")
                 for cs in status.get("containerStatuses", []):
                     waiting = cs.get("state", {}).get("waiting") or {}
@@ -203,7 +234,7 @@ class KubernetesJobRunner:
                 if ready and status.get("podIP"):
                     return status["podIP"]
             if time.monotonic() >= deadline:
-                raise TaskFailed(f"the task's pod did not become ready within {self._start_timeout}s")
+                raise TaskFailed(f"the task's pod did not become ready within {timeout}s")
             time.sleep(self._poll)
 
 
@@ -266,6 +297,40 @@ def _personalize_sidecars(pod: dict[str, Any], inv: TaskInvocation, warehouse: d
         task["env"] = env
 
 
+def _env_value(container: dict[str, Any], name: str) -> str:
+    return next((str(e.get("value", "")) for e in container.get("env", []) if e.get("name") == name), "")
+
+
+def _personalize_pip(pod: dict[str, Any], inv: TaskInvocation) -> None:
+    """ADR 0115: give the pip init container THIS task's requirements, or remove every trace of it
+    (the container, the site volume and its mount, the task's pointer to it) from a task without any."""
+    task = pod["containers"][0]
+    pip = _init_container(pod, PIP_CONTAINER)
+    if inv.requirements and pip is not None:
+        pip.setdefault("env", []).append({"name": "BOOTH_PIP_REQUIREMENTS", "value": "\n".join(inv.requirements)})
+        return
+    if "initContainers" in pod:
+        pod["initContainers"] = [c for c in pod["initContainers"] if c.get("name") != PIP_CONTAINER]
+        if not pod["initContainers"]:
+            del pod["initContainers"]
+    pod["volumes"] = [v for v in pod["volumes"] if v["name"] != SITE_VOLUME]
+    if "volumeMounts" in task:
+        task["volumeMounts"] = [m for m in task["volumeMounts"] if m.get("name") != SITE_VOLUME]
+    if "env" in task:
+        task["env"] = [e for e in task["env"] if e["name"] != _SITE_ENV]
+
+
+def _pip_failure(status: dict[str, Any]) -> str:
+    """The pip init container's own reason (its termination message), if it is what failed the pod."""
+    for cs in status.get("initContainerStatuses", []):
+        if cs.get("name") != PIP_CONTAINER:
+            continue
+        term = cs.get("state", {}).get("terminated") or {}
+        if term and term.get("exitCode") not in (0, None):
+            return str(term.get("message") or "").strip() or f"pip install failed (exit {term.get('exitCode')}, {term.get('reason') or 'no reason'})"
+    return ""
+
+
 def _why_ended(status: dict[str, Any]) -> str:
     """The pod's own reason, else its container's exit (the runner's logs say more; we may not read them)."""
     if status.get("reason") or status.get("message"):
@@ -318,8 +383,11 @@ def _check_template(t: dict[str, Any], task_port: int = 8080) -> None:
         raise ValueError("task Job template must set automountServiceAccountToken: false (ADR 0057/0096)")
     if not containers:
         raise ValueError("task Job template has no container")
-    for c in pod.get("initContainers", []):
+    for i, c in enumerate(pod.get("initContainers", [])):
         name = c.get("name")
+        if name == PIP_CONTAINER:
+            _check_pip(c, i, names)
+            continue
         if name not in (POSTGRES_SIDECAR, S3_SIDECAR):
             continue
         if not re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", c.get("image", "")):
@@ -334,3 +402,19 @@ def _check_template(t: dict[str, Any], task_port: int = 8080) -> None:
             raise ValueError(f"the credential sidecar's {listen} collides with the runner's port {task_port}")
         if name == S3_SIDECAR and not _arg(c, "--core-url"):
             raise ValueError("the s3 credential sidecar needs --core-url (its warehouse lookup goes through core's gateway)")
+
+
+def _check_pip(c: dict[str, Any], index: int, volumes: set[str]) -> None:
+    """ADR 0115 Decision 3: the installer runs untrusted code (an sdist's build), so it must run
+    before the credential sidecars start and mount nothing but the site volume."""
+    if index != 0:
+        raise ValueError("the pip init container must be the first init container, before the credential sidecars (ADR 0115)")
+    if c.get("restartPolicy") == "Always":
+        raise ValueError("the pip init container must run to completion, not as a sidecar (ADR 0115)")
+    mounts = {m.get("name") for m in c.get("volumeMounts", [])}
+    if mounts != {SITE_VOLUME} or SITE_VOLUME not in volumes:
+        raise ValueError(f"the pip init container must mount only the {SITE_VOLUME!r} volume, not {sorted(mounts)} (ADR 0115)")
+    if c.get("envFrom") or any("valueFrom" in e for e in c.get("env", [])):
+        raise ValueError("the pip init container must not take environment from Secrets or ConfigMaps (ADR 0115)")
+    if not int(_env_value(c, "BOOTH_PIP_TIMEOUT_SECONDS") or 0) > 0:
+        raise ValueError("the pip init container needs BOOTH_PIP_TIMEOUT_SECONDS (runner.pip.timeoutSeconds)")

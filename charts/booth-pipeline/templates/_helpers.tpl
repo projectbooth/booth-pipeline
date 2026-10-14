@@ -62,8 +62,35 @@ spec:
       enableServiceLinks: false
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if $sidecar }}
       initContainers:
+        # ADR 0115 (docs/design-task-requirements.md): installs THIS task's Python requirements into
+        # the site volume, then exits. FIRST, so it has finished before any credential sidecar starts;
+        # it mounts nothing but the site volume (no runner bearer, no token, no ServiceAccount token),
+        # because pip may run an sdist's build, which is arbitrary code. KubernetesJobRunner fills in
+        # BOOTH_PIP_REQUIREMENTS per task, and removes this container, the site volume and the task's
+        # pointer to it from a task without requirements.
+        - name: pip
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["booth-pipeline-pip"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - {name: BOOTH_PIP_TARGET, value: /opt/booth/site}
+            - {name: BOOTH_PIP_TIMEOUT_SECONDS, value: {{ .Values.runner.pip.timeoutSeconds | quote }}}
+            - {name: BOOTH_PIP_SIZE_LIMIT, value: {{ .Values.runner.pip.sizeLimit | quote }}}
+            {{- with .Values.runner.pip.indexUrl }}
+            - {name: PIP_INDEX_URL, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.runner.pip.trustedHost }}
+            - {name: PIP_TRUSTED_HOST, value: {{ . | quote }}}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.runner.resources | nindent 12 }}
+          volumeMounts:
+            - name: site
+              mountPath: /opt/booth/site
+        {{- if $sidecar }}
         # booth-core's credential sidecars (ADR 0095). NATIVE sidecars (restartPolicy: Always): they
         # start before the task and are stopped when the task's container exits, so they never keep
         # the Job alive. Each authenticates as THIS task (its --token-file is the task's own platform
@@ -131,7 +158,7 @@ spec:
             - name: booth-sidecar-s3
               mountPath: /var/run/booth-sidecar-s3
         {{- end }}
-      {{- end }}
+        {{- end }}
       containers:
         - name: task
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -150,6 +177,10 @@ spec:
               value: "1"
             - name: BOOTH_RUNNER_ONE_SHOT
               value: "1"
+            # ADR 0115: the pip init container's packages, put on the task's path (only the task's
+            # process, never the runner service's own). Removed per task without requirements.
+            - name: BOOTH_RUNNER_SITE_DIR
+              value: /opt/booth/site
             {{- if .Values.execution.runnerEnvPassthrough }}
             - name: BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH
               value: {{ join "," .Values.execution.runnerEnvPassthrough | quote }}
@@ -184,6 +215,9 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: site
+              mountPath: /opt/booth/site
+              readOnly: true
             {{- if $sidecar }}
             - name: booth-sidecar
               mountPath: /var/run/booth-sidecar
@@ -200,6 +234,11 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.execution.scratchSize | quote }}
+        # ADR 0115: the task's installed packages. Disk-backed; the installer also checks the limit
+        # itself, so going over fails the task at once with a clear message rather than an eviction.
+        - name: site
+          emptyDir:
+            sizeLimit: {{ .Values.runner.pip.sizeLimit | quote }}
         {{- if $sidecar }}
         # Memory-backed and private to this one task's pod: only the runner and the sidecar mount it.
         - name: booth-sidecar
@@ -215,6 +254,19 @@ spec:
             medium: Memory
             sizeLimit: 1Mi
         {{- end }}
+{{- end -}}
+
+{{/*
+ADR 0115 amendment 1: where a task's Python packages can come from, given the task NetworkPolicy.
+Empty = no route, and a task with requirements fails at once naming the value to set.
+*/}}
+{{- define "booth-pipeline.pipRoute" -}}
+{{- $e := .Values.runner.networkPolicy.egress -}}
+{{- if not .Values.runner.networkPolicy.enabled -}}unrestricted
+{{- else if .Values.runner.pip.egress.podSelector -}}index
+{{- else if $e.allowInternet -}}internet
+{{- else if $e.extra -}}extra
+{{- end -}}
 {{- end -}}
 
 {{- define "booth-pipeline.serviceAccountName" -}}

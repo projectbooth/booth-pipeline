@@ -70,6 +70,8 @@ class RunBody(BaseModel):
     inputs: dict[str, Any]
     timeoutSeconds: int  # noqa: N815
     access: AccessBody | None = None
+    # ADR 0115: the task's requirements, already installed by the pod's pip init container.
+    requirements: list[str] = []
 
 
 class TokenBody(BaseModel):
@@ -151,6 +153,7 @@ def create_runner_app(
             timeout_seconds=body.timeoutSeconds,
             access=access,
             language=body.language,
+            requirements=tuple(body.requirements),
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()
@@ -301,6 +304,9 @@ def main() -> int:
             task_env=task_env,
             # After the token is written (the sidecar authenticates with it), before the task starts.
             before_start=sidecar_wait(healthz, float(os.environ.get("BOOTH_RUNNER_SIDECAR_WAIT_SECONDS", "60"))) if healthz else None,
+            # ADR 0115: where the pod's pip init container installed this task's packages (task Jobs
+            # with requirements only).
+            site_dir=os.environ.get("BOOTH_RUNNER_SITE_DIR") or None,
         ),
         int(os.environ.get("BOOTH_RUNNER_MAX_CONCURRENT", "16")),
         on_task_done=task_done if one_shot else None,

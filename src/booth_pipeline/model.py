@@ -42,6 +42,10 @@ MAX_RETRIES = 10
 MAX_RETRY_DELAY_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT_SECONDS = 3600
+# ADR 0115: a task's Python requirements (as booth-streamlit's requirements.txt: 16 KiB).
+MAX_REQUIREMENTS = 100
+MAX_REQUIREMENT_CHARS = 200
+MAX_REQUIREMENTS_BYTES = 16 * 1024
 
 # A DAG node's local key becomes a Dagster op name and an upstream-input name in user code, so it
 # is a restricted identifier: lowercase, starts with a letter, no spaces.
@@ -216,11 +220,20 @@ class TaskConfig(Wire):
     # default: a task that doesn't need booth-storage/booth-catalog never triggers a mint, so it
     # can't be blocked by (or leak) an identity it doesn't use. See docs/decisions/0007.
     platform_access: bool = False
+    # ADR 0115: Python packages installed into this task's own pod before its code runs, by a
+    # credential-less init container (docs/design-task-requirements.md). Checked in
+    # validate_task_config, entry by entry, so an error names the line.
+    requirements: list[str] = Field(default_factory=list)
 
     @field_validator("params")
     @classmethod
     def _params_ok(cls, v: dict[str, Any]) -> dict[str, Any]:
         return check_params(v, "params")
+
+    @field_validator("requirements")
+    @classmethod
+    def _requirements_trimmed(cls, v: list[str]) -> list[str]:
+        return [e.strip() for e in v]  # checked in validate_task_config, which can name the entry
 
 
 def check_params(v: dict[str, Any], what: str) -> dict[str, Any]:
@@ -253,6 +266,48 @@ def validate_task_config(config: TaskConfig, available_runners: set[str] | None 
     src = config.code.source
     if src and len(src.encode("utf-8")) > MAX_TASK_SOURCE_BYTES:
         raise ModelError(f"the task's code is more than {MAX_TASK_SOURCE_BYTES} bytes", "code")
+    if config.requirements:
+        if code_language(config.code) != "python":
+            raise ModelError("only a Python task can install packages", "requirements")
+        check_requirements(config.requirements)
+
+
+def check_requirements(reqs: list[str]) -> None:
+    """ADR 0115: a task's requirements are package specifiers for the install's own index and
+    nothing else — no pip options (an index URL, another file, --pre), no direct URLs or paths.
+    The entries become the lines of a requirements file, so a newline in one would smuggle in a
+    line of its own. Raises ``ModelError`` naming the entry (``requirements[3]``)."""
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    if len(reqs) > MAX_REQUIREMENTS:
+        raise ModelError(f"at most {MAX_REQUIREMENTS} requirements", "requirements")
+    if len("\n".join(reqs).encode("utf-8")) > MAX_REQUIREMENTS_BYTES:
+        raise ModelError(f"requirements are limited to {MAX_REQUIREMENTS_BYTES} bytes in all", "requirements")
+    seen: dict[str, int] = {}
+    for i, entry in enumerate(reqs):
+        field = f"requirements[{i}]"
+        s = entry.strip()
+        if not s:
+            raise ModelError("a requirement is empty", field)
+        if len(s) > MAX_REQUIREMENT_CHARS:
+            raise ModelError(f"a requirement is limited to {MAX_REQUIREMENT_CHARS} characters", field)
+        if any(c in s for c in "\r\n\x00") or any(ord(c) < 32 for c in s):
+            raise ModelError("a requirement must be one line", field)
+        if s.startswith("-"):
+            raise ModelError(f"{s!r}: pip options are not allowed; list package requirements only (the package index is the install's)", field)
+        if "://" in s or s.startswith((".", "/", "~", "\\")) or s.startswith(("git+", "hg+", "svn+", "bzr+")):
+            raise ModelError(f"{s!r}: URLs and paths are not allowed; packages come from the install's package index", field)
+        try:
+            req = Requirement(s)
+        except InvalidRequirement as e:
+            raise ModelError(f"{s!r} is not a valid requirement: {e}", field) from None
+        if req.url:
+            raise ModelError(f"{s!r}: direct references (name @ URL) are not allowed; packages come from the install's package index", field)
+        name = canonicalize_name(req.name)
+        if name in seen:
+            raise ModelError(f"{req.name!r} is listed twice (also requirements[{seen[name]}])", field)
+        seen[name] = i
 
 
 class TaskRef(Wire):

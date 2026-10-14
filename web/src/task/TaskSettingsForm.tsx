@@ -39,6 +39,7 @@ export function TaskSettingsForm({
   onCancel?: () => void;
 }) {
   const runners = useLoad(() => api.runners(ctx), [ctx]);
+  const moduleConfig = useLoad(() => api.config(ctx), [ctx]);
   const [config, setConfig] = useState(initial);
   const [baseline, setBaseline] = useState(() => JSON.stringify(initial));
   const [saving, setSaving] = useState<"draft" | "version" | null>(null);
@@ -104,6 +105,7 @@ export function TaskSettingsForm({
         api={ctx}
         readOnly={readOnly}
         error={error ?? undefined}
+        pip={moduleConfig.state.status === "ready" ? moduleConfig.state.data.pip : null}
         onChange={edit}
       />
       {notice && <Banner tone="success">{notice}</Banner>}

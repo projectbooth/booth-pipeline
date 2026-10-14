@@ -1,0 +1,40 @@
+# The in-cluster test package index (ADR 0115, tests/integration/pip.sh): reached from task pods only
+# through runner.pip.egress (namespace pypi-ci, app=pypi-ci, port 8080).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pypi-ci
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pypi
+  namespace: pypi-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: pypi-ci}
+  template:
+    metadata:
+      labels: {app: pypi-ci}
+    spec:
+      containers:
+        - name: pypi
+          image: pypi-ci:ci
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /simple/, port: 8080}
+            periodSeconds: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pypi
+  namespace: pypi-ci
+spec:
+  selector: {app: pypi-ci}
+  ports:
+    - port: 8080
+      targetPort: 8080

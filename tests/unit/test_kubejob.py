@@ -88,6 +88,7 @@ class FakeCluster:
         self.peak_outstanding = 0
         self.next_ip = 1
         self.pod_problem: dict | None = None  # e.g. a waiting reason, or "never-ready"
+        self.pod_status: dict | None = None  # the pod's whole status instead of starting it (e.g. an init container failed)
         self.fail_create_job: str | None = None
 
     # -- the API server ----------------------------------------------------------------------
@@ -148,6 +149,9 @@ class FakeCluster:
         if vols["runner-auth"]["secret"]["secretName"] != secret["metadata"]["name"]:
             return  # the Job does not mount this Secret: its pod would never start
         if self.pod_problem == "never-ready":
+            return
+        if self.pod_status is not None:
+            pod["status"] = self.pod_status
             return
         if self.pod_problem == "crashed":
             pod["status"] = {"phase": "Failed", "containerStatuses": [{"name": "task", "state": {"terminated": {"exitCode": 1, "reason": "Error"}}}]}

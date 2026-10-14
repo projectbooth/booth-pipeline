@@ -63,6 +63,9 @@ class TaskInvocation:
     # from (runners/languages.py). Defaults to "python": every task before this ADR was Python,
     # and InlineCode (the builder's old free-text path) still always is.
     language: str = "python"
+    # ADR 0115: the task's own Python requirements, installed into its pod before it starts. Only a
+    # task Job installs them (runners/kubejob.py); the runner service then puts them on the path.
+    requirements: tuple[str, ...] = ()
 
 
 class TaskLog(Protocol):

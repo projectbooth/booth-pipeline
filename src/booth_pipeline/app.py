@@ -138,6 +138,7 @@ def create_app(
                 max_concurrent=cfg.max_concurrent_tasks,
                 start_timeout_seconds=cfg.task_start_timeout_seconds,
                 name_prefix=cfg.task_name_prefix,
+                pip_route=cfg.pip_route,
             )
         else:
             log.warning("BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset: tasks run in subprocesses of THIS process (local dev and tests only; see docs/decisions/0018)")

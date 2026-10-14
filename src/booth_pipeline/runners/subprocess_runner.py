@@ -28,6 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .. import pip_install
 from . import languages
 from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
 
@@ -50,6 +51,7 @@ class SubprocessRunner:
         shared_token_file: str | None = None,
         task_env: dict[str, str] | None = None,
         before_start: Callable[[TaskInvocation, TaskLog], None] | None = None,
+        site_dir: str | None = None,
     ) -> None:
         self._python = python or sys.executable
         self._passthrough = env_passthrough
@@ -62,6 +64,9 @@ class SubprocessRunner:
         # Called once the task's token is in place and before its process starts: where the one-task
         # pod waits for its credential sidecar's lease, which needs that token to exist first.
         self._before_start = before_start
+        # ADR 0115, one-task Job pods only: the read-only volume the pod's pip init container
+        # installed this task's requirements into. None anywhere packages are not installed.
+        self._site_dir = site_dir
         # (run_id, task_key) -> the token file of the attempt currently running, so a fresh token
         # can be swapped in while a long task is still going.
         self._token_files: dict[tuple[str, str], str] = {}
@@ -82,6 +87,11 @@ class SubprocessRunner:
     def _env(self, inv: TaskInvocation, workdir: str) -> dict[str, str]:
         env = {k: os.environ[k] for k in (*_BASE_ENV_KEYS, *self._passthrough) if k in os.environ}
         env.update(self._task_env)
+        if inv.requirements and self._site_dir:
+            # The harness runs under `python -I`, which ignores PYTHONPATH, so it adds BOOTH_SITE_DIR
+            # to its own path. PYTHONPATH is for any Python process the task itself starts.
+            env["BOOTH_SITE_DIR"] = self._site_dir
+            env["PYTHONPATH"] = self._site_dir
         if inv.access is not None:
             env["BOOTH_TOKEN_FILE"] = os.path.join(workdir, TOKEN_FILE)
         env.update(
@@ -115,6 +125,8 @@ class SubprocessRunner:
 
     def _run_in(self, workdir: str, inv: TaskInvocation, log: TaskLog, cancel: Cancellation) -> Any:
         handler = languages.get(inv.language)
+        if inv.requirements:
+            self._report_install(log)
         Path(workdir, handler.source_filename).write_text(inv.source, encoding="utf-8")
         token_key = (inv.run_id, inv.task_key)
         access_meta = None
@@ -197,6 +209,22 @@ class SubprocessRunner:
                 return json.load(f)["output"]
         except FileNotFoundError:
             raise TaskFailed("task finished without producing a result") from None
+
+
+    def _report_install(self, log: TaskLog) -> None:
+        """ADR 0115: copy the pip init container's output into this task's log, and refuse to run a
+        task whose packages are not there (never run it silently without them)."""
+        if not self._site_dir:
+            raise TaskFailed("this task has Python requirements, but packages are only installed for tasks run as Kubernetes Jobs (ADR 0115)")
+        try:
+            with open(os.path.join(self._site_dir, pip_install.LOG_FILE), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    log.line("system", "pip: " + line.rstrip("\r\n")[:MAX_LOG_CHUNK])
+            with open(os.path.join(self._site_dir, pip_install.RECORD_FILE), encoding="utf-8") as f:
+                record = json.load(f)
+        except (OSError, ValueError):
+            raise TaskFailed("this task's packages were not installed (no install record in its pod)") from None
+        log.line("system", f"packages installed in {record['seconds']}s ({pip_install.human_bytes(int(record['bytes']))})")
 
 
 def _write_token(path: str, token: str) -> None:

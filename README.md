@@ -67,6 +67,11 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Python packages** (ADR 0115): a Python task can list requirements (`requests==2.32.3`, one per line; package
+  specifiers only, no URLs, paths or pip options). Each run installs them into the task's own pod before its code
+  runs, from the install's package index (`runner.pip`), in an init container that holds no token or credentials,
+  and the task imports them normally. Nothing is cached between runs. With no route to an index the task fails at
+  once, saying which chart value to set ([design](docs/design-task-requirements.md)).
 - **Catalog code** is referenced as `{entryId, version}` and snapshotted at save; runs never call the catalog
   ([0001](docs/decisions/0001-code-catalog-reference.md)).
 
@@ -127,6 +132,14 @@ startup. The startup log names the issuer and where keys come from. The bundled 
 in-cluster Service over plain http, so no pod has to reach the Ingress or trust its certificate. That fetch is
 unauthenticated and unencrypted: it trusts the cluster network, so it relies on NetworkPolicy keeping anything else
 from answering at that address. Don't point it outside the cluster.
+
+**Where a task's packages come from (`runner.pip`; ADR 0115 and its amendment 1).** An in-cluster index (a mirror or
+pull-through proxy) is the narrow path: set `runner.pip.indexUrl` to it and `runner.pip.egress` to its pods'
+selectors and port, and task pods may reach it with `allowInternet` still off. Public PyPI (`indexUrl` empty) needs
+`runner.networkPolicy.egress.allowInternet=true`; the installer then reaches what task code already reaches, never the
+private ranges. An index on a private address needs `runner.networkPolicy.egress.extra`. NetworkPolicy is per pod,
+so task code can reach the index too. `runner.pip.timeoutSeconds` (300) bounds the whole install and is added to the
+time a task pod may take to start; `runner.pip.sizeLimit` (1Gi) is the install volume's size.
 
 ## Wiring into booth-design
 

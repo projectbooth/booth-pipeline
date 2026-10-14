@@ -11,6 +11,7 @@ import type {
   PipelineVersionSummary,
   Run,
   RunDetail,
+  ModuleConfig,
   RunnerInfo,
   RunStatus,
   StorageBackendSummary,
@@ -108,6 +109,7 @@ const e = encodeURIComponent;
 
 export const api = {
   runners: (c: ApiContext) => request<{ items: RunnerInfo[] }>(c, PIPELINE, "/runners").then((r) => r.items),
+  config: (c: ApiContext) => request<ModuleConfig>(c, PIPELINE, "/config"),
 
   listPipelines: (c: ApiContext, q = "") => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, limit: 200 })}`),
   getPipeline: (c: ApiContext, id: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}`),

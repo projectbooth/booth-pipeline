@@ -40,6 +40,7 @@ export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewC
         { label: "Retries", value: cfg.retry ? `${cfg.retry.maxRetries} · ${cfg.retry.backoff}, ${cfg.retry.delaySeconds}s` : "none", mono: true },
         { label: "Timeout", value: `${cfg.timeoutSeconds}s`, mono: true },
         { label: "Platform access", value: cfg.platformAccess ? "on" : "off" },
+        { label: "Python packages", value: cfg.requirements?.length ? cfg.requirements.join(", ") : "—", mono: true },
         {
           // What this node runs with: the task's params with this node's overrides merged over them.
           label: "Parameters",

@@ -26,10 +26,21 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   a SQL task reads it back with no setup.
 * ``rotation WORKSPACE`` — a connection held open through the sidecar survives its renewal onto a
   new lease.
+* ``pip-probe NAME=HOST:PORT ...`` — ADR 0115: a task requiring ``booth-pip-probe``, whose sdist build
+  (in the pod's pip init container) connects to each target; the task's own code then connects to the
+  same targets. Reports ``init:NAME`` and ``task:NAME`` verdicts, as ``egress`` does. The targets must
+  also be in the index pod's /tmp/probe-targets.json (tests/integration/pip.sh writes them).
+* ``pip-secrets WORKSPACE ROLE`` — ADR 0115: what the pip init container can see in a task pod that has
+  a platform token and a credential sidecar: mounts, environment, the sidecars' ports, and a scan for
+  the task's runner bearer and platform token. Then the same pod's task checks it does have both.
+* ``pip-run REQUIREMENT ...`` — a trivial task with these requirements; reports how it ended.
+* ``pip-scrape PAGE_URL`` — a task requiring requests and beautifulsoup4 fetches and parses a page.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -39,7 +50,8 @@ import threading
 import time
 import uuid
 
-from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskInvocation
+from booth_pipeline.runners import kubejob
+from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskFailed, TaskInvocation
 from booth_pipeline.runners.kubejob import TASK_JOB_LABEL, KubernetesJobRunner
 
 TEMPLATE = os.environ.get("BOOTH_PIPELINE_TASK_JOB_TEMPLATE", "/etc/booth/task-job/job.json")
@@ -471,6 +483,126 @@ def duckdb_e2e(workspace: str) -> int:
     return 0 if ok else 1
 
 
+# ---- ADR 0115: a task's own Python packages -------------------------------------------------------
+
+
+def pip_run(reqs: list[str], source: str, params: dict | None = None, access: TaskAccess | None = None) -> dict:
+    """One task with requirements, through the chart's real template and this pod's real pip route."""
+    lines = Lines()
+    task = dataclasses.replace(inv(source, "pip", params, access), requirements=tuple(reqs))
+    started = time.monotonic()
+    out, error = None, None
+    try:
+        out = runner(max_concurrent=1, pip_route=os.environ.get("BOOTH_PIPELINE_PIP_ROUTE", "")).run(task, lines, Cancellation())
+    except TaskFailed as e:
+        error = str(e)
+    return {
+        "output": out,
+        "error": error,
+        "seconds": round(time.monotonic() - started, 1),
+        "system": [m for s, m in lines.out if s == "system"],
+        "stdout": [m for s, m in lines.out if s == "stdout"],
+    }
+
+
+PIP_PROBE_TASK = EGRESS.replace("def run(ctx):", "import booth_pip_probe\ndef run(ctx):").replace(
+    "    return out\n", '    return {"init": booth_pip_probe.RESULT["verdicts"], "task": out}\n'
+)
+
+
+def pip_probe(pairs: list[str]) -> int:
+    targets = dict(p.split("=", 1) for p in pairs)
+    r = pip_run(["booth-pip-probe"], PIP_PROBE_TASK, {"targets": targets, "timeout": 5})
+    if r["error"]:
+        print(json.dumps(r))  # pip.sh's verdict checks then fail as "missing", with this shown above them
+        return 0
+    out = {f"init:{k}": v for k, v in r["output"]["init"].items()}
+    out.update({f"task:{k}": v for k, v in r["output"]["task"].items()})
+    print(json.dumps(out))
+    return 0
+
+
+PIP_SECRETS_TASK = r'''
+import hashlib, os
+import booth_pip_probe
+def h(t):
+    return hashlib.sha256(t.encode()).hexdigest()[:16]
+def run(ctx):
+    r = dict(booth_pip_probe.RESULT)
+    found = set(r.pop("token_hashes"))
+    r["found"] = {name: digest in found for name, digest in ctx.params["hashes"].items()}
+    # The same pod's task, after the install: it does hold its token and its database lease.
+    token_file = os.environ.get("BOOTH_TOKEN_FILE", "")
+    r["task_has_its_token"] = bool(token_file) and h(open(token_file).read()) == ctx.params["hashes"]["platform_token"]
+    r["task_database_url"] = os.environ.get("DATABASE_URL")
+    if r["task_database_url"]:
+        import psycopg
+        with psycopg.connect(r["task_database_url"], connect_timeout=10) as c:
+            r["task_database_rows"] = c.execute("SELECT 1").fetchone()[0]
+    return r
+'''
+
+
+def _h(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def pip_secrets(workspace: str, role: str) -> int:
+    token = f"tok-{workspace}-{uuid.uuid4().hex}"
+    bearer = kubejob.secrets.token_urlsafe(32)
+    # The runner's per-task bearer is random; make it one this test knows, so the scan can look for it.
+    kubejob.secrets = type("FixedBearer", (), {"token_urlsafe": staticmethod(lambda n=32: bearer)})
+    access = TaskAccess(workspace, token, "http://unused", "http://unused", role=role)
+    r = pip_run(["booth-pip-probe"], PIP_SECRETS_TASK, {"hashes": {"bearer": _h(bearer), "platform_token": _h(token)}}, access)
+    print(json.dumps(r))
+    o = r["output"] or {}
+    forbidden_mounts = [m for m in o.get("mounts", []) if m.startswith(("/etc/booth", "/var/run/booth-sidecar", "/var/run/secrets", "/tmp"))]
+    forbidden_env = [n for n in o.get("env_names", []) if n.startswith(("BOOTH_", "AWS_")) or n == "DATABASE_URL"]
+    checks = {
+        "the task ran": r["error"] is None,
+        "the install's mounts are only its own volume and the kubelet's files": "/opt/booth/site" in o.get("mounts", []) and not forbidden_mounts,
+        "no runner, sidecar or AWS variable, nothing JWT-shaped in its environment": not forbidden_env and o.get("jwt_like_env_values") == 0,
+        "no ServiceAccount token": o.get("service_account_token") is False,
+        "no credential sidecar running yet (127.0.0.1:5432 and :8081 refused)": o.get("sidecar_ports") == {"5432": "refused", "8081": "refused"},
+        "the scan works: it found its own decoy": o.get("decoy_found") is True,
+        "the scan did not find the runner bearer": o.get("found", {}).get("bearer") is False,
+        "the scan did not find the platform token": o.get("found", {}).get("platform_token") is False,
+        "the same pod's task holds its token": o.get("task_has_its_token") is True,
+        "the same pod's task reaches its database through the sidecar": o.get("task_database_rows") == 1,
+    }
+    for what, ok in checks.items():
+        print(("ok: " if ok else "FAIL: ") + what, file=sys.stderr)
+    return 0 if all(checks.values()) else 1
+
+
+PIP_TRIVIAL_TASK = "print('TASK-CODE-RAN')\n"
+
+
+def pip_run_mode(reqs: list[str]) -> int:
+    print(json.dumps(pip_run(reqs, PIP_TRIVIAL_TASK)))
+    return 0
+
+
+PIP_SCRAPE_TASK = r'''
+import bs4, requests
+def run(ctx):
+    r = requests.get(ctx.params["page"], timeout=10)
+    r.raise_for_status()
+    soup = bs4.BeautifulSoup(r.text, "html.parser")
+    return {
+        "team": soup.find(id="team").get_text(),
+        "scores": [int(td.get_text()) for td in soup.select("td.score")],
+        "requests": [requests.__version__, requests.__file__],
+        "bs4": [bs4.__version__, bs4.__file__],
+    }
+'''
+
+
+def pip_scrape(page: str) -> int:
+    print(json.dumps(pip_run(["requests", "beautifulsoup4"], PIP_SCRAPE_TASK, {"page": page})))
+    return 0
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -498,6 +630,14 @@ def main() -> int:
         return probe(args)
     if mode == "egress":
         return egress(args)
+    if mode == "pip-probe":
+        return pip_probe(args)
+    if mode == "pip-secrets":
+        return pip_secrets(args[0], args[1])
+    if mode == "pip-run":
+        return pip_run_mode(args)
+    if mode == "pip-scrape":
+        return pip_scrape(args[0])
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")
 
 

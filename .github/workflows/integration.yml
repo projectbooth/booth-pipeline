@@ -52,6 +52,11 @@ jobs:
           docker build -t booth-pipeline:ci .
           kind load docker-image booth-pipeline:ci --name booth-pipeline-ci
 
+      - name: Build and load the in-cluster test package index (ADR 0115; wheels hash-locked in its wheels.lock)
+        run: |
+          docker build -t pypi-ci:ci tests/integration/fixtures/pypi
+          kind load docker-image pypi-ci:ci --name booth-pipeline-ci
+
       - name: Install the BoothModule CRD (vendored stand-in for booth-core's)
         run: kubectl apply -f tests/integration/fixtures/boothmodule-crd.yaml
 
@@ -302,6 +307,11 @@ jobs:
           echo "$out"
           python -c 'import json,sys; o=json.loads(sys.argv[1]); assert o["rotated_to"] and o["rotated_to"]!=o["access_key_id"], o; print("s3 rotation: OK —", o["access_key_id"], "->", o["rotated_to"])' "$out"
 
+      - name: A task's own Python packages — no route fails at once; the installer reaches only the index and holds no credentials; failures are clear; requests + beautifulsoup4 with allowInternet (ADR 0115)
+        # Real task pods on Calico, against an in-cluster index whose booth-pip-probe sdist BUILD runs in
+        # the pip init container and reports what it can reach and see. See the script's header.
+        run: bash tests/integration/pip.sh .
+
       - name: Dump logs on failure
         if: failure()
         run: |
@@ -309,3 +319,4 @@ jobs:
           kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
           kubectl -n booth-pipeline logs deployment/booth-pipeline --tail=200 || true
           kubectl -n booth-pipeline describe pods -l app.kubernetes.io/component=task || true
+          kubectl -n pypi-ci logs deploy/pypi --tail=100 || true
