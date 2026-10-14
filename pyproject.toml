@@ -19,6 +19,7 @@ dependencies = [
   "tzdata",            # zoneinfo has no IANA database on Windows or slim images without it
   "duckdb>=1.0",       # the base runner's SQL language strategy (ADR 0064); embedded, no server to reach
   "pyyaml>=6",         # a pipeline version's YAML export (ADR 0071 phase 4)
+  "packaging>=24",     # parsing a task's Python requirements at save (ADR 0115)
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 [project.scripts]
 booth-pipeline = "booth_pipeline.__main__:main"
 booth-pipeline-runner = "booth_pipeline.runner_service:main"
+booth-pipeline-pip = "booth_pipeline.pip_install:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

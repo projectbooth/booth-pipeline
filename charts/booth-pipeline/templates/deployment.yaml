@@ -78,6 +78,10 @@ spec:
               value: {{ .Values.runner.maxConcurrent | quote }}
             - name: BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS
               value: {{ .Values.runner.startTimeoutSeconds | quote }}
+            # ADR 0115: how task pods reach a package index (index, internet, extra, unrestricted), or
+            # empty for no route at all.
+            - name: BOOTH_PIPELINE_PIP_ROUTE
+              value: {{ include "booth-pipeline.pipRoute" . | quote }}
             {{- if .Values.workloadIdentity.enabled }}
             - name: BOOTH_WORKLOAD_MINT_DIR
               value: /etc/booth/workload

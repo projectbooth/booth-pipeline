@@ -29,6 +29,7 @@ from .records import (
     TaskRun,
     TaskVersionRecord,
 )
+from .runners.kubejob import NO_PIP_ROUTE, PIP_ROUTES
 from .schemas import (
     PipelineCreate,
     PipelineDraftSave,
@@ -197,7 +198,18 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
             "maxLogLinesPerRun": cfg.max_log_lines_per_run,
         },
         "catalogConfigured": svc(request).catalog.configured,
+        "pip": pip_status(cfg),
     }
+
+
+def pip_status(cfg: Any) -> dict[str, Any]:
+    """ADR 0115: whether a task's Python requirements can be installed on this install, and if not,
+    why. The builder warns with the reason; a task with requirements still saves."""
+    if not cfg.task_job_template:
+        return {"available": False, "reason": "packages are only installed for tasks run as Kubernetes Jobs; this install runs tasks in its own process (local development)"}
+    if cfg.pip_route not in PIP_ROUTES:
+        return {"available": False, "reason": NO_PIP_ROUTE}
+    return {"available": True, "route": cfg.pip_route}
 
 
 @router.get("/runners")

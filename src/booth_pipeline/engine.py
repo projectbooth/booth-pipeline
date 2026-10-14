@@ -136,6 +136,7 @@ def _make_op(
                 timeout_seconds=config.timeout_seconds,
                 access=grant,
                 language=code_language(config.code),
+                requirements=tuple(config.requirements),
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskCanceled:

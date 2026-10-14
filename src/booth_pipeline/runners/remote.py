@@ -82,6 +82,7 @@ class RemoteRunner:
             "params": inv.params,
             "inputs": inv.inputs,
             "timeoutSeconds": inv.timeout_seconds,
+            "requirements": list(inv.requirements),  # ADR 0115: installed before; the far side only checks
             "access": None
             if inv.access is None
             else {

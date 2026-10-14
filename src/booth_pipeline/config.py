@@ -71,6 +71,10 @@ class Config:
     max_concurrent_tasks: int = 16  # outstanding task Jobs (runner.maxConcurrent)
     task_start_timeout_seconds: int = 300  # Job created -> its pod Ready, before the task fails
     task_name_prefix: str = "booth-pipeline-task"
+    # ADR 0115: where a task's Python packages can be installed from, as the chart works it out from
+    # runner.pip and the task NetworkPolicy ("index", "internet", "extra", "unrestricted"); empty = no
+    # route, so a task with requirements fails at once, naming the value to set.
+    pip_route: str = ""
 
     # Workload identity (ADR 0056/0058): the Secret core writes when the manifest declares
     # `workloadIdentity: {mint: true}`. Only ever readable by THIS (trusted) pod.
@@ -107,6 +111,7 @@ class Config:
             max_concurrent_tasks=_int("BOOTH_PIPELINE_MAX_CONCURRENT_TASKS", 16, 1),
             task_start_timeout_seconds=_int("BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS", 300, 10),
             task_name_prefix=os.environ.get("BOOTH_PIPELINE_TASK_NAME_PREFIX", "") or "booth-pipeline-task",
+            pip_route=os.environ.get("BOOTH_PIPELINE_PIP_ROUTE", ""),
             workload_mint_dir=os.environ.get("BOOTH_WORKLOAD_MINT_DIR", "/etc/booth/workload"),
             storage_url=os.environ.get("BOOTH_PIPELINE_STORAGE_URL", "").rstrip("/"),
             catalog_url=os.environ.get("BOOTH_PIPELINE_CATALOG_URL", "").rstrip("/"),

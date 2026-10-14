@@ -79,6 +79,23 @@ spec:
       ports:
         - {protocol: TCP, port: {{ $s.port }}}
     {{- end }}
+    {{- $pip := .Values.runner.pip.egress }}
+    {{- if or $pip.podSelector $pip.namespaceSelector }}
+    {{- if or (empty $pip.podSelector) (empty $pip.namespaceSelector) }}
+    {{- fail "runner.pip.egress needs both namespaceSelector and podSelector: an empty one would match every namespace or every pod in it (ADR 0115)" }}
+    {{- end }}
+    # ADR 0115: an in-cluster package index (runner.pip), for the pip init container. NetworkPolicy
+    # is per pod, so task code can reach this index too: it is a read-only package mirror.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $pip.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $pip.podSelector | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ $pip.port }}}
+    {{- end }}
     {{- with .Values.runner.networkPolicy.egress.extra }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

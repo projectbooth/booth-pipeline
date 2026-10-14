@@ -128,6 +128,35 @@ runner:
       # Tasks may reach the public internet, never 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
       # 100.64.0.0/10 (CGNAT) or 169.254.0.0/16. Off unless you need it.
       allowInternet: false
+  # ADR 0115 (docs/design-task-requirements.md): a task may list Python requirements, installed into
+  # its own pod at the start of every attempt by a `pip` init container that holds no token, bearer or
+  # credentials, into a volume the task then imports from. Nothing is cached between attempts.
+  #
+  # Where the packages come from (ADR 0115 amendment 1):
+  #   - an in-cluster index (a mirror or pull-through proxy): set indexUrl to it and egress below. The
+  #     narrow path: works with allowInternet=false, adding one destination for task pods.
+  #   - public PyPI (indexUrl empty) or another external index: needs allowInternet=true. The
+  #     installer then reaches what task code already reaches (never the private ranges).
+  #   - an external index on a private address: runner.networkPolicy.egress.extra.
+  # With none of these, a task with requirements fails at once, saying which value to set.
+  pip:
+    # The package index (PIP_INDEX_URL). Empty: pip's default, PyPI.
+    indexUrl: ""
+    # Only for an HTTP index you control (e.g. an in-cluster mirror): it gives up transport
+    # integrity for that host (PIP_TRUSTED_HOST). Leave empty for HTTPS.
+    trustedHost: ""
+    # The whole install's limit; added to the time a task's pod may take to start. pip's own
+    # --timeout is per network read and can't catch a slow trickle.
+    timeoutSeconds: 300
+    # Room for one task's installed packages (the site volume). If you set an ephemeral-storage
+    # limit in runner.resources, leave room for this too.
+    sizeLimit: 1Gi
+    # An in-cluster package index: both selectors and its port add ONE egress rule for task pods.
+    # NetworkPolicy is per pod, so task code can reach this index too.
+    egress:
+      namespaceSelector: {}
+      podSelector: {}
+      port: 8080
 
 # ADR 0056/0058: let tasks that opt in call booth-storage / booth-catalog as their run. Core mints
 # short-lived tokens for the run; requires booth-core with workload identity enabled.

@@ -50,6 +50,12 @@ def pod(d: dict) -> dict:
     return d["spec"]["template"]["spec"]
 
 
+def sidecars(p: dict) -> list[dict]:
+    """The credential sidecars: every init container but ADR 0115's pip installer (always rendered;
+    KubernetesJobRunner removes it from a task without requirements)."""
+    return [c for c in p.get("initContainers", []) if c["name"] != "pip"]
+
+
 def secret_names(d: dict) -> set[str]:
     """Every Secret a pod can read: volumes, env secretKeyRef, envFrom."""
     p = pod(d)
@@ -262,19 +268,19 @@ PINNED = "ghcr.io/projectbooth/credential-sidecar@sha256:6a0a795efd27f165e0714be
 
 
 def test_no_sidecar_by_default(task):
-    assert "initContainers" not in pod(task)
+    assert not sidecars(pod(task))
     env = {e["name"] for e in pod(task)["containers"][0]["env"]}
     assert not {n for n in env if "SIDECAR" in n or n == "DATABASE_URL"}
 
 
 def test_no_sidecar_without_core_even_with_booth_database():
     """The sidecar calls core's broker; with no core there is only ADR 0092's egress rule."""
-    assert "initContainers" not in pod(task_job(docs(*BOOTH_DB_URL, "--set", "core.url=")))
+    assert not sidecars(pod(task_job(docs(*BOOTH_DB_URL, "--set", "core.url="))))
 
 
 def test_setting_booth_database_url_adds_a_pinned_native_loopback_sidecar():
     p = pod(task_job(docs(*BOOTH_DB_URL)))
-    (sc,) = p["initContainers"]
+    (sc,) = sidecars(p)
     assert sc["name"] == "credential-sidecar-postgres"
     assert sc["image"] == PINNED  # booth-core@8f0c6b4, never a tag
     assert sc["restartPolicy"] == "Always"  # native: stops with the task, never keeps the Job alive
@@ -338,7 +344,7 @@ def test_setting_booth_storage_url_adds_a_pinned_native_s3_sidecar():
     """ADR 0095 third amendment: gated on boothStorage.url AND core.url, like postgres."""
     t = task_job(docs(*BOOTH_STORAGE))
     p = pod(t)
-    (sc,) = p["initContainers"]
+    (sc,) = sidecars(p)
     assert sc["name"] == "credential-sidecar-s3" and sc["image"] == PINNED and sc["restartPolicy"] == "Always"
     assert {
         "--kind=s3",
@@ -361,13 +367,13 @@ def test_setting_booth_storage_url_adds_a_pinned_native_s3_sidecar():
 
 def test_no_s3_sidecar_without_core():
     p = pod(task_job(docs(*BOOTH_STORAGE, "--set", "core.url=")))
-    assert "initContainers" not in p
+    assert not sidecars(p)
     assert not {e["name"] for e in p["containers"][0]["env"]} & {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
 
 
 def test_both_sidecars_share_the_token_volume_and_nothing_else():
     p = pod(task_job(docs(*BOOTH_DB_URL, *BOOTH_STORAGE)))
-    pg, s3 = p["initContainers"]
+    pg, s3 = sidecars(p)
     assert (pg["name"], s3["name"]) == ("credential-sidecar-postgres", "credential-sidecar-s3")
     assert {m["name"] for m in pg["volumeMounts"]} == {"booth-sidecar"}  # the postgres one can't touch the s3 files
     assert {m["name"] for m in s3["volumeMounts"]} == {"booth-sidecar", "booth-sidecar-s3"}
@@ -394,3 +400,79 @@ def test_the_s3_sidecar_runs_as_the_same_uid_as_the_task():
 def test_overriding_the_pod_uid_moves_task_and_sidecar_together():
     p = pod(task_job(docs(*BOOTH_STORAGE, "--set", "podSecurityContext.runAsUser=1234")))
     assert {effective_uid(p, c) for c in (*p["initContainers"], *p["containers"])} == {1234}
+
+
+# ---- ADR 0115: a task's own Python packages ---------------------------------------------------------
+
+PIP_INDEX = ("--set", "runner.pip.egress.namespaceSelector.kubernetes\\.io/metadata\\.name=pypi", "--set", "runner.pip.egress.podSelector.app=pypi")
+
+
+def pip_container(p: dict) -> dict:
+    (c,) = [c for c in p["initContainers"] if c["name"] == "pip"]
+    return c
+
+
+def api_env(items: list[dict]) -> dict[str, str]:
+    return {e["name"]: e.get("value") for e in by_kind(items, "Deployment")["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+def test_the_installer_runs_first_and_mounts_only_the_site_volume():
+    p = pod(task_job(docs(*BOOTH_DB_URL, *BOOTH_STORAGE)))
+    assert [c["name"] for c in p["initContainers"]] == ["pip", "credential-sidecar-postgres", "credential-sidecar-s3"]
+    pip = pip_container(p)
+    assert pip["command"] == ["booth-pipeline-pip"] and "restartPolicy" not in pip
+    assert pip["volumeMounts"] == [{"name": "site", "mountPath": "/opt/booth/site"}]
+    assert {e["name"] for e in pip["env"]} == {"BOOTH_PIP_TARGET", "BOOTH_PIP_TIMEOUT_SECONDS", "BOOTH_PIP_SIZE_LIMIT"}
+    assert not any("valueFrom" in e for e in pip["env"]) and "envFrom" not in pip
+    assert pip["securityContext"]["readOnlyRootFilesystem"] is True and pip["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    assert pip["image"] == p["containers"][0]["image"]  # the same interpreter the task runs on
+
+
+def test_the_task_reads_the_site_volume_read_only():
+    p = pod(task_job(docs("--set", "runner.pip.sizeLimit=2Gi")))
+    task_c = p["containers"][0]
+    (mount,) = [m for m in task_c["volumeMounts"] if m["name"] == "site"]
+    assert mount == {"name": "site", "mountPath": "/opt/booth/site", "readOnly": True}
+    assert {"name": "BOOTH_RUNNER_SITE_DIR", "value": "/opt/booth/site"} in task_c["env"]
+    (vol,) = [v for v in p["volumes"] if v["name"] == "site"]
+    assert vol == {"name": "site", "emptyDir": {"sizeLimit": "2Gi"}}  # on disk, not memory
+
+
+def test_the_index_settings_reach_only_the_installer():
+    p = pod(task_job(docs("--set", "runner.pip.indexUrl=http://pypi.pypi.svc:8080/simple", "--set", "runner.pip.trustedHost=pypi.pypi.svc", "--set", "runner.pip.timeoutSeconds=90")))
+    env = {e["name"]: e["value"] for e in pip_container(p)["env"]}
+    assert env["PIP_INDEX_URL"] == "http://pypi.pypi.svc:8080/simple" and env["PIP_TRUSTED_HOST"] == "pypi.pypi.svc" and env["BOOTH_PIP_TIMEOUT_SECONDS"] == "90"
+    assert not {e["name"] for e in p["containers"][0]["env"]} & {"PIP_INDEX_URL", "PIP_TRUSTED_HOST"}
+
+
+@pytest.mark.parametrize(
+    ("args", "route"),
+    [
+        ((), ""),  # closed and no index: a task with requirements fails at once
+        (("--set", "runner.networkPolicy.egress.allowInternet=true"), "internet"),
+        (PIP_INDEX, "index"),
+        ((*PIP_INDEX, "--set", "runner.networkPolicy.egress.allowInternet=true"), "index"),
+        (("--set-json", 'runner.networkPolicy.egress.extra=[{"to":[{"ipBlock":{"cidr":"192.168.1.5/32"}}]}]'), "extra"),
+        (("--set", "runner.networkPolicy.enabled=false"), "unrestricted"),
+    ],
+)
+def test_the_api_pod_knows_the_route_to_a_package_index(args, route):
+    assert api_env(docs(*args))["BOOTH_PIPELINE_PIP_ROUTE"] == route
+
+
+def pip_rules(np: dict) -> list[dict]:
+    return [r for r in np["spec"]["egress"] if any(t.get("podSelector", {}).get("matchLabels") == {"app": "pypi"} for t in r.get("to", []))]
+
+
+def test_an_in_cluster_index_opens_exactly_its_pods_on_its_port():
+    assert not pip_rules(by_kind(docs(), "NetworkPolicy", "-task"))
+    np = by_kind(docs(*PIP_INDEX, "--set", "runner.pip.egress.port=3141"), "NetworkPolicy", "-task")
+    (rule,) = pip_rules(np)
+    assert rule["to"] == [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "pypi"}}, "podSelector": {"matchLabels": {"app": "pypi"}}}]
+    assert rule["ports"] == [{"protocol": "TCP", "port": 3141}]
+    assert not any("ipBlock" in t for r in np["spec"]["egress"] for t in r.get("to", []))  # still no internet
+
+
+def test_an_index_selector_without_the_other_is_refused_rather_than_opened_wide():
+    out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", "runner.pip.egress.podSelector.app=pypi")
+    assert out.returncode != 0 and "runner.pip.egress needs both namespaceSelector and podSelector" in out.stderr

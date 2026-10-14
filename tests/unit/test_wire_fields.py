@@ -49,6 +49,8 @@ def _value(tp: Any, name: str, n: int, where: str) -> Any:
         return n
     if origin is dict:
         return {name: [n, "nested"]}
+    if origin is tuple and typing.get_args(tp) == (str, ...):
+        return (f"sample-{name}-a", f"sample-{name}-b")
     if dataclasses.is_dataclass(tp):
         return sample(tp, f"{name}.")
     if origin is collections.abc.Callable:
