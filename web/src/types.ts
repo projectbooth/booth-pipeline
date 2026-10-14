@@ -53,6 +53,9 @@ export interface TaskConfig {
   timeoutSeconds: number;
   /** Opt in to a short-lived platform token so the task can use ctx.storage / ctx.catalog (ADR 0056). */
   platformAccess: boolean;
+  /** Python packages installed into the task's own pod before it runs (ADR 0115). Absent from a
+   *  backend older than 0.1.5. */
+  requirements?: string[];
 }
 
 /** A standalone, versioned, reusable Task (ADR 0071) — the direct counterpart of Pipeline. */
@@ -234,6 +237,23 @@ export interface LogPage {
 export interface Page<T> {
   items: T[];
   total: number;
+}
+
+/** Whether this install can install a task's Python packages (ADR 0115), from GET /api/config. */
+export interface PipStatus {
+  available: boolean;
+  /** Why not, naming the value an operator sets. */
+  reason?: string;
+  /** How task pods reach the index: index, internet, extra or unrestricted. */
+  route?: string;
+}
+
+/** GET /api/config: the module's limits and capabilities. */
+export interface ModuleConfig {
+  limits: Record<string, number>;
+  catalogConfigured: boolean;
+  /** Absent from a backend older than 0.1.5. */
+  pip?: PipStatus;
 }
 
 export interface RunnerInfo {

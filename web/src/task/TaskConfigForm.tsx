@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { ApiContext } from "../api/client";
-import type { Backoff, RunnerInfo, TaskConfig } from "../types";
+import type { Backoff, PipStatus, RunnerInfo, TaskConfig } from "../types";
 import { CodePicker } from "./CodePicker";
+import { isRequirementsField, RequirementsField } from "./RequirementsField";
 import { StoragePicker } from "./StoragePicker";
 import { Banner, Button, Field, NumberInput, inputClass, monoClass } from "../ui/primitives";
 
@@ -35,10 +36,19 @@ export interface TaskConfigFormProps {
   /** A server validation message about this config, and which of its fields (if any) it names —
    *  `field: null` (or a field this form has no dedicated slot for) falls back to the banner. */
   error?: { message: string; field: string | null };
+  /** Whether this install can install packages (ADR 0115); null/undefined while unknown. */
+  pip?: PipStatus | null;
   onChange: (config: TaskConfig) => void;
 }
 
-export function TaskConfigForm({ config, runners, api, readOnly, error, onChange }: TaskConfigFormProps) {
+/** Only Python code can import packages (ADR 0115). Code with no language yet (nothing picked) runs
+ *  as Python, as the server assumes. */
+function isPython(config: TaskConfig): boolean {
+  const lang = config.code.type === "inline" ? "python" : config.code.language;
+  return !lang || lang === "python";
+}
+
+export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onChange }: TaskConfigFormProps) {
   const [paramsDraft, setParamsDraft] = useState(() => JSON.stringify(config.params, null, 2));
   const [paramsError, setParamsError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
@@ -61,7 +71,8 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, onChange
   // field, or a field this form has no slot for) falls back to the banner, so a message is never
   // silently dropped just because it doesn't map to an input here.
   const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
-  const showBanner = error && (!error.field || !KNOWN_CONFIG_ERROR_FIELDS.has(error.field));
+  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field)));
+  const requirements = config.requirements ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -199,6 +210,15 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, onChange
             <NumberInput {...p} min={1} max={86400} value={config.timeoutSeconds} onChange={(n) => onChange({ ...config, timeoutSeconds: n })} />
           )}
         </Field>
+
+        {(isPython(config) || requirements.length > 0) && (
+          <RequirementsField
+            value={requirements}
+            pip={pip}
+            error={isRequirementsField(error?.field) ? error?.message : undefined}
+            onChange={(r) => onChange({ ...config, requirements: r })}
+          />
+        )}
 
         <Field id="task-params" label="Parameters (JSON)" error={paramsError ?? fieldError("params")} help="Available to the task as ctx.params.">
           {(p) => <textarea {...p} className={`${inputClass} ${monoClass} h-24 resize-y`} spellCheck={false} value={paramsDraft} onChange={(e) => setParams(e.target.value)} />}

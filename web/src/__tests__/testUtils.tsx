@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Page, Pipeline, PipelineDraft, PipelineVersion, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
+import type { Page, Pipeline, PipelineDraft, PipelineVersion, PipStatus, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
 
 // A tiny in-memory stand-in for the pipeline backend + the catalog behind booth-core's gateway,
 // installed as the global `fetch`. Views are exercised against it exactly as against the real
@@ -45,6 +45,8 @@ export class FakeBackend {
   storageDown = false;
   storageBackends = [{ id: "b1", displayName: "Main" }];
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
+  /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
+  pip: PipStatus = { available: true, route: "index" };
   runners = [
     { id: "base", displayName: "Base", available: true, reason: null },
     { id: "spark", displayName: "Spark", available: false, reason: "booth-spark does not yet define a compute-submission interface" },
@@ -171,6 +173,7 @@ export class FakeBackend {
 
     let m: RegExpMatchArray | null;
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
+    if (method === "GET" && path === "/config") return this.json({ limits: {}, catalogConfigured: true, pip: this.pip });
     if (method === "GET" && path === "/pipelines") {
       const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
       return this.json(this.page(q ? this.pipelines.filter((p) => p.name.toLowerCase().includes(q)) : this.pipelines));

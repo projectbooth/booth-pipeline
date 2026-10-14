@@ -1,6 +1,7 @@
 # Design: a task's own Python packages (ADR 0115)
 
-Status: **proposed**, for review before any code. Inputs: booth-architecture
+Status: **accepted and built** (ADR 0115 amendment 1 adopted section 9's ruling, 2026-10-13). Section 11 lists
+where the build differs from the proposal below. Inputs: booth-architecture
 `decisions/0115-pipeline-tasks-install-their-own-python-packages.md`; booth-streamlit's
 `apps.pip` (`docs/design-data-access.md`, section 5 and "pip install" under "As built"), the
 precedent copied here wherever the two modules are alike; this repo's ADR 0096 design
@@ -28,7 +29,7 @@ import reads the same field.
 
 **Validation at save** (`validate_task_config`, pure, the same at task save and at validation):
 
-- **Language:** only a Python task (`language_of(code) == "python"`) may have requirements. A SQL
+- **Language:** only a Python task (`code_language(code) == "python"`) may have requirements. A SQL
   task with any is refused (`requirements: only a Python task can install packages`).
 - **Format:** each entry is one PEP 508 requirement, parsed with `packaging.requirements.Requirement`
   (`packaging` becomes an explicit dependency; today it only comes in through dagster).
@@ -463,3 +464,35 @@ One PR, merged on green CI and a green Integration run on the branch, then a pat
 5. Integration: the index fixture, `pip.sh` with proofs 1–4 and the success case.
 6. Builder UI and tests; `web/package.json` to 1.2.0, published by a `pipeline-ui-v1.2.0` tag on
    the same merge commit (publish.yml), beside the booth-pipeline patch tag.
+
+## 11. As built
+
+Where the build differs from the proposal above, and details it didn't spell out:
+
+- **`runner.pip.timeoutSeconds`** (default 300), not `timeout: 5m`, to match the chart's other durations
+  (`startTimeoutSeconds`, `credentialSidecar.waitSeconds`).
+- **The task's process finds its packages through the harness, not only `PYTHONPATH`.** The harness runs under
+  `python -I`, which ignores `PYTHONPATH`, so it adds the site directory itself with `site.addsitedir` (so `.pth` files
+  work) ahead of the image's own packages. `PYTHONPATH` is also set, for any Python process the task itself starts.
+- **The chart always renders the `pip` container, the `site` volume and the task's `BOOTH_RUNNER_SITE_DIR`;**
+  `KubernetesJobRunner` removes all three from a task without requirements, so its Job is identical to before
+  (checked against the previous chart's render for every sidecar combination). The runner also refuses, at startup, a
+  template whose `pip` container isn't first, runs as a sidecar, mounts anything but `site`, or takes environment
+  from a Secret or ConfigMap.
+- **The route is worked out by the chart** and given to the API pod as `BOOTH_PIPELINE_PIP_ROUTE`: `index`
+  (`runner.pip.egress` set), `internet` (`allowInternet`), `extra` (`egress.extra` non-empty; the chart can't tell
+  whether it covers the index, so it doesn't fail fast), `unrestricted` (`networkPolicy.enabled=false`), or empty.
+  `GET /api/config` reports `pip: {available, reason | route}`; local development (no task Jobs) reports unavailable.
+- **Install output** appears in the task's log as `system` lines prefixed `pip: `, after `installing N Python
+  requirement(s) before the task starts: …` and followed by `packages installed in Xs (N MiB)`.
+- **An installer that can't run at all** (an unwritable volume, a bad setting) fails with `pip install could not run:
+  …`, never a bare traceback.
+- **A task with requirements run by the in-process runner** (local development) fails with a message saying packages
+  are only installed for task Jobs; it never runs without them.
+- **Builder:** there is no task-version diff view to extend; the draft-differs check compares whole configs, so it
+  covers requirements. The field is shown for Python tasks (and for any task that already has requirements, so they
+  can be removed).
+- **Integration** is `tests/integration/pip.sh`, with the index in `tests/integration/fixtures/pypi/`. The probe
+  sdist uses an in-tree PEP 517 backend (standard library only), so building it needs nothing from the index but
+  itself. It also proves the fast failure with no route (step 0), which section 7 didn't list.
+

@@ -160,6 +160,7 @@ function TaskPage({ v, d, tab, reload }: { v: ViewCtx; d: TaskData; tab: TaskTab
               <MetaChip label="Retries" value={cfg.retry ? `${cfg.retry.maxRetries} · ${cfg.retry.backoff}` : "0"} />
               <MetaChip label="Timeout" value={`${cfg.timeoutSeconds}s`} />
               <MetaChip label="Platform access" value={cfg.platformAccess ? "on" : "off"} />
+              {!!cfg.requirements?.length && <MetaChip label="Python packages" value={String(cfg.requirements.length)} />}
               <MetaChip label="Created by" value={t.createdBy} />
               <MetaChip label="Updated" value={formatStamp(t.draftUpdatedAt && t.draftUpdatedAt > t.updatedAt ? t.draftUpdatedAt : t.updatedAt)} />
             </ul>
@@ -344,6 +345,10 @@ function ConfigTab({ t, config }: { t: TaskEntity; config: TaskConfig }) {
             { label: "Retries", value: config.retry ? `${config.retry.maxRetries} (${config.retry.backoff}, ${config.retry.delaySeconds}s delay)` : "none", mono: true },
             { label: "Timeout", value: `${config.timeoutSeconds}s`, mono: true },
             { label: "Platform access", value: config.platformAccess ? "on — gets ctx.storage and ctx.catalog" : "off" },
+            {
+              label: "Python packages",
+              value: config.requirements?.length ? <code className="whitespace-pre-wrap text-xs">{config.requirements.join("\n")}</code> : "none",
+            },
           ]}
         />
       </Card>

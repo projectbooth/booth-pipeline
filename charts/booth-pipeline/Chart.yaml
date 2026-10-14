@@ -4,8 +4,8 @@ description: >
   Project Booth's pipeline module: a graphical DAG builder (Pipeline -> Task -> Job) backed by
   Dagster, with a base runner that needs no other module installed.
 type: application
-version: 0.1.4
-appVersion: "0.1.4"
+version: 0.1.5
+appVersion: "0.1.5"
 home: https://github.com/projectbooth/booth-pipeline
 
 # ADR 0113 / contracts/module-manifest.md "Chart annotation: identity keys": tells booth-core's
