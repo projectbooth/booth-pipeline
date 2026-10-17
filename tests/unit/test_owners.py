@@ -137,3 +137,33 @@ def test_owner_helpers():
     assert parse_service_account("svc:acme") is None and parse_service_account("u-1") is None
     assert describe("svc:acme:x", "x") == "service account svc:acme:x"
     assert describe("u-1", "") == "the person who first scheduled it"
+
+
+def test_an_account_is_checked_with_core_as_the_caller_before_it_gets_a_pipeline(world: World):
+    p = scheduled_pipeline(world)
+    assert set_owner(world, p["id"], "svc:acme:nfl-weekly", "tok-owner").status_code == 200
+    (ask,) = [r for r in world.platform.requests if r.path.startswith("/api/service-accounts/")]
+    assert ask.path == "/api/service-accounts/nfl-weekly" and ask.method == "GET"
+    assert ask.headers["authorization"] == "Bearer tok-owner" and ask.headers["x-workspace"] == "acme"
+
+
+def test_an_account_core_doesnt_have_is_refused(world: World):
+    p = scheduled_pipeline(world)
+    r = set_owner(world, p["id"], "svc:acme:nobody", "tok-owner")
+    assert r.status_code == 422 and r.json() == {"error": "this workspace has no service account named 'nobody'", "field": "owner"}
+    assert owner(world, p["id"])["kind"] == "person"
+
+
+def test_a_disabled_account_cant_be_given_a_pipeline(world: World):
+    p = scheduled_pipeline(world)
+    world.platform.accounts["nfl-weekly"] = True
+    r = set_owner(world, p["id"], "svc:acme:nfl-weekly", "tok-owner")
+    assert r.status_code == 422 and "is disabled; enable it" in r.json()["error"]
+
+
+def test_core_down_means_the_account_cant_be_checked_so_nothing_changes(world: World):
+    p = scheduled_pipeline(world)
+    world.platform.handler = lambda req: (502, {"error": "bad gateway"})
+    r = set_owner(world, p["id"], "svc:acme:nfl-weekly", "tok-owner")
+    assert r.status_code == 503 and "could not check service account 'nfl-weekly' with booth-core" in r.json()["error"]
+    assert owner(world, p["id"])["kind"] == "person"

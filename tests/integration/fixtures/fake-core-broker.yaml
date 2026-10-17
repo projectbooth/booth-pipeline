@@ -19,7 +19,8 @@
 # For the Spark runner (ADR 0119, tests/integration/spark.sh) it also stands in for core's workload-token
 # mint (POST /api/internal/workload-tokens: a token per request, refused on demand through
 # POST /_control/mint {"owner": ..., "code": ...|null}, with the code core gives for a service account;
-# GET /mints lists every request) and, when the fake-spark ConfigMap is mounted, for booth-spark behind
+# GET /mints lists every request; GET /api/service-accounts/{name} answers for svc:acme:nfl-weekly) and,
+# when the fake-spark ConfigMap is mounted, for booth-spark behind
 # the gateway (/modules/spark/*, fixtures/spark/spark_standin.py, mounted at /spark).
 #
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
@@ -96,6 +97,7 @@ data:
 
     # ---- core's workload-token mint (ADR 0056/0058), for the Spark runner's scheduled runs ----
     mints, refusals = [], {}  # owner -> None (one indistinguishable 403) or a service-account code
+    SERVICE_ACCOUNTS = {"nfl-weekly": {"role": "editor", "disabled": False}}  # in workspace acme
 
     def mint(req):
         with lock:
@@ -137,6 +139,10 @@ data:
         def do_GET(self):
             if self.path.startswith("/modules/spark/"):
                 return self.spark()
+            if self.path.startswith("/api/service-accounts/"):  # core's per-account state (ADR 0120), any member
+                name = self.path.rsplit("/", 1)[1]
+                acct = SERVICE_ACCOUNTS.get(name)
+                return self.reply(200, {"name": name, "role": acct["role"], "disabled": acct["disabled"]}) if acct else self.reply(404, {"error": "service account not found"})
             if self.path == "/mints":
                 with lock:
                     return self.reply(200, mints)

@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Page, Pipeline, PipelineDraft, PipelineVersion, PipStatus, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
+import type { CoreServiceAccount, Page, Pipeline, PipelineDraft, PipelineVersion, PipStatus, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
 
 // A tiny in-memory stand-in for the pipeline backend + the catalog behind booth-core's gateway,
 // installed as the global `fetch`. Views are exercised against it exactly as against the real
@@ -47,6 +47,10 @@ export class FakeBackend {
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
+  /** booth-core's service accounts (ADR 0120): GET /api/service-accounts (owners) and /{name} (members). */
+  serviceAccounts: CoreServiceAccount[] = [];
+  /** Set to make the owner-only list fail (a non-owner, or a core older than 0.3.7). */
+  serviceAccountsListError: { status: number; error: string } | null = null;
   /** booth-spark's GET /v1/limits through the gateway (ADR 0119). */
   sparkLimits: Record<string, unknown> = { maxExecutors: 2, maxMemory: "4g", maxDuration: "2h" };
   runners = [
@@ -155,6 +159,14 @@ export class FakeBackend {
       return this.json({ error: fail.error, ...(fail.field ? { field: fail.field } : {}) }, fail.status);
     }
 
+    if (method === "GET" && path === "/api/service-accounts") {
+      const err = this.serviceAccountsListError;
+      return err ? new Response(err.error, { status: err.status }) : this.json(this.serviceAccounts);
+    }
+    if (method === "GET" && path.startsWith("/api/service-accounts/")) {
+      const a = this.serviceAccounts.find((x) => x.name === decodeURIComponent(path.split("/").pop()!));
+      return a ? this.json({ name: a.name, role: a.role, disabled: a.disabled }) : new Response("service account not found", { status: 404 });
+    }
     if (isSpark) {
       if (path === "/v1/limits") return this.json(this.sparkLimits);
       return this.json({ error: "not found" }, 404);

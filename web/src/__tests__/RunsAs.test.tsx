@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearAccountCache } from "../views/pipeline/RunsAs";
 import { renderApp } from "./render";
 import { FakeBackend } from "./testUtils";
 
@@ -9,6 +10,11 @@ import { FakeBackend } from "./testUtils";
 let b: FakeBackend;
 beforeEach(() => {
   b = new FakeBackend();
+  clearAccountCache();
+  b.serviceAccounts = [
+    { id: "svc:acme:nfl-weekly", name: "nfl-weekly", role: "editor", description: "the weekly NFL load", disabled: false, createdBy: "u-owner", createdAt: "2026-10-16T00:00:00Z" },
+    { id: "svc:acme:old-bot", name: "old-bot", role: "viewer", description: "", disabled: true, createdBy: "u-owner", createdAt: "2026-10-16T00:00:00Z" },
+  ];
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -62,10 +68,13 @@ describe("Runs as", () => {
     expect(within(row).queryByRole("button", { name: "Take over" })).not.toBeInTheDocument();
   });
 
-  it("offers a workspace owner Take over from a service account", async () => {
+  it("lets a workspace owner take a pipeline from a service account, with the picker", async () => {
     const p = owned({ kind: "service", id: "svc:acme:nfl-weekly", name: "nfl-weekly", you: false });
     renderApp(b, { path: schedule(p.id), role: "owner" });
-    expect(within(await runsAsRow()).getByRole("button", { name: "Take over" })).toBeInTheDocument();
+    const picker = within(await runsAsRow()).getByRole("group", { name: "Choose who this pipeline runs as" });
+    await userEvent.selectOptions(within(picker).getByLabelText("Runs as"), "me");
+    await userEvent.click(within(picker).getByRole("button", { name: "Run as this" }));
+    await waitFor(() => expect(b.called("PUT", `/pipelines/${p.id}/owner`)[0]?.body).toEqual({ owner: "me" }));
   });
 
   it("lists which pipelines run as each service account", async () => {
@@ -85,5 +94,60 @@ describe("Runs as", () => {
     await screen.findByRole("table");
     await waitFor(() => expect(b.called("GET", "/service-accounts/uses")).toHaveLength(1));
     expect(screen.queryByRole("region", { name: "Service accounts in use" })).not.toBeInTheDocument();
+  });
+
+  it("gives a workspace owner the picker, listing core's accounts with role and description, disabled ones not choosable", async () => {
+    const p = owned({ kind: "person", name: "olga", you: false });
+    renderApp(b, { path: schedule(p.id), role: "owner" });
+    const picker = within(await runsAsRow()).getByRole("group", { name: "Choose who this pipeline runs as" });
+    const select = within(picker).getByLabelText("Runs as");
+    const nfl = await within(select).findByRole("option", { name: "Service account nfl-weekly — editor — the weekly NFL load" });
+    expect(nfl).toBeEnabled();
+    expect(within(select).getByRole("option", { name: "Service account old-bot — viewer (disabled)" })).toBeDisabled();
+    expect(within(await runsAsRow()).queryByRole("button", { name: "Take over" })).not.toBeInTheDocument(); // the picker's "Me" is that
+    await userEvent.selectOptions(select, "svc:acme:nfl-weekly");
+    await userEvent.click(within(picker).getByRole("button", { name: "Run as this" }));
+    await waitFor(() => expect(b.called("PUT", `/pipelines/${p.id}/owner`)[0]?.body).toEqual({ owner: "svc:acme:nfl-weekly" }));
+    expect(await within(await runsAsRow()).findByText("Service account svc:acme:nfl-weekly")).toBeInTheDocument();
+  });
+
+  it("an editor gets no picker and never asks for the owner-only list", async () => {
+    const p = owned({ kind: "person", name: "olga", you: false });
+    renderApp(b, { path: schedule(p.id), role: "editor" });
+    await runsAsRow();
+    expect(screen.queryByRole("group", { name: "Choose who this pipeline runs as" })).not.toBeInTheDocument();
+    expect(b.called("GET", "/api/service-accounts")).toHaveLength(0);
+  });
+
+  it("says so when core won't list the accounts", async () => {
+    b.serviceAccountsListError = { status: 404, error: "404 page not found" };
+    const p = owned({ kind: "person", name: "olga", you: false });
+    renderApp(b, { path: schedule(p.id), role: "owner" });
+    expect(await within(await runsAsRow()).findByText(/Service accounts couldn't be listed \(404 page not found\)/)).toBeInTheDocument();
+  });
+
+  it("badges a disabled owner and a deleted one, for every member, and not an enabled one", async () => {
+    const off = owned({ kind: "service", id: "svc:acme:old-bot", name: "old-bot", you: false }, "off");
+    renderApp(b, { path: schedule(off.id), role: "viewer" });
+    const badge = await within(await runsAsRow()).findByRole("status");
+    expect(badge).toHaveTextContent("Owner disabled");
+    expect(badge.getAttribute("title")).toMatch(/scheduled runs fail at their start/);
+  });
+
+  it("badges an owner core no longer has", async () => {
+    const gone = owned({ kind: "service", id: "svc:acme:deleted", name: "deleted", you: false }, "gone");
+    renderApp(b, { path: schedule(gone.id), role: "viewer" });
+    expect(await within(await runsAsRow()).findByRole("status")).toHaveTextContent("Owner not found");
+  });
+
+  it("puts no badge on an enabled account, and asks core once per account on the list", async () => {
+    owned({ kind: "service", id: "svc:acme:nfl-weekly", name: "nfl-weekly", you: false }, "a");
+    owned({ kind: "service", id: "svc:acme:nfl-weekly", name: "nfl-weekly", you: false }, "b");
+    owned({ kind: "service", id: "svc:acme:old-bot", name: "old-bot", you: false }, "c");
+    renderApp(b, { role: "viewer" });
+    const table = await screen.findByRole("table");
+    await waitFor(() => expect(within(table).getAllByRole("status")).toHaveLength(1));
+    expect(within(table).getByRole("status")).toHaveTextContent("Owner disabled");
+    expect(b.called("GET", "/api/service-accounts/nfl-weekly")).toHaveLength(1);
   });
 });

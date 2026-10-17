@@ -103,7 +103,17 @@ def world():
         return 200, {"token": f"minted-{n['i']}", "tokenType": "Bearer", "expiresAt": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(), "role": req.json()["roleCeiling"]}
 
     core.handler = core_handler
-    platform.handler = lambda req: (201, {"id": "d-1"}) if req.method == "POST" else (200, {"path": "out/result.txt", "size": 5})
+    # core's service accounts (ADR 0120), read as the caller: name -> disabled
+    accounts = {"nfl-weekly": False, "reports": False}
+
+    def platform_handler(req):
+        if req.path.startswith("/api/service-accounts/"):
+            name = req.path.rsplit("/", 1)[1]
+            return (200, {"name": name, "role": "editor", "disabled": accounts[name]}) if name in accounts else (404, {"error": "service account not found"})
+        return (201, {"id": "d-1"}) if req.method == "POST" else (200, {"path": "out/result.txt", "size": 5})
+
+    platform.handler = platform_handler
+    platform.accounts = accounts
     runner = RecordingRunner()
     minter = WorkloadMinter(CRED, core.url + "/api/internal/workload-tokens", core.url)
     with serve_asgi(create_runner_app(RUNNER_SECRET, runner)) as runner_url:

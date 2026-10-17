@@ -74,8 +74,11 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   owner may be someone who didn't write the tasks' code. A person owner's runs stop getting tokens once they
   haven't signed in for core's `ownerMaxAge` (7 days by default); a service account's don't lapse, but stop at
   once when the account is disabled. Only workspace owners choose or remove a service account; nobody hands a
-  pipeline to another person. The pipelines list shows which pipelines run as each account: core keeps no such
-  record, and an account must be disabled before it can be deleted. **A scheduled run first asks core whether it
+  pipeline to another person. A workspace owner picks the owner on the pipeline's Schedule tab, from core's list of
+  the workspace's accounts; pipeline asks core that the account exists and is enabled before it takes the
+  pipeline. A disabled or deleted owning account is badged "Owner disabled" / "Owner not found" for everyone. The
+  pipelines list shows which pipelines run as each account: core keeps no such record, and an account must be
+  disabled before it can be deleted. **A scheduled run first asks core whether it
   may act for its owner**, even if none of its tasks needs a token: if core refuses (a lapsed or removed person, a
   disabled or deleted account), the whole run fails before any task runs, with the reason. Run-now runs aren't
   checked (the person is present), nor are runs on an install with no workload identity.

@@ -14,6 +14,8 @@ import type {
   ModuleConfig,
   RunnerInfo,
   ServiceAccountUse,
+  CoreServiceAccount,
+  CoreServiceAccountState,
   RunStatus,
   StorageBackendSummary,
   StorageObjectSummary,
@@ -38,6 +40,7 @@ const CATALOG = "/modules/catalog/api";
 // chosen {backendId, path} itself at save time.
 const STORAGE = "/modules/storage/api";
 const SPARK = "/modules/spark";
+const CORE = ""; // booth-core's own API, on the shell's origin (/api/...)
 
 export type GetAccessToken = () => string | null;
 
@@ -115,6 +118,10 @@ export const api = {
   setOwner: (c: ApiContext, id: string, owner: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/owner`, json("PUT", { owner })),
   /** booth-spark's limits for this caller (ADR 0119), for the Spark panel's hints. */
   sparkLimits: (c: ApiContext) => request<Record<string, unknown>>(c, SPARK, "/v1/limits"),
+  /** booth-core: the workspace's service accounts (workspace owners only; ADR 0120). */
+  serviceAccounts: (c: ApiContext) => request<CoreServiceAccount[]>(c, CORE, "/api/service-accounts"),
+  /** booth-core: one account's role and whether it is disabled (any member). */
+  serviceAccount: (c: ApiContext, name: string) => request<CoreServiceAccountState>(c, CORE, `/api/service-accounts/${e(name)}`),
   serviceAccountUses: (c: ApiContext) => request<{ items: ServiceAccountUse[] }>(c, PIPELINE, "/service-accounts/uses").then((r) => r.items),
 
   listPipelines: (c: ApiContext, q = "") => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, limit: 200 })}`),

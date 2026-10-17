@@ -6,4 +6,4 @@ and run history directly — ADR 0071 retired the separate Job entity). Backed b
 the base runner needs no other module installed (ADR 0006).
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
