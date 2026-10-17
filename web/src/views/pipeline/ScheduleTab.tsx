@@ -7,7 +7,7 @@ import { ScheduleEditor, type TriggerShape } from "../../task/ScheduleEditor";
 import type { PipelineScheduleUpdate, Trigger } from "../../types";
 import { Banner, Button, Card, Field, KVRows, inputClass, type KV } from "../../ui/primitives";
 import type { PipelineData } from "./data";
-import { ownerLabel, TakeOver } from "./RunsAs";
+import { OwnerBadge, OwnerPicker, ownerLabel, TakeOver } from "./RunsAs";
 
 // S2d — the Schedule & Triggers tab (docs/decisions/0016 §4, Figma screen 5). The read-only summary
 // is the default view; "Edit schedule" swaps it in place for the editor (ADR 0065 triggers, plus
@@ -78,8 +78,11 @@ function ScheduleSummary({ v, d, reload, saved, onEdit }: { v: ViewCtx; d: Pipel
       label: "Runs as",
       value: (
         <div className="flex flex-col gap-2">
-          <span>{p.owner ? ownerLabel(p.owner) : "No one yet — the first person to save a schedule becomes its owner"}</span>
-          <TakeOver v={v} p={p} onDone={reload} />
+          <span className="flex flex-wrap items-center gap-2">
+            {p.owner ? ownerLabel(p.owner) : "No one yet — the first person to save a schedule becomes its owner"}
+            <OwnerBadge v={v} owner={p.owner} />
+          </span>
+          {v.role === "owner" ? <OwnerPicker v={v} p={p} onDone={reload} /> : <TakeOver v={v} p={p} onDone={reload} />}
         </div>
       ),
     },

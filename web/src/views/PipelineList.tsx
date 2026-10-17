@@ -29,7 +29,7 @@ import {
   theadClass,
   type AnyStatus,
 } from "../ui/primitives";
-import { ownerLabel } from "./pipeline/RunsAs";
+import { OwnerBadge, ownerLabel } from "./pipeline/RunsAs";
 import { TriggerSummary } from "./pipeline/TriggerSummary";
 
 // S1 — the Pipelines list (docs/decisions/0016 §4, Figma screen 1). One row per pipeline entity;
@@ -257,7 +257,8 @@ function ServiceAccountUses({ v }: { v: ViewCtx }) {
                 </a>
                 {!p.scheduled && <span className="text-slate-500 dark:text-slate-400"> (not scheduled)</span>}
               </span>
-            ))}
+            ))}{" "}
+            <OwnerBadge v={v} owner={{ kind: "service", id: u.account, name: u.account, you: false }} />
           </li>
         ))}
       </ul>
@@ -320,7 +321,12 @@ function PipelineRow({
         <td className={`${tdClass} hidden whitespace-nowrap font-mono text-xs lg:table-cell`} title={p.nextRunAt ? formatRelative(p.nextRunAt) : undefined}>
           {p.nextRunAt ? formatStamp(p.nextRunAt) : "—"}
         </td>
-        <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>{p.owner ? ownerLabel(p.owner) : "—"}</td>
+        <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            {p.owner ? ownerLabel(p.owner) : "—"}
+            <OwnerBadge v={v} owner={p.owner} />
+          </span>
+        </td>
         <td className={`${tdClass} whitespace-nowrap text-right`}>
           {v.canWrite && (
             <span className="inline-flex items-center gap-2">

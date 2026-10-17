@@ -54,6 +54,7 @@ from .runners.registry import RunnerRegistry
 from .runners.spark import SPARK_STREAM
 from .runs import RunManager
 from .schedule import next_fire_trigger
+from .service_accounts import ServiceAccountsClient, ServiceAccountsUnavailable
 from .storage_client import StorageClient, StorageDenied, StorageNotFound, StorageUnavailable
 from .store.base import Busy, Store
 
@@ -92,6 +93,8 @@ class PipelineService:
     catalog: CatalogClient
     manager: RunManager
     storage: StorageClient
+    # ADR 0120: core's service accounts, read as the caller (checked when one is named as an owner).
+    accounts: ServiceAccountsClient | None = None
 
     # ---- pipelines ----
     def create_pipeline(self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str) -> tuple[Pipeline, PipelineVersion | None]:
@@ -232,10 +235,24 @@ class PipelineService:
                 raise ModelError(f"{owner!r} is not a service account id (svc:<workspace>:<name>)", "owner")
             if ref.workspace != ident.workspace:
                 raise ModelError(f"{owner!r} belongs to another workspace; choose one of this workspace's service accounts", "owner")
+            self._check_service_account(ident, ref.name)
             p.owner_sub, p.owner_name = ref.id, ref.name
         else:
             raise ModelError('a pipeline can be taken over ("me") or given to a service account (svc:<workspace>:<name>), never handed to another person', "owner")
         return self._need(self.store.update_schedule(p), "pipeline")
+
+    def _check_service_account(self, ident: Identity, name: str) -> None:
+        """The account must exist in core and be enabled before a pipeline is given to it."""
+        if self.accounts is None:
+            raise Unavailable("service accounts are booth-core's, and this module can't ask it (no core.url)")
+        try:
+            account = self.accounts.get(ident.token, ident.workspace, name)
+        except ServiceAccountsUnavailable as e:
+            raise Unavailable(f"could not check service account {name!r} with booth-core: {e}") from None
+        if account is None:
+            raise ModelError(f"this workspace has no service account named {name!r}", "owner")
+        if account.disabled:
+            raise ModelError(f"service account {name!r} is disabled; enable it in the workspace settings before giving it a pipeline", "owner")
 
     def service_account_uses(self, ident: Identity) -> list[tuple[str, list[Pipeline]]]:
         """Which of this workspace's pipelines run as each service account (ADR 0120 addendum 2:

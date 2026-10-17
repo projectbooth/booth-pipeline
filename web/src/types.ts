@@ -235,6 +235,24 @@ export interface OwnerInfo {
   you: boolean;
 }
 
+/** booth-core's GET /api/service-accounts (workspace owners only; ADR 0120). */
+export interface CoreServiceAccount {
+  id: string;
+  name: string;
+  role: "viewer" | "editor";
+  description: string;
+  disabled: boolean;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** booth-core's GET /api/service-accounts/{name} (any member): enough for the "Owner disabled" badge. */
+export interface CoreServiceAccountState {
+  name: string;
+  role: "viewer" | "editor";
+  disabled: boolean;
+}
+
 /** GET /service-accounts/uses: which pipelines run as each service account (core keeps no record). */
 export interface ServiceAccountUse {
   account: string;

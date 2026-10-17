@@ -30,6 +30,7 @@ from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
 from .service import Forbidden, NotFound, PipelineBusy, PipelineService, Unavailable
+from .service_accounts import ServiceAccountsClient
 from .storage_client import StorageClient
 from .store.base import Conflict, InUse, Store
 from .workload import WorkloadMinter
@@ -129,6 +130,7 @@ def create_app(
     start_scheduler: bool = True,
     minter: WorkloadMinter | None = None,
     runner: Runner | None = None,
+    accounts: ServiceAccountsClient | None = None,
 ) -> FastAPI:
     store = store or build_store(cfg)
     if runner is None:
@@ -162,7 +164,7 @@ def create_app(
     registry = RunnerRegistry(runners)
     worker_id = f"{platform.node()}-{uuid4().hex[:8]}"
     manager = RunManager(store, registry, cfg, worker_id, minter)
-    service = PipelineService(store, registry, catalog, manager, storage)
+    service = PipelineService(store, registry, catalog, manager, storage, accounts or (ServiceAccountsClient(cfg.core_url) if cfg.core_url else None))
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
 
     @asynccontextmanager

@@ -456,3 +456,16 @@ the build differs from the sections above, or adds to them:
 - **Waiting on core's routes:** the service-account picker (the account list) and the "Owner disabled" badge
   (a single account's state). Until then a workspace owner assigns an account with `PUT /api/pipelines/{id}/owner`.
 
+## 13. The owner picker and the badge (booth-pipeline 0.2.1, pipeline-ui 1.4.0; core 0.3.7)
+
+With core's routes live (core's design note, "Route shapes"):
+
+- **The picker** (Schedule tab, workspace owners only) lists `GET /api/service-accounts` (owner-only; role,
+  description, disabled), plus "Me". Disabled accounts are listed but can't be chosen. Editors keep Take over and
+  never ask for the list. If core won't list them (an older core, or any refusal), the picker says so.
+- **Assigning an account** now asks core, as the caller, `GET /api/service-accounts/{name}` first: no such account
+  is a 422, a disabled one is a 422 ("enable it first"), and core unreachable is a 503 with nothing changed.
+- **The badge** ("Owner disabled", "Owner not found") comes from the same per-account route, which any member may
+  read. It shows on the Schedule tab, in the pipelines list's "Runs as" column and in "Service accounts in use",
+  asked once per account (cached 30 s).
+
