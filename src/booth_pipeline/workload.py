@@ -14,6 +14,7 @@ person's live role, or a service account's stored role (``svc:<workspace>:<name>
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -168,6 +169,27 @@ class AccessProvider:
         if not self._owner:
             raise MintRefused("this pipeline has no recorded owner (it predates workload identity); an editor can Take over the pipeline")
         return self._minter.mint(self._workspace, self._subject, self._ceiling, self._owner, self._owner_name)
+
+    def authorize(self, attempts: int = 3, wait_seconds: float = 5.0, cancel: object = None) -> str:
+        """ADR 0119 amendment 3: a scheduled run asks core once, before any task, whether it would issue
+        a token for this run's owner, whatever the tasks need, so a pipeline whose owner has lapsed or
+        whose service account is disabled runs nothing at all. The token is discarded: each task still
+        mints its own. Returns the role core would grant. Raises MintRefused (with the reason) or, once
+        core has been unreachable ``attempts`` times, MintUnavailable."""
+        for i in range(attempts):
+            try:
+                return self._mint().role
+            except MintUnavailable:
+                if i == attempts - 1:
+                    raise
+                if cancel is not None and getattr(cancel, "canceled", False):
+                    raise
+                time.sleep(wait_seconds * (i + 1))
+        raise AssertionError("unreachable")
+
+    @property
+    def configured(self) -> bool:
+        return self._minter is not None
 
     def grant(self) -> TaskAccess:
         t = self._mint()

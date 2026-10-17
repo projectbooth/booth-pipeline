@@ -75,7 +75,10 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   haven't signed in for core's `ownerMaxAge` (7 days by default); a service account's don't lapse, but stop at
   once when the account is disabled. Only workspace owners choose or remove a service account; nobody hands a
   pipeline to another person. The pipelines list shows which pipelines run as each account: core keeps no such
-  record, and an account must be disabled before it can be deleted.
+  record, and an account must be disabled before it can be deleted. **A scheduled run first asks core whether it
+  may act for its owner**, even if none of its tasks needs a token: if core refuses (a lapsed or removed person, a
+  disabled or deleted account), the whole run fails before any task runs, with the reason. Run-now runs aren't
+  checked (the person is present), nor are runs on an install with no workload identity.
 - **Python packages** (ADR 0115): a Python task can list requirements (`requests==2.32.3`, one per line; package
   specifiers only, no URLs, paths or pip options). Each run installs them into the task's own pod before its code
   runs, from the install's package index (`runner.pip`), in an init container that holds no token or credentials,

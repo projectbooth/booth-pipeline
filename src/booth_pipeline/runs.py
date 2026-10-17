@@ -29,6 +29,7 @@ from .records import (
     TASK_RUNNING,
     TASK_SKIPPED,
     TASK_SUCCEEDED,
+    TRIGGER_SCHEDULE,
     LogLine,
     Run,
     TaskRun,
@@ -37,7 +38,7 @@ from .resolve import resolve_task_configs
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .store.base import Store
-from .workload import AccessProvider, WorkloadMinter
+from .workload import AccessProvider, MintRefused, MintUnavailable, WorkloadMinter
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +157,9 @@ class StoreRecorder:
 
 
 class RunManager:
+    # Between attempts to reach core when authorizing a scheduled run (5 s, then 10 s). Tests shorten it.
+    authorize_wait_seconds = 5.0
+
     def __init__(self, store: Store, registry: RunnerRegistry, cfg: Config, worker_id: str, minter: WorkloadMinter | None = None) -> None:
         self._store = store
         self._registry = registry
@@ -240,11 +244,15 @@ class RunManager:
                 storage_url=self._cfg.storage_base,
                 catalog_url=self._cfg.catalog_base,
             )
-            result = engine.execute(
-                version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access
-            )
-            status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_FAILED)
-            error = None if result.success else result.error
+            refused = self._authorize(run, access, recorder, cancel)
+            if refused:
+                status, error = RUN_FAILED, refused
+            else:
+                result = engine.execute(
+                    version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access
+                )
+                status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_FAILED)
+                error = None if result.success else result.error
         except Exception as e:  # noqa: BLE001 - engine/compile failure is a failed run, not a crashed worker
             log.exception("run %s: engine error", run.id)
             status, error = RUN_FAILED, f"engine error: {e}"
@@ -258,6 +266,26 @@ class RunManager:
         recorder.system(f"run {status} after {time.monotonic() - started:.1f}s" + (f": {error}" if error else ""))
         recorder.close()  # flush every log line BEFORE the terminal status is visible
         store.finish_run(run.id, status, error, _now())
+
+    def _authorize(self, run: Run, access: AccessProvider, recorder: StoreRecorder, cancel: Cancellation) -> str | None:
+        """A scheduled run acts for its owner with nobody present, so it starts only if core will issue
+        a token for that owner right now, even if no task needs one (ADR 0119 amendment 3, for person
+        owners and service accounts alike). Returns the run's failure reason, or None to go ahead.
+        A manual run skips this: the person who pressed Run now is present. An install with no minting
+        credential can't issue any token, so there is nothing to ask and its runs go ahead."""
+        if run.trigger != TRIGGER_SCHEDULE or not access.configured:
+            return None
+        try:
+            role = access.authorize(wait_seconds=self.authorize_wait_seconds, cancel=cancel)
+        except MintRefused as e:
+            reason = f"not started: core would not authorize this scheduled run: {e}"
+        except MintUnavailable as e:
+            reason = f"not started: could not reach booth-core to authorize this scheduled run ({e})"
+        else:
+            recorder.system(f"authorized: core will issue this run's tokens (role {role or 'unknown'})")
+            return None
+        recorder.system(reason)
+        return reason
 
     def _watch(self, run_id: str, cancel: Cancellation, stop: threading.Event) -> None:
         """Heartbeat (so a dead worker is noticed) and poll for a cancel requested on any replica."""

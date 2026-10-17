@@ -74,3 +74,8 @@ not run against a real `booth-core` minting, nor a real storage/catalog trusting
 - **The 403 message** no longer advises saving the job to take it over (that never moved an existing owner). Person
   causes stay one message, now naming Take over and service accounts; the two service-account causes core reports
   (`service_account_disabled`, `service_account_not_found`) get their own.
+- **A scheduled run is authorized at its start** (ADR 0119 amendment 3 point 3): one mint before any task, whatever
+  the tasks need, and the whole run fails with the reason if core refuses (or can't be reached after three tries).
+  This replaces the per-task opt-in's "a pipeline that never touches storage must not be blocked by a lapsed owner"
+  for scheduled runs: an unattended run with nobody accountable for it must not run code at all. Manual runs, and
+  installs with no minting credential, are unchanged.
