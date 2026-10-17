@@ -3,10 +3,10 @@
 ``base`` is always present. Anything else is opt-in: a task may name another runner only if it is
 registered *and available* (ADR 0006 — Spark, or any other, is never assumed and never a fallback).
 
-In v0 ``spark`` is listed as **unavailable**, with a reason, and cannot be selected. booth-spark
-has not yet published the compute-submission interface it says it will define (its brief, ADR
-0006), and inventing one here would be designing another module's contract for it. The seam
-(``Runner``) and this registry are what a future adapter plugs into.
+``spark`` (ADR 0119, runners/spark.py) is registered when this install can submit to booth-spark
+as a run: core's gateway (``core.url``) and workload identity. Even then it is available only in a
+workspace where booth-spark answers, which it checks live, as the caller. Not registered, it is
+listed as unavailable with the reason, and can't be selected.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from .base import Runner
 
 SPARK_UNAVAILABLE = (
-    "booth-spark does not yet define a compute-submission interface for pipelines to target "
-    "(ADR 0006); a Spark runner can be wired in once it does"
+    "Spark tasks need booth-core's gateway (core.url) and workload identity on this install, "
+    "and runner.spark.enabled (an operator setting)"
 )
 
 
@@ -42,8 +42,19 @@ class RunnerRegistry:
     def available_ids(self) -> set[str]:
         return set(self._runners)
 
-    def describe(self) -> list[RunnerInfo]:
-        out = [RunnerInfo(id=r, display_name=r.capitalize(), available=True) for r in sorted(self._runners)]
+    def availability(self, runner_id: str, token: str, workspace: str) -> str | None:
+        """None if ``runner_id`` can run in this workspace for this caller, else why not."""
+        runner = self._runners.get(runner_id)
+        if runner is None:
+            return f"runner {runner_id!r} is not available on this install"
+        check = getattr(runner, "availability", None)
+        return check(token, workspace) if callable(check) else None
+
+    def describe(self, token: str | None = None, workspace: str | None = None) -> list[RunnerInfo]:
+        out = []
+        for r in sorted(self._runners):
+            reason = self.availability(r, token, workspace) if token and workspace else None
+            out.append(RunnerInfo(id=r, display_name=r.capitalize(), available=reason is None, reason=reason))
         if "spark" not in self._runners:
             out.append(RunnerInfo(id="spark", display_name="Spark", available=False, reason=SPARK_UNAVAILABLE))
         return out

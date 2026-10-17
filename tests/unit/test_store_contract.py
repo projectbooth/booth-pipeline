@@ -476,3 +476,18 @@ def test_concurrent_exclusive_triggers_admit_exactly_one(store):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert results.count("ok") == 1 and results.count("busy") == 7
+
+
+def test_a_task_runs_external_record_and_hiding_a_log_stream(store):
+    """ADR 0119: where an attempt ran (a Spark application), and the driver log hidden from viewers."""
+    p = store.create_pipeline(WS, "etl", "", "a")
+    run = store.create_run(new_run(p), ["a"])
+    (t,) = store.list_task_runs(run.id)
+    assert t.external is None
+    t.external = {"kind": "spark", "id": "app-1", "state": "running", "reason": None}
+    store.update_task_run(t)
+    assert store.list_task_runs(run.id)[0].external == {"kind": "spark", "id": "app-1", "state": "running", "reason": None}
+    store.append_logs([LogLine(run.id, i, T0, "a", 1, s, f"line {i}") for i, s in enumerate(["system", "spark", "stdout", "spark"], start=1)])
+    assert [ln.seq for ln in store.list_logs(run.id, None, 0, 100)] == [1, 2, 3, 4]
+    assert [ln.seq for ln in store.list_logs(run.id, None, 0, 100, ("spark",))] == [1, 3]
+    assert [ln.seq for ln in store.list_logs(run.id, "a", 1, 100, ("spark",))] == [3]

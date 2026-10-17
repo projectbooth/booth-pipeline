@@ -476,3 +476,18 @@ def test_an_in_cluster_index_opens_exactly_its_pods_on_its_port():
 def test_an_index_selector_without_the_other_is_refused_rather_than_opened_wide():
     out = helm("template", "x", "charts/booth-pipeline", *REQUIRED, "--set", "runner.pip.egress.podSelector.app=pypi")
     assert out.returncode != 0 and "runner.pip.egress needs both namespaceSelector and podSelector" in out.stderr
+
+
+# ---- ADR 0119: the Spark runner -------------------------------------------------------------------
+
+
+def test_the_spark_runners_settings_reach_the_api_pod():
+    env = api_env(docs("--set", "runner.spark.retryMinDelaySeconds=200", "--set", "runner.spark.enabled=false"))
+    assert env["BOOTH_PIPELINE_SPARK_ENABLED"] == "false"
+    assert env["BOOTH_PIPELINE_SPARK_RETRY_MIN_DELAY_SECONDS"] == "200"
+    assert env["BOOTH_PIPELINE_SPARK_POLL_SECONDS"] == "5" and env["BOOTH_PIPELINE_SPARK_ADMISSION_WAIT_SECONDS"] == "900"
+
+
+def test_the_default_retry_floor_is_above_seaweedfs_empty_folder_delay():
+    assert int(api_env(docs())["BOOTH_PIPELINE_SPARK_RETRY_MIN_DELAY_SECONDS"]) > 120
+

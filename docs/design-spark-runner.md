@@ -427,3 +427,32 @@ or in booth-e2e. I will report which.
 **Build order** (after you accept this note and the asks are answered): owner model and API (section 7) →
 Spark runner backend (sections 2, 5, 6) → task-pod client → builder and run view → Integration → real-stack
 gate. The owner work doesn't depend on Spark and can merge first, once C4 exists.
+
+## 12. As built (booth-pipeline 0.2.0, pipeline-ui 1.3.0)
+
+Built in three PRs: ownership and Take over (#16), mint at a scheduled run's start (#17), the Spark runner. Where
+the build differs from the sections above, or adds to them:
+
+- **How the pod talks to the backend.** No new stream event type: the task pod's Spark client writes its events
+  (`submitted`, `state`, `waiting`) as marked lines on stderr, and `runners/spark.py` turns them into system lines
+  and the attempt's record, so they never reach the log as text. The driver log arrives on stdout and is stored as
+  the `spark` stream. The pod runs only module code, so nothing user-written can forge an event.
+- **The attempt's record** is `task_runs.external` (migration 0007): `{kind: spark, id, state, reason}`, shown as
+  the chip in the run view, linking to `/spark/runs/<id>`.
+- **A Spark task's pod gets no credential sidecar**: it needs the run's token, not a database or S3 lease (Spark's
+  pods get those).
+- **Failure reasons** come from the client through `failure.txt` in the task's working directory (any harness may
+  write it; the runner service uses it instead of "exited with code N").
+- **The log copy** uses booth-spark's cursor (`?from=`, `X-Log-Offset`) while the run lives. Against a booth-spark
+  without it, the kept log is copied once when the run ends (no tail-and-dedupe).
+- **The retry floor** is applied by the engine before the retry, in full, on top of the task's own retry delay,
+  and only when the application reached `running`.
+- **Code size:** the saved code is limited to 248 KiB at save; the prelude and the inputs make up the rest of
+  Spark's 256 KiB, checked when the attempt starts.
+- **The stand-in Spark API** (`tests/integration/fixtures/spark/`) runs the submitted code for real against a stub
+  `pyspark`, and is shared by the unit tests and Integration. Integration drives scheduled runs through the API
+  pod's own service (store, engine, Job runner, Spark runner), not over HTTP, because no identity provider is in
+  that cluster. The ADR 0119 gate 3 run on the real stack (real core, real booth-spark, SeaweedFS) is still to do.
+- **Waiting on core's routes:** the service-account picker (the account list) and the "Owner disabled" badge
+  (a single account's state). Until then a workspace owner assigns an account with `PUT /api/pipelines/{id}/owner`.
+

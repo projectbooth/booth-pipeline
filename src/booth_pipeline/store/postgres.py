@@ -495,13 +495,13 @@ class PostgresStore:
     def list_task_runs(self, run_id):
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM task_runs WHERE run_id=%s ORDER BY task_key", (run_id,)).fetchall()
-        return [TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"]) for r in rows]
+        return [TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"], r["external"]) for r in rows]
 
     def update_task_run(self, t):
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s WHERE run_id=%s AND task_key=%s",
-                (t.status, t.attempts, t.started_at, t.finished_at, t.error, t.run_id, t.task_key),
+                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s, external=%s WHERE run_id=%s AND task_key=%s",
+                (t.status, t.attempts, t.started_at, t.finished_at, t.error, Jsonb(t.external) if t.external is not None else None, t.run_id, t.task_key),
             )
 
     # ---- logs ----
@@ -515,11 +515,14 @@ class PostgresStore:
                 [(ln.run_id, ln.seq, ln.ts, ln.task_key, ln.attempt, ln.stream, _pg_text(ln.message)) for ln in lines],
             )
 
-    def list_logs(self, run_id, task_key, after_seq, limit):
+    def list_logs(self, run_id, task_key, after_seq, limit, exclude_streams=()):
         sql, args = "SELECT * FROM run_logs WHERE run_id=%s AND seq > %s", [run_id, after_seq]
         if task_key is not None:
             sql += " AND task_key = %s"
             args.append(task_key)
+        if exclude_streams:
+            sql += " AND stream <> ALL(%s)"
+            args.append(list(exclude_streams))
         with self._pool.connection() as conn:
             rows = conn.execute(sql + " ORDER BY seq LIMIT %s", [*args, limit]).fetchall()
         return [LogLine(r["run_id"], r["seq"], r["ts"], r["task_key"], r["attempt"], r["stream"], r["message"]) for r in rows]

@@ -66,6 +66,9 @@ class TaskInvocation:
     # ADR 0115: the task's own Python requirements, installed into its pod before it starts. Only a
     # task Job installs them (runners/kubejob.py); the runner service then puts them on the path.
     requirements: tuple[str, ...] = ()
+    # ADR 0119: for a Spark task, what the task pod's Spark client needs (the task's Spark options,
+    # plus where booth-spark is and how to wait for it, added by runners/spark.py). None otherwise.
+    spark: dict[str, Any] | None = None
 
 
 class TaskLog(Protocol):

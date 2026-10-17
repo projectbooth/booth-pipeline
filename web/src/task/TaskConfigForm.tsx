@@ -3,6 +3,7 @@ import type { ApiContext } from "../api/client";
 import type { Backoff, PipStatus, RunnerInfo, TaskConfig } from "../types";
 import { CodePicker } from "./CodePicker";
 import { isRequirementsField, RequirementsField } from "./RequirementsField";
+import { SparkOptionsForm, type SparkLimits } from "./SparkOptionsForm";
 import { StoragePicker } from "./StoragePicker";
 import { Banner, Button, Field, NumberInput, inputClass, monoClass } from "../ui/primitives";
 
@@ -38,6 +39,9 @@ export interface TaskConfigFormProps {
   error?: { message: string; field: string | null };
   /** Whether this install can install packages (ADR 0115); null/undefined while unknown. */
   pip?: PipStatus | null;
+  /** ADR 0119: booth-spark's limits for this caller, and the install's retry floor for Spark tasks. */
+  sparkLimits?: SparkLimits | null;
+  sparkRetryFloorSeconds?: number | null;
   onChange: (config: TaskConfig) => void;
 }
 
@@ -48,7 +52,7 @@ function isPython(config: TaskConfig): boolean {
   return !lang || lang === "python";
 }
 
-export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onChange }: TaskConfigFormProps) {
+export function TaskConfigForm({ config, runners, api, readOnly, error, pip, sparkLimits, sparkRetryFloorSeconds, onChange }: TaskConfigFormProps) {
   const [paramsDraft, setParamsDraft] = useState(() => JSON.stringify(config.params, null, 2));
   const [paramsError, setParamsError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
@@ -71,7 +75,9 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
   // field, or a field this form has no slot for) falls back to the banner, so a message is never
   // silently dropped just because it doesn't map to an input here.
   const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
-  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field)));
+  const isSparkField = (f: string | null | undefined) => f === "spark" || !!f?.startsWith("spark.");
+  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field) || isSparkField(error.field)));
+  const onSpark = config.runner === "spark";
   const requirements = config.requirements ?? [];
 
   return (
@@ -143,7 +149,18 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
 
         <Field id="task-runner" label="Runs on" error={fieldError("runner")} help="The base runner needs nothing else installed. Spark is only ever a choice you make, and only when it is installed.">
           {(p) => (
-            <select {...p} className={inputClass} value={config.runner} onChange={(e) => onChange({ ...config, runner: e.target.value })}>
+            <select
+              {...p}
+              className={inputClass}
+              value={config.runner}
+              onChange={(e) =>
+                onChange(
+                  e.target.value === "spark"
+                    ? { ...config, runner: "spark", spark: config.spark ?? {}, platformAccess: true }
+                    : { ...config, runner: e.target.value, spark: undefined },
+                )
+              }
+            >
               {runners.map((r) => (
                 <option key={r.id} value={r.id} disabled={!r.available}>
                   {r.displayName}
@@ -160,9 +177,27 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
           </p>
         ))}
 
+        {onSpark && (
+          <SparkOptionsForm
+            value={config.spark ?? {}}
+            limits={sparkLimits}
+            error={isSparkField(error?.field) ? error?.message : undefined}
+            onChange={(spark) => onChange({ ...config, spark })}
+          />
+        )}
+
         <section aria-label="Retry" className="flex flex-col gap-2">
           <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Retry policy</h3>
-          <p className="-mt-1 text-xs text-slate-500 dark:text-slate-400">Zero retries means the task fails on the first error.</p>
+          <p className="-mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Zero retries means the task fails on the first error.
+            {onSpark && (
+              <>
+                {" "}
+                A retry after a Spark run that started waits at least {Math.round((sparkRetryFloorSeconds ?? 150) / 6) / 10} minutes (SeaweedFS keeps an emptied
+                folder about 2 minutes, so a write in errorifexists mode retried sooner would fail); a task meant to be retried should write with overwrite.
+              </>
+            )}
+          </p>
           <div className="grid grid-cols-3 gap-2">
             <Field id="retry-max" label="Max retries" error={fieldError("retry.maxRetries")}>
               {(p) => (
@@ -191,7 +226,8 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
             <input
               type="checkbox"
               className="mt-0.5"
-              checked={config.platformAccess}
+              checked={config.platformAccess || onSpark}
+              disabled={onSpark}
               onChange={(e) => onChange({ ...config, platformAccess: e.target.checked })}
             />
             <span>
@@ -202,6 +238,7 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
             Gives the task <code>ctx.storage</code> and <code>ctx.catalog</code>, acting as the run with at most the pipeline's role ceiling (and
             never more than the run's owner currently holds). Off by default: a task that doesn't need them never asks for an identity, so it
             can't be blocked by one. If the owner hasn't signed in to the platform recently, a task that needs access fails with that reason.
+            {onSpark && " A Spark task always has it: its application is submitted as the run."}
           </p>
         </section>
 
@@ -211,7 +248,7 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, onC
           )}
         </Field>
 
-        {(isPython(config) || requirements.length > 0) && (
+        {((isPython(config) && !onSpark) || requirements.length > 0) && (
           <RequirementsField
             value={requirements}
             pip={pip}

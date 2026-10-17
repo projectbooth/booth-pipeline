@@ -25,6 +25,7 @@ from .model import ModelError
 from .runners.base import Runner
 from .runners.kubejob import KubernetesJobRunner
 from .runners.registry import RunnerRegistry
+from .runners.spark import SparkRunner
 from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
@@ -143,10 +144,22 @@ def create_app(
         else:
             log.warning("BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset: tasks run in subprocesses of THIS process (local dev and tests only; see docs/decisions/0018)")
             runner = SubprocessRunner(python=cfg.runner_python or None, env_passthrough=cfg.runner_env_passthrough)
-    registry = RunnerRegistry([runner])
     catalog = catalog or CatalogClient(cfg.core_url)
     storage = storage or StorageClient(cfg.core_url)
     minter = minter if minter is not None else WorkloadMinter.from_dir(cfg.workload_mint_dir)
+    runners: list[Runner] = [runner]
+    if cfg.spark_enabled and cfg.core_url and minter is not None:
+        # ADR 0119: submitted as the run, so it needs core's gateway and a minting credential.
+        runners.append(
+            SparkRunner(
+                runner,
+                cfg.core_url,
+                poll_seconds=cfg.spark_poll_seconds,
+                admission_wait_seconds=cfg.spark_admission_wait_seconds,
+                retry_min_delay_seconds=cfg.spark_retry_min_delay_seconds,
+            )
+        )
+    registry = RunnerRegistry(runners)
     worker_id = f"{platform.node()}-{uuid4().hex[:8]}"
     manager = RunManager(store, registry, cfg, worker_id, minter)
     service = PipelineService(store, registry, catalog, manager, storage)

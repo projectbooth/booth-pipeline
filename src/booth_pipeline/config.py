@@ -75,6 +75,13 @@ class Config:
     # runner.pip and the task NetworkPolicy ("index", "internet", "extra", "unrestricted"); empty = no
     # route, so a task with requirements fails at once, naming the value to set.
     pip_route: str = ""
+    # ADR 0119: the Spark runner (runner.spark): registered when core_url is set, workload identity is
+    # configured and this is on. How often a Spark task's pod polls booth-spark, how long it waits for
+    # capacity, and the least wait before retrying an attempt whose application ran (SeaweedFS).
+    spark_enabled: bool = True
+    spark_poll_seconds: int = 5
+    spark_admission_wait_seconds: int = 900
+    spark_retry_min_delay_seconds: int = 150
 
     # Workload identity (ADR 0056/0058): the Secret core writes when the manifest declares
     # `workloadIdentity: {mint: true}`. Only ever readable by THIS (trusted) pod.
@@ -112,6 +119,10 @@ class Config:
             task_start_timeout_seconds=_int("BOOTH_PIPELINE_TASK_START_TIMEOUT_SECONDS", 300, 10),
             task_name_prefix=os.environ.get("BOOTH_PIPELINE_TASK_NAME_PREFIX", "") or "booth-pipeline-task",
             pip_route=os.environ.get("BOOTH_PIPELINE_PIP_ROUTE", ""),
+            spark_enabled=_bool("BOOTH_PIPELINE_SPARK_ENABLED", True),
+            spark_poll_seconds=_int("BOOTH_PIPELINE_SPARK_POLL_SECONDS", 5, 1),
+            spark_admission_wait_seconds=_int("BOOTH_PIPELINE_SPARK_ADMISSION_WAIT_SECONDS", 900, 0),
+            spark_retry_min_delay_seconds=_int("BOOTH_PIPELINE_SPARK_RETRY_MIN_DELAY_SECONDS", 150, 0),
             workload_mint_dir=os.environ.get("BOOTH_WORKLOAD_MINT_DIR", "/etc/booth/workload"),
             storage_url=os.environ.get("BOOTH_PIPELINE_STORAGE_URL", "").rstrip("/"),
             catalog_url=os.environ.get("BOOTH_PIPELINE_CATALOG_URL", "").rstrip("/"),

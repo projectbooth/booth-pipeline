@@ -56,6 +56,13 @@ Backoff = Literal["fixed", "linear", "exponential"]
 # The one runner every install has. Any other id is only valid if a runner with that id is
 # registered and available (runners/registry.py) — ADR 0006: Spark is never a default.
 BASE_RUNNER = "base"
+# ADR 0119: a task whose PySpark code booth-spark runs (runners/spark.py; docs/design-spark-runner.md).
+SPARK_RUNNER = "spark"
+# booth-spark's limit on main.inlinePython: the task's code, its inputs and the prelude together.
+MAX_SPARK_INLINE_BYTES = 256 * 1024
+# What a Spark task's run(ctx) may return: it travels back as one line of the driver's log.
+MAX_SPARK_OUTPUT_BYTES = 64 * 1024
+SPARK_MEMORY_RE = r"^[1-9][0-9]{0,5}[mg]$"  # booth-spark's Memory pattern (a JVM heap)
 
 # The highest role a run's workload token may carry. Never "owner": nothing a pipeline does needs
 # workspace administration, and a token that can't administer can't be turned into one.
@@ -198,6 +205,52 @@ def code_language(code: Code) -> str:
     return code.language or "python"
 
 
+class SparkDriver(Wire):
+    memory: str | None = Field(None, pattern=SPARK_MEMORY_RE)
+
+
+class SparkExecutors(Wire):
+    min: int | None = Field(None, ge=0)
+    max: int | None = Field(None, ge=0)
+    memory: str | None = Field(None, pattern=SPARK_MEMORY_RE)
+
+
+class SparkResources(Wire):
+    driver: SparkDriver = Field(default_factory=SparkDriver)
+    executors: SparkExecutors = Field(default_factory=SparkExecutors)
+
+
+class SparkStorageLocation(Wire):
+    backend_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+    path: str = Field(min_length=1, max_length=1024)
+    access: Literal["read", "readwrite"] = "read"
+
+
+class SparkDataAccess(Wire):
+    database: bool = False
+    lakehouse: bool = False
+    storage: list[SparkStorageLocation] = Field(default_factory=list, max_length=4)
+
+
+class SparkOptions(Wire):
+    """What a Spark task asks booth-spark for (its ``/v1`` ApplicationSpec, less the code, which is
+    the task's own snapshotted source, and less ``maxDuration``, which is the task's timeout). The
+    conf allowlist and the per-caller limits are Spark's to enforce: a refusal fails the attempt with
+    Spark's own message."""
+
+    resources: SparkResources = Field(default_factory=SparkResources)
+    conf: dict[str, Annotated[str, Field(max_length=256)]] = Field(default_factory=dict, max_length=32)
+    args: list[Annotated[str, Field(max_length=4096)]] = Field(default_factory=list, max_length=64)
+    data_access: SparkDataAccess = Field(default_factory=SparkDataAccess)
+
+    @model_validator(mode="after")
+    def _executors_ordered(self) -> SparkOptions:
+        e = self.resources.executors
+        if e.min is not None and e.max is not None and e.min > e.max:
+            raise ValueError("resources.executors.min is more than max")
+        return self
+
+
 class TaskConfig(Wire):
     """One version's worth of a standalone Task's configuration (ADR 0071) — what actually runs.
     The direct counterpart of ``PipelineSpec``, just for a Task instead of a Pipeline: a Task's
@@ -224,6 +277,16 @@ class TaskConfig(Wire):
     # credential-less init container (docs/design-task-requirements.md). Checked in
     # validate_task_config, entry by entry, so an error names the line.
     requirements: list[str] = Field(default_factory=list)
+    # ADR 0119: required when runner is "spark", refused otherwise.
+    spark: SparkOptions | None = None
+
+    @model_validator(mode="after")
+    def _spark_always_has_platform_access(self) -> TaskConfig:
+        # A Spark application is submitted AS the run (docs/design-spark-runner.md section 2), so a
+        # Spark task always gets the run's token; the builder shows the setting locked on.
+        if self.runner == SPARK_RUNNER and not self.platform_access:
+            self.platform_access = True
+        return self
 
     @field_validator("params")
     @classmethod
@@ -266,10 +329,29 @@ def validate_task_config(config: TaskConfig, available_runners: set[str] | None 
     src = config.code.source
     if src and len(src.encode("utf-8")) > MAX_TASK_SOURCE_BYTES:
         raise ModelError(f"the task's code is more than {MAX_TASK_SOURCE_BYTES} bytes", "code")
+    if config.runner == SPARK_RUNNER:
+        validate_spark_task(config)
+    elif config.spark is not None:
+        raise ModelError("Spark options are only for a task that runs on Spark", "spark")
     if config.requirements:
         if code_language(config.code) != "python":
             raise ModelError("only a Python task can install packages", "requirements")
         check_requirements(config.requirements)
+
+
+def validate_spark_task(config: TaskConfig) -> None:
+    """ADR 0119: a Spark task's code is PySpark, sent to booth-spark inline (never as a storage path,
+    which Spark would read at run start, breaking the snapshot rule, ADR 0063)."""
+    if config.spark is None:
+        raise ModelError("a task that runs on Spark needs its Spark options", "spark")
+    if code_language(config.code) != "python":
+        raise ModelError(f"a Spark task's code must be Python (PySpark), not {code_language(config.code)!r}", "code")
+    if config.requirements:
+        raise ModelError("Python packages install into the task's own pod, not Spark's; a Spark task can't list them", "requirements")
+    src = config.code.source
+    # The prelude and the task's inputs also count against Spark's limit; this is the part known now.
+    if src and len(src.encode("utf-8")) > MAX_SPARK_INLINE_BYTES - 8 * 1024:
+        raise ModelError(f"a Spark task's code is limited to {(MAX_SPARK_INLINE_BYTES - 8 * 1024) // 1024} KiB (booth-spark takes at most 256 KiB inline)", "code")
 
 
 def check_requirements(reqs: list[str]) -> None:

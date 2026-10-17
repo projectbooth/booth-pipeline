@@ -110,7 +110,7 @@ def test_health_needs_no_auth_and_reports_the_database(env):
 def test_runners_lists_base_available_and_spark_unavailable_with_a_reason(env):
     items = {r["id"]: r for r in env.call("GET", "/runners").json()["items"]}
     assert items["base"]["available"] is True
-    assert items["spark"]["available"] is False and "booth-spark" in items["spark"]["reason"]
+    assert items["spark"]["available"] is False and "core.url" in items["spark"]["reason"]
 
 
 # ---- pipelines -----------------------------------------------------------------------------

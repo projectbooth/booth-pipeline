@@ -173,6 +173,8 @@ def task_run_json(t: TaskRun) -> dict[str, Any]:
         "startedAt": _iso(t.started_at),
         "finishedAt": _iso(t.finished_at),
         "error": t.error,
+        # ADR 0119: a Spark task's application ({kind, id, state, reason}); null otherwise.
+        "external": t.external,
     }
 
 
@@ -214,6 +216,8 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
         },
         "catalogConfigured": svc(request).catalog.configured,
         "pip": pip_status(cfg),
+        # ADR 0119: the Spark runner's settings the builder explains, when this install has it.
+        "spark": {"retryMinDelaySeconds": cfg.spark_retry_min_delay_seconds} if "spark" in svc(request).registry.available_ids() else None,
     }
 
 
@@ -228,10 +232,11 @@ def pip_status(cfg: Any) -> dict[str, Any]:
 
 
 @router.get("/runners")
-def runners(request: Request, _: Identity = Depends(require_read)) -> dict[str, Any]:
+def runners(request: Request, ident: Identity = Depends(require_read)) -> dict[str, Any]:
     """Which runners a task may target. ``base`` is always there; Spark is listed but
     unavailable, with the reason (ADR 0006: never assumed, never a fallback)."""
-    return {"items": [{"id": r.id, "displayName": r.display_name, "available": r.available, "reason": r.reason} for r in svc(request).registry.describe()]}
+    infos = svc(request).registry.describe(ident.token, ident.workspace)
+    return {"items": [{"id": r.id, "displayName": r.display_name, "available": r.available, "reason": r.reason} for r in infos]}
 
 
 # ---- pipelines -----------------------------------------------------------------------------

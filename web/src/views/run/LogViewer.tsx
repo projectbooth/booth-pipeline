@@ -16,6 +16,7 @@ const STREAM_CLASS: Record<LogLine["stream"], string> = {
   stdout: "text-slate-800 dark:text-slate-200",
   stderr: "text-red-700 dark:text-red-400",
   system: "italic text-slate-500 dark:text-slate-400",
+  spark: "text-amber-900 dark:text-amber-200",
 };
 
 function clock(iso: string): string {

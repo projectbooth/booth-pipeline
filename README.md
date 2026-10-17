@@ -79,6 +79,17 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   may act for its owner**, even if none of its tasks needs a token: if core refuses (a lapsed or removed person, a
   disabled or deleted account), the whole run fails before any task runs, with the reason. Run-now runs aren't
   checked (the person is present), nor are runs on an install with no workload identity.
+- **Spark tasks** (ADR 0119; [design](docs/design-spark-runner.md)). A Python task can run on booth-spark: "Runs on:
+  Spark" in its settings, with driver and executor sizes, a few Spark settings, arguments, and the data it may use
+  (the workspace's database, its lakehouse, up to 4 storage locations). Its saved code runs as PySpark with the same
+  `ctx` (`ctx.spark` is the SparkSession; `run(ctx)` may return up to 64 KiB to downstream tasks), submitted through
+  core's gateway **as the run**, so with the access of whoever the run acts as (above). The task's own pod runs no
+  user code: it submits, polls and copies the driver log, which only editors and owners can read in the run view
+  (viewers see the state). There is no Spark UI link for these runs. A retry after an application that started waits
+  at least `runner.spark.retryMinDelaySeconds` (150 s): SeaweedFS keeps an emptied folder about 2 minutes, so a
+  write in `errorifexists` mode retried sooner fails. A task meant to be retried should write with `overwrite`.
+  Before a retry the previous attempt's application is stopped, so two never write at once. Offered only with
+  `core.url` and workload identity, and only in a workspace where booth-spark answers.
 - **Python packages** (ADR 0115): a Python task can list requirements (`requests==2.32.3`, one per line; package
   specifiers only, no URLs, paths or pip options). Each run installs them into the task's own pod before its code
   runs, from the install's package index (`runner.pip`), in an init container that holds no token or credentials,

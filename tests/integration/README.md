@@ -21,5 +21,11 @@ index (`fixtures/pypi/`: the real requests/beautifulsoup4 wheels, hash-locked, p
 the pip init container): with no route a task fails at once; the installer reaches only the index (works-blocked-works
 on every `egress.sh` target, from the init container and the task's code); it holds no token or credentials (a file
 and process scan that must find a planted decoy); failed and unavailable installs fail clearly; and requests +
-beautifulsoup4 install and import with `allowInternet=true`. It does
+beautifulsoup4 install and import with `allowInternet=true`. **`spark.sh`** proves the Spark runner (ADR 0119)
+through the API pod's own service against the stand-in core's mint and a stand-in booth-spark
+(`fixtures/spark/`, which runs the submitted PySpark code against a stub `pyspark`): a scheduled Spark task's
+output reaches its downstream task and its driver log and state reach the run log; a disabled service account and
+a refused person owner fail the whole run at its start; cancel stops the application; and after a task pod is
+killed mid-run, its application is stopped before the retry, which waits the floor. Real Spark and its data access
+are booth-spark's to prove. It does
 **not** prove core reconciles the module or that the shell mounts the UI: that is `booth-e2e`.
