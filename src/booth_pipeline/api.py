@@ -216,6 +216,8 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
         },
         "catalogConfigured": svc(request).catalog.configured,
         "pip": pip_status(cfg),
+        # ADR 0119: the Spark runner's settings the builder explains, when this install has it.
+        "spark": {"retryMinDelaySeconds": cfg.spark_retry_min_delay_seconds} if "spark" in svc(request).registry.available_ids() else None,
     }
 
 

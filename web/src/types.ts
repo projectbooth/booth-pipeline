@@ -56,6 +56,21 @@ export interface TaskConfig {
   /** Python packages installed into the task's own pod before it runs (ADR 0115). Absent from a
    *  backend older than 0.1.5. */
   requirements?: string[];
+  /** ADR 0119: what a Spark task (runner "spark") asks booth-spark for. Absent before 0.2.0. */
+  spark?: SparkOptions | null;
+}
+
+export interface SparkStorageLocation {
+  backendId: string;
+  path: string;
+  access?: "read" | "readwrite";
+}
+
+export interface SparkOptions {
+  resources?: { driver?: { memory?: string }; executors?: { min?: number; max?: number; memory?: string } };
+  conf?: Record<string, string>;
+  args?: string[];
+  dataAccess?: { database?: boolean; lakehouse?: boolean; storage?: SparkStorageLocation[] };
 }
 
 /** A standalone, versioned, reusable Task (ADR 0071) — the direct counterpart of Pipeline. */
@@ -233,6 +248,8 @@ export interface TaskRun {
   startedAt: string | null;
   finishedAt: string | null;
   error: string | null;
+  /** ADR 0119: where the latest attempt ran outside its pod (a booth-spark application). */
+  external?: { kind: "spark"; id: string; state: string; reason: string | null } | null;
 }
 
 export interface RunDetail extends Run {
@@ -244,7 +261,8 @@ export interface LogLine {
   ts: string;
   taskKey: string | null;
   attempt: number;
-  stream: "stdout" | "stderr" | "system";
+  /** "spark": a Spark task's driver log (shown to editors and owners only). */
+  stream: "stdout" | "stderr" | "system" | "spark";
   message: string;
 }
 
@@ -273,6 +291,8 @@ export interface ModuleConfig {
   catalogConfigured: boolean;
   /** Absent from a backend older than 0.1.5. */
   pip?: PipStatus;
+  /** ADR 0119: the Spark runner's settings, when this install has it. */
+  spark?: { retryMinDelaySeconds: number } | null;
 }
 
 export interface RunnerInfo {

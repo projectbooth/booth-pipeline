@@ -47,9 +47,11 @@ export class FakeBackend {
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
+  /** booth-spark's GET /v1/limits through the gateway (ADR 0119). */
+  sparkLimits: Record<string, unknown> = { maxExecutors: 2, maxMemory: "4g", maxDuration: "2h" };
   runners = [
     { id: "base", displayName: "Base", available: true, reason: null },
-    { id: "spark", displayName: "Spark", available: false, reason: "booth-spark does not yet define a compute-submission interface" },
+    { id: "spark", displayName: "Spark", available: true, reason: null },
   ];
 
   addPipeline(name: string, refs?: TaskRef[]): Pipeline {
@@ -139,10 +141,11 @@ export class FakeBackend {
     const u = new URL(url, "http://shell");
     const method = (init.method ?? "GET").toUpperCase();
     const body = init.body ? JSON.parse(init.body as string) : undefined;
-    const path = u.pathname.replace(/^\/modules\/(pipeline|catalog|storage)\/api/, "");
+    const path = u.pathname.replace(/^\/modules\/(pipeline|catalog|storage)\/api/, "").replace(/^\/modules\/spark/, "");
     const isCatalog = u.pathname.startsWith("/modules/catalog");
     const isStorage = u.pathname.startsWith("/modules/storage");
-    const prefix = isCatalog ? "catalog:" : isStorage ? "storage:" : "";
+    const isSpark = u.pathname.startsWith("/modules/spark");
+    const prefix = isCatalog ? "catalog:" : isStorage ? "storage:" : isSpark ? "spark:" : "";
     this.calls.push({ method, path: prefix + path + u.search, body, headers: new Headers(init.headers) });
 
     const key = `${method} ${prefix + path}`;
@@ -152,6 +155,10 @@ export class FakeBackend {
       return this.json({ error: fail.error, ...(fail.field ? { field: fail.field } : {}) }, fail.status);
     }
 
+    if (isSpark) {
+      if (path === "/v1/limits") return this.json(this.sparkLimits);
+      return this.json({ error: "not found" }, 404);
+    }
     if (isCatalog) {
       if (this.catalogDown) return new Response("module not found", { status: 404 });
       if (path === "/code") return this.json({ items: this.catalogEntries, total: this.catalogEntries.length });
@@ -173,7 +180,7 @@ export class FakeBackend {
 
     let m: RegExpMatchArray | null;
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
-    if (method === "GET" && path === "/config") return this.json({ limits: {}, catalogConfigured: true, pip: this.pip });
+    if (method === "GET" && path === "/config") return this.json({ limits: {}, catalogConfigured: true, pip: this.pip, spark: { retryMinDelaySeconds: 150 } });
     if (method === "GET" && path === "/pipelines") {
       const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
       return this.json(this.page(q ? this.pipelines.filter((p) => p.name.toLowerCase().includes(q)) : this.pipelines));

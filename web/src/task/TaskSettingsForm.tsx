@@ -4,6 +4,7 @@ import { errorMessage, useLoad } from "../hooks";
 import type { TaskConfig } from "../types";
 import { Banner, Button, inputClass } from "../ui/primitives";
 import { TaskConfigForm } from "./TaskConfigForm";
+import type { SparkLimits } from "./SparkOptionsForm";
 
 // Edits ONE task's own configuration, with the two saves ADR 0073 defines — shared by the DAG
 // builder's node panel (docs/decisions/0016 §4 S2a (c)) and the task page's Edit mode (S5d).
@@ -41,6 +42,8 @@ export function TaskSettingsForm({
   const runners = useLoad(() => api.runners(ctx), [ctx]);
   const moduleConfig = useLoad(() => api.config(ctx), [ctx]);
   const [config, setConfig] = useState(initial);
+  const onSpark = config.runner === "spark";
+  const sparkLimits = useLoad(async () => (onSpark ? await api.sparkLimits(ctx).catch(() => null) : null), [ctx, onSpark]);
   const [baseline, setBaseline] = useState(() => JSON.stringify(initial));
   const [saving, setSaving] = useState<"draft" | "version" | null>(null);
   const [error, setError] = useState<{ message: string; field: string | null } | null>(null);
@@ -106,6 +109,8 @@ export function TaskSettingsForm({
         readOnly={readOnly}
         error={error ?? undefined}
         pip={moduleConfig.state.status === "ready" ? moduleConfig.state.data.pip : null}
+        sparkLimits={sparkLimits.state.status === "ready" ? (sparkLimits.state.data as SparkLimits | null) : null}
+        sparkRetryFloorSeconds={moduleConfig.state.status === "ready" ? moduleConfig.state.data.spark?.retryMinDelaySeconds : null}
         onChange={edit}
       />
       {notice && <Banner tone="success">{notice}</Banner>}

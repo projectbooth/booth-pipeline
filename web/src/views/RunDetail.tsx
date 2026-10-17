@@ -163,7 +163,18 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
                 <td className={`${tdClass} font-mono text-xs`}>{t.taskKey}</td>
                 <td className={tdClass}>{resolved[t.taskKey]?.task?.name ?? "—"}</td>
                 <td className={tdClass}>
-                  <StatusBadge status={t.status} />
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <StatusBadge status={t.status} />
+                    {t.external?.kind === "spark" && (
+                      <a
+                        href={`/spark/runs/${encodeURIComponent(t.external.id)}`}
+                        className="rounded-full border border-amber-300 px-2 py-0.5 text-xs text-amber-900 hover:underline dark:border-amber-700 dark:text-amber-200"
+                        title={t.external.reason ?? `booth-spark application ${t.external.id}`}
+                      >
+                        Spark · {t.external.state} · {t.external.id.slice(0, 8)}
+                      </a>
+                    )}
+                  </div>
                 </td>
                 <td className={`${tdClass} font-mono text-xs`}>{t.attempts}</td>
                 <td className={`${tdClass} whitespace-nowrap font-mono text-xs`}>{t.startedAt ? formatStamp(t.startedAt) : "—"}</td>

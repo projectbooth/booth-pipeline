@@ -1,6 +1,6 @@
 import type { ViewCtx } from "../context";
 import { formatDuration } from "../format";
-import type { RunDetail, TaskRef } from "../types";
+import type { RunDetail, SparkStorageLocation, TaskConfig, TaskRef } from "../types";
 import { Card, KVRows, Link, StatusBadge, linkClass, type KV } from "../ui/primitives";
 import { effectiveParams } from "./ParamOverrides";
 import { codeRefLabel, resolvedFromLabel, versionRefLabel, type ResolvedNode } from "./resolve";
@@ -41,6 +41,7 @@ export function NodeDetails({ v, taskRef, node, lastRun, runCounts }: { v: ViewC
         { label: "Timeout", value: `${cfg.timeoutSeconds}s`, mono: true },
         { label: "Platform access", value: cfg.platformAccess ? "on" : "off" },
         { label: "Python packages", value: cfg.requirements?.length ? cfg.requirements.join(", ") : "—", mono: true },
+        ...(cfg.runner === "spark" ? [{ label: "Spark", value: sparkSummary(cfg), mono: true }] : []),
         {
           // What this node runs with: the task's params with this node's overrides merged over them.
           label: "Parameters",
@@ -93,4 +94,13 @@ export function LastRunStrip({ v, nodeKey, lastRun }: { v: ViewCtx; nodeKey: str
       </Link>
     </div>
   );
+}
+
+/** A Spark task's options in one line (ADR 0119). */
+export function sparkSummary(cfg: TaskConfig): string {
+  const o = cfg.spark ?? {};
+  const ex = o.resources?.executors ?? {};
+  const parts = [o.resources?.driver?.memory ? `driver ${o.resources.driver.memory}` : "", ex.max !== undefined ? `${ex.min ?? 0}–${ex.max} executors${ex.memory ? ` × ${ex.memory}` : ""}` : ""];
+  const data = [o.dataAccess?.database ? "database" : "", o.dataAccess?.lakehouse ? "lakehouse" : "", ...(o.dataAccess?.storage ?? []).map((loc: SparkStorageLocation) => `${loc.backendId}:${loc.path}`)].filter(Boolean);
+  return [...parts.filter(Boolean), `data: ${data.length ? data.join(", ") : "none"}`].join("; ");
 }

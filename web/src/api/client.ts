@@ -37,6 +37,7 @@ const CATALOG = "/modules/catalog/api";
 // booth-storage, likewise browse-only (ADR 0063): the pipeline backend resolves and snapshots the
 // chosen {backendId, path} itself at save time.
 const STORAGE = "/modules/storage/api";
+const SPARK = "/modules/spark";
 
 export type GetAccessToken = () => string | null;
 
@@ -112,6 +113,8 @@ export const api = {
   runners: (c: ApiContext) => request<{ items: RunnerInfo[] }>(c, PIPELINE, "/runners").then((r) => r.items),
   config: (c: ApiContext) => request<ModuleConfig>(c, PIPELINE, "/config"),
   setOwner: (c: ApiContext, id: string, owner: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/owner`, json("PUT", { owner })),
+  /** booth-spark's limits for this caller (ADR 0119), for the Spark panel's hints. */
+  sparkLimits: (c: ApiContext) => request<Record<string, unknown>>(c, SPARK, "/v1/limits"),
   serviceAccountUses: (c: ApiContext) => request<{ items: ServiceAccountUse[] }>(c, PIPELINE, "/service-accounts/uses").then((r) => r.items),
 
   listPipelines: (c: ApiContext, q = "") => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, limit: 200 })}`),
