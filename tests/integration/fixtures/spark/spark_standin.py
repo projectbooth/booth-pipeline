@@ -10,6 +10,13 @@ succeeded | failed | stopped; its log (stdout and stderr) is served with the log
 adding (``?from=<offset>``, next offset in ``X-Log-Offset``; ADR 0119 amendment 3 point 7) and with
 ``?tail=``. Not modelled: data access, resources, admission beyond a settable capacity.
 
+Where it is NOT the real contract, and how that is caught: tests/integration/spark-real.sh runs the same
+calls against booth-spark's published chart and image. ``GET /v1/limits`` here is provisional: it was in
+booth-spark's design-v0.md but not built in 0.3.0 (gate 3); booth-spark adds it in 0.3.1, and this body is
+to be replaced by the real one then, which spark-real.sh compares shape for shape (SPARK_HAS_LIMITS=1).
+Real booth-spark also expects X-Booth-Workspace (core's gateway sets it from X-Workspace); this stand-in
+plays gateway and module in one, so it reads X-Workspace.
+
 Test-only routes (never on booth-spark): ``GET /_standin/apps`` (every run, with its timestamps and
 Idempotency-Key) and ``POST /_standin/control`` (``{"capacity": n}`` for 429 at_capacity).
 """

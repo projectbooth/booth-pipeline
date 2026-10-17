@@ -6,6 +6,9 @@ import { Button, Field, inputClass, monoClass } from "../ui/primitives";
 // inline; Spark checks its conf allowlist and its limits when the run starts, and a refusal fails the
 // attempt with Spark's own message.
 
+/** booth-spark's GET /v1/limits for this caller. Provisional: the route isn't in booth-spark 0.3.0 (it is
+ *  coming in 0.3.1), so these names follow its design note until the real body is published; with no
+ *  answer the panel simply shows no hint. */
 export interface SparkLimits {
   maxExecutors?: number;
   maxMemory?: string;
