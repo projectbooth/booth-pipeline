@@ -29,6 +29,7 @@ import {
   theadClass,
   type AnyStatus,
 } from "../ui/primitives";
+import { ownerLabel } from "./pipeline/RunsAs";
 import { TriggerSummary } from "./pipeline/TriggerSummary";
 
 // S1 — the Pipelines list (docs/decisions/0016 §4, Figma screen 1). One row per pipeline entity;
@@ -193,7 +194,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                     <th className={thClass}>Last run</th>
                     <th className={`${thClass} hidden lg:table-cell`}>Duration</th>
                     <th className={`${thClass} hidden lg:table-cell`}>Next run</th>
-                    <th className={`${thClass} hidden xl:table-cell`}>Owner</th>
+                    <th className={`${thClass} hidden xl:table-cell`}>Runs as</th>
                     <th className={thClass}>
                       <span className="sr-only">Actions</span>
                     </th>
@@ -228,7 +229,39 @@ export function PipelineList({ v }: { v: ViewCtx }) {
           );
         }}
       </Loaded>
+      <ServiceAccountUses v={v} />
     </div>
+  );
+}
+
+/** Which pipelines run as each service account (ADR 0120 addendum 2): core keeps no usage record,
+ *  so this is where a workspace owner looks before disabling or deleting one. Hidden when none do. */
+function ServiceAccountUses({ v }: { v: ViewCtx }) {
+  const uses = useLoad(() => api.serviceAccountUses(v.api), [v.api]);
+  if (uses.state.status !== "ready" || uses.state.data.length === 0) return null;
+  return (
+    <section aria-label="Service accounts in use" className="flex flex-col gap-2">
+      <h2 className="text-sm font-medium text-slate-700 dark:text-slate-200">Service accounts in use</h2>
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        Disabling an account stops these pipelines' scheduled runs; an account must be disabled before it can be deleted.
+      </p>
+      <ul className="flex flex-col gap-1 text-sm">
+        {uses.state.data.map((u) => (
+          <li key={u.account}>
+            <span className="font-mono">{u.account}</span>:{" "}
+            {u.pipelines.map((p, i) => (
+              <span key={p.id}>
+                {i > 0 && ", "}
+                <a href={v.href({ name: "pipeline", id: p.id })} className="text-indigo-600 hover:underline dark:text-indigo-400" onClick={(e) => { e.preventDefault(); v.go({ name: "pipeline", id: p.id }); }}>
+                  {p.name}
+                </a>
+                {!p.scheduled && <span className="text-slate-500 dark:text-slate-400"> (not scheduled)</span>}
+              </span>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -287,7 +320,7 @@ function PipelineRow({
         <td className={`${tdClass} hidden whitespace-nowrap font-mono text-xs lg:table-cell`} title={p.nextRunAt ? formatRelative(p.nextRunAt) : undefined}>
           {p.nextRunAt ? formatStamp(p.nextRunAt) : "—"}
         </td>
-        <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>{p.createdBy}</td>
+        <td className={`${tdClass} hidden max-w-40 truncate text-slate-600 xl:table-cell dark:text-slate-300`}>{p.owner ? ownerLabel(p.owner) : "—"}</td>
         <td className={`${tdClass} whitespace-nowrap text-right`}>
           {v.canWrite && (
             <span className="inline-flex items-center gap-2">

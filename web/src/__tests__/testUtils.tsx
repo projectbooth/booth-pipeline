@@ -197,7 +197,22 @@ export class FakeBackend {
     if ((m = path.match(/^\/pipelines\/([^/]+)\/schedule$/)) && method === "PUT") {
       const p = this.pipelines.find((x) => x.id === m![1])!;
       Object.assign(p, body, { hasOwner: true, nextRunAt: body.schedule?.enabled ? now : null });
+      p.owner ??= { kind: "person", name: "eddie", you: true };
       return this.json(p);
+    }
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/owner$/)) && method === "PUT") {
+      const p = this.pipelines.find((x) => x.id === m![1])!;
+      const to: string = body.owner;
+      p.owner = to === "me" ? { kind: "person", name: "eddie", you: true } : { kind: "service", id: to, name: to.split(":")[2], you: false };
+      p.hasOwner = true;
+      return this.json(p);
+    }
+    if (method === "GET" && path === "/service-accounts/uses") {
+      const uses = new Map<string, { id: string; name: string; scheduled: boolean }[]>();
+      for (const p of this.pipelines) {
+        if (p.owner?.kind === "service" && p.owner.id) uses.set(p.owner.id, [...(uses.get(p.owner.id) ?? []), { id: p.id, name: p.name, scheduled: !!p.schedule?.enabled }]);
+      }
+      return this.json({ items: [...uses].sort().map(([account, pipelines]) => ({ account, pipelines })) });
     }
     if ((m = path.match(/^\/pipelines\/([^/]+)\/run$/)) && method === "POST") {
       const r = this.newRun(m[1]);

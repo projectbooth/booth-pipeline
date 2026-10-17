@@ -99,6 +99,7 @@ class PostgresStore:
             allow_concurrent_runs=r["allow_concurrent_runs"],
             next_run_at=r["next_run_at"],
             owner_sub=r["owner_sub"],
+            owner_name=r["owner_name"],
             role_ceiling=r["role_ceiling"],
             pinned_version=r["pinned_version"],
             has_draft=r["draft_spec"] is not None,
@@ -140,7 +141,7 @@ class PostgresStore:
             triggered_by=r["triggered_by"], created_at=r["created_at"], started_at=r["started_at"],
             finished_at=r["finished_at"], error=r["error"], worker_id=r["worker_id"],
             heartbeat_at=r["heartbeat_at"], cancel_requested=r["cancel_requested"],
-            owner_sub=r["owner_sub"],
+            owner_sub=r["owner_sub"], owner_name=r["owner_name"],
         )  # fmt: skip
 
     # ---- pipelines ----
@@ -201,13 +202,14 @@ class PostgresStore:
     def update_schedule(self, pipeline: Pipeline):
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, role_ceiling=%s, pinned_version=%s, updated_at=%s"
+                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, owner_name=%s, role_ceiling=%s, pinned_version=%s, updated_at=%s"
                 " WHERE workspace=%s AND id=%s",
                 (
                     Jsonb(pipeline.schedule.model_dump(by_alias=True)) if pipeline.schedule else None,
                     pipeline.allow_concurrent_runs,
                     pipeline.next_run_at,
                     pipeline.owner_sub,
+                    pipeline.owner_name,
                     pipeline.role_ceiling,
                     pipeline.pinned_version,
                     datetime.now(UTC),
@@ -420,9 +422,9 @@ class PostgresStore:
                 if n:
                     raise Busy("this pipeline already has an active run")
             conn.execute(
-                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (run.id, run.workspace, run.pipeline_id, run.pipeline_version, run.status, run.trigger, run.triggered_by, run.created_at, run.owner_sub),
+                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub, owner_name)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (run.id, run.workspace, run.pipeline_id, run.pipeline_version, run.status, run.trigger, run.triggered_by, run.created_at, run.owner_sub, run.owner_name),
             )
             with conn.cursor() as cur:
                 cur.executemany(

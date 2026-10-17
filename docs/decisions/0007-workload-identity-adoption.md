@@ -62,3 +62,15 @@ not run against a real `booth-core` minting, nor a real storage/catalog trusting
 - Serial execution ([0003](0003-dagster-usage.md)) is unchanged; the runner *could* now host parallel tasks.
 - No UI to see which runs used platform access beyond the run log/error; core's mint log (module, subject, workspace,
   owner, ceiling, granted role) is the audit trail.
+
+## Amended 2026-10-16 (ADR 0119 amendment 3, ADR 0120)
+
+- **The subject** is now `pipeline:<workspace>:<runId>` (was `run:<runId>`), the fleet's `<kind>:<ws>:<id>` form.
+- **The owner** may be a person or a service account (`svc:<workspace>:<name>`). It is still set by whoever first
+  saves a schedule and never moved by editing. It now changes only through **Take over** (an editor or owner becomes
+  the owner of a person-owned pipeline; only a workspace owner may take one from a service account) or a workspace
+  owner choosing a service account. Nobody hands a pipeline to another person. A pipeline with no owner is taken
+  over, not adopted by the next schedule save.
+- **The 403 message** no longer advises saving the job to take it over (that never moved an existing owner). Person
+  causes stay one message, now naming Take over and service accounts; the two service-account causes core reports
+  (`service_account_disabled`, `service_account_not_found`) get their own.

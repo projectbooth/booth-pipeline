@@ -12,7 +12,6 @@ from booth_pipeline.engine import execute
 from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskFailed
 from booth_pipeline.runners.registry import RunnerRegistry
 from booth_pipeline.workload import (
-    OWNER_NOT_CURRENT,
     AccessProvider,
     MintNotConfigured,
     MintRefused,
@@ -40,38 +39,63 @@ def test_the_mint_request_carries_exactly_what_the_contract_names():
         seen["auth"], seen["url"], seen["body"] = req.headers["authorization"], str(req.url), req.content
         return httpx.Response(200, json=GOOD)
 
-    t = minter(handler).mint("acme", "run:r-1", "editor", "user-sub-42")
+    t = minter(handler).mint("acme", "pipeline:acme:r-1", "editor", "user-sub-42")
     assert seen["auth"] == f"Bearer {CRED}"  # authenticated with the minting credential, nothing else
     assert seen["url"] == "http://core.test/api/internal/workload-tokens"
     import json
 
-    assert json.loads(seen["body"]) == {"workspace": "acme", "subject": "run:r-1", "roleCeiling": "editor", "owner": "user-sub-42"}
+    assert json.loads(seen["body"]) == {"workspace": "acme", "subject": "pipeline:acme:r-1", "roleCeiling": "editor", "owner": "user-sub-42"}
     assert (t.token, t.role) == ("jwt-abc", "editor") and t.expires_at.tzinfo is not None
 
 
 def test_the_role_actually_granted_is_reported_even_when_below_the_ceiling():
-    t = minter(lambda r: httpx.Response(200, json={**GOOD, "role": "viewer"})).mint("acme", "run:r", "editor", "u")
+    t = minter(lambda r: httpx.Response(200, json={**GOOD, "role": "viewer"})).mint("acme", "pipeline:acme:r", "editor", "u")
     assert t.role == "viewer"
 
 
 def test_a_403_is_an_expected_refusal_with_a_message_a_person_can_act_on():
     with pytest.raises(MintRefused) as ei:
-        minter(lambda r: httpx.Response(403, json={"error": "forbidden"})).mint("acme", "run:r", "editor", "u")
+        minter(lambda r: httpx.Response(403, json={"error": "forbidden"})).mint("acme", "pipeline:acme:r", "editor", "u", "Dougall")
     msg = str(ei.value)
-    assert msg == OWNER_NOT_CURRENT
-    assert "signed in" in msg and "recently enough" in msg and "take it over" in msg
+    assert msg.startswith("booth-core would not issue a token for Dougall: they haven't signed in to Booth recently")
+    assert "Take over" in msg and "service account" in msg
+    assert "save the job" not in msg  # the old advice, which never changed the owner
+
+
+def test_a_person_refusal_with_no_name_on_record_says_who_it_was_for():
+    with pytest.raises(MintRefused, match="for the person who first scheduled it:"):
+        minter(lambda r: httpx.Response(403, json={"error": "forbidden"})).mint("acme", "pipeline:acme:r", "editor", "u")
+
+
+@pytest.mark.parametrize(
+    ("code", "says"),
+    [
+        ("service_account_disabled", "the pipeline's owner, service account svc:acme:nfl-weekly, is disabled; a workspace owner can enable it or choose another owner"),
+        ("service_account_not_found", "the pipeline's owner, service account svc:acme:nfl-weekly, no longer exists; a workspace owner can choose another owner"),
+    ],
+)
+def test_the_two_service_account_refusals_say_which(code, says):
+    with pytest.raises(MintRefused) as ei:
+        minter(lambda r: httpx.Response(403, json={"error": "forbidden", "code": code})).mint("acme", "pipeline:acme:r", "editor", "svc:acme:nfl-weekly", "nfl-weekly")
+    assert str(ei.value) == says
+
+
+def test_an_unknown_code_is_the_one_indistinguishable_refusal():
+    """Person causes and module-not-entitled stay one 403 (ADR 0119 amendment 3 point 5)."""
+    with pytest.raises(MintRefused, match="would not issue a token for service account svc:acme:x:"):
+        minter(lambda r: httpx.Response(403, json={"error": "forbidden", "code": "something_new"})).mint("acme", "pipeline:acme:r", "editor", "svc:acme:x")
 
 
 def test_a_401_blames_the_operators_credential_not_the_owner():
     with pytest.raises(MintRefused) as ei:
-        minter(lambda r: httpx.Response(401, json={"error": "no"})).mint("acme", "run:r", "editor", "u")
+        minter(lambda r: httpx.Response(401, json={"error": "no"})).mint("acme", "pipeline:acme:r", "editor", "u")
     assert "credential" in str(ei.value) and "signed in" not in str(ei.value)
 
 
 @pytest.mark.parametrize("resp", [httpx.Response(503, json={}), httpx.Response(500, text="x"), httpx.Response(400, json={"error": "bad"}), httpx.Response(200, json={"nope": 1}), httpx.Response(200, text="not json")])
 def test_anything_else_is_unavailable_and_therefore_retryable(resp):
     with pytest.raises(MintUnavailable):
-        minter(lambda r: resp).mint("acme", "run:r", "editor", "u")
+        minter(lambda r: resp).mint("acme", "pipeline:acme:r", "editor", "u")
 
 
 def test_an_unreachable_core_is_unavailable_not_a_crash():
@@ -79,14 +103,14 @@ def test_an_unreachable_core_is_unavailable_not_a_crash():
         raise httpx.ConnectError("refused")
 
     with pytest.raises(MintUnavailable, match="unreachable"):
-        minter(boom).mint("acme", "run:r", "editor", "u")
+        minter(boom).mint("acme", "pipeline:acme:r", "editor", "u")
 
 
 def test_neither_the_credential_nor_a_token_is_ever_logged(caplog):
     caplog.set_level(logging.DEBUG)
-    minter(lambda r: httpx.Response(200, json=GOOD)).mint("acme", "run:r", "editor", "u")
+    minter(lambda r: httpx.Response(200, json=GOOD)).mint("acme", "pipeline:acme:r", "editor", "u")
     with pytest.raises(MintRefused):
-        minter(lambda r: httpx.Response(403, json={})).mint("acme", "run:r", "editor", "u")
+        minter(lambda r: httpx.Response(403, json={})).mint("acme", "pipeline:acme:r", "editor", "u")
     assert CRED not in caplog.text and "jwt-abc" not in caplog.text
 
 
@@ -105,7 +129,7 @@ def test_the_secret_is_read_from_the_files_core_writes(tmp_path):
 
 
 def provider(m, owner="u-1", ceiling="editor") -> AccessProvider:
-    return AccessProvider(m, workspace="acme", subject="run:r1", role_ceiling=ceiling, owner=owner, storage_url="http://c/modules/storage", catalog_url="http://c/modules/catalog")
+    return AccessProvider(m, workspace="acme", subject="pipeline:acme:r1", role_ceiling=ceiling, owner=owner, storage_url="http://c/modules/storage", catalog_url="http://c/modules/catalog")
 
 
 def test_grant_hands_over_a_token_and_where_to_send_it_and_can_refresh():

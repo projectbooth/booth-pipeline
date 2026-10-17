@@ -24,20 +24,22 @@ function seed() {
   return { etl, churn, adhoc };
 }
 
-const row = (name: string) => screen.getByRole("link", { name }).closest("tr")!;
+const row = (name: string) => within(screen.getByRole("table")).getByRole("link", { name }).closest("tr")!;
 
 describe("Pipelines list", () => {
-  it("shows one row per pipeline with its latest run's status, trigger, and owner", async () => {
+  it("shows one row per pipeline with its latest run's status, trigger, and who it runs as", async () => {
     seed();
+    b.pipelines.find((p) => p.name === "daily-etl")!.owner = { kind: "service", id: "svc:acme:etl", name: "etl", you: false };
     renderApp(b);
-    await screen.findByRole("link", { name: "daily-etl" });
+    await screen.findByRole("region", { name: "Service accounts in use" }); // it links daily-etl too
 
     expect(within(row("daily-etl")).getByText("Failed")).toBeInTheDocument();
     expect(within(row("daily-etl")).getByText(/0 6 \* \* \*/)).toBeInTheDocument();
     expect(within(row("churn-retrain")).getByText("Running")).toBeInTheDocument();
     expect(within(row("churn-retrain")).getByText("Manual only")).toBeInTheDocument();
     expect(within(row("adhoc")).getByText("Never run")).toBeInTheDocument();
-    expect(within(row("adhoc")).getByText("eddie")).toBeInTheDocument();
+    expect(within(row("daily-etl")).getByText("Service account svc:acme:etl")).toBeInTheDocument();
+    expect(row("adhoc").cells[6]).toHaveTextContent(/^—$/); // never scheduled: no owner yet
   });
 
   it("filters by last-run status, with counts", async () => {

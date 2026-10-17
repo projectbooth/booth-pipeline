@@ -88,6 +88,7 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
     () => ({
       api,
       canWrite: role === "owner" || role === "editor",
+      role,
       theme,
       href: (r) => routePath(r, basePath),
       go: (r) => goPath(routePath(r, basePath)),

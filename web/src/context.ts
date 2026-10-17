@@ -1,5 +1,6 @@
 import type { ApiContext } from "./api/client";
 import type { Route } from "./navigation";
+import type { WorkspaceRole } from "./types";
 
 /** What every view needs from PipelineApp: how to call the API, whether this caller may write, and
  *  how to move around. Bundled so views take one prop and stay easy to render in tests. */
@@ -9,6 +10,9 @@ export interface ViewCtx {
    *  booth-pipeline's backend enforces the same rule on every write route (ADR 0041), so a hidden
    *  button is never the security boundary. */
   canWrite: boolean;
+  /** The caller's role, for the few controls only a workspace owner gets (Take over from a service
+   *  account). Again a UX nicety: the backend decides. */
+  role: WorkspaceRole;
   theme: "dark" | "light";
   /** The href for a route, for real anchors. */
   href: (route: Route) => string;

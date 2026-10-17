@@ -226,14 +226,17 @@ class RunManager:
         started = time.monotonic()
         recorder.system(f"run started: pipeline version {run.pipeline_version}, {len(version.spec.tasks)} task(s), triggered by {run.triggered_by} ({run.trigger})")
         try:
-            # `sub` names the RUN, never a person (ADR 0056); core uses the owner only to look up the
-            # role that caps the token. Nothing is minted here: only a task that opted in mints.
+            # `sub` names the RUN, never a person (ADR 0056), in the fleet's `<kind>:<ws>:<id>` form
+            # (ADR 0119 amendment 3; Spark trusts core's signed booth_module claim, not this prefix).
+            # Core uses the owner only to look up the role that caps the token. Nothing is minted
+            # here: only a task that opted in mints.
             access = AccessProvider(
                 self._minter,
                 workspace=run.workspace,
-                subject=f"run:{run.id}",
+                subject=f"pipeline:{run.workspace}:{run.id}",
                 role_ceiling=pipeline.role_ceiling,
                 owner=run.owner_sub,
+                owner_name=run.owner_name,
                 storage_url=self._cfg.storage_base,
                 catalog_url=self._cfg.catalog_base,
             )
