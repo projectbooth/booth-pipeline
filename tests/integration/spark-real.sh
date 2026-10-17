@@ -41,8 +41,15 @@ core=http://booth-core.booth-system.svc.cluster.local:8080
 echo "=== booth-spark ${SPARK_CHART_VERSION}'s images, loaded into kind"
 docker pull -q "$SPARK_BACKEND"
 docker pull -q "$SPARK_RUNTIME"
-kind load docker-image "$SPARK_BACKEND" --name "$cluster"
-kind load docker-image "$SPARK_RUNTIME" --name "$cluster"
+# The chart names its image repository:tag. Referenced as "tag@digest", a digest-only image loaded into
+# kind fails with CreateContainerError (containerd can't find its config; run 39076820689), so the pinned
+# digest is tagged with its own published tag, checked, and loaded under that name.
+backend_tagged="${SPARK_BACKEND%@*}:$SPARK_CHART_VERSION"
+docker tag "$SPARK_BACKEND" "$backend_tagged"
+docker image inspect "$backend_tagged" --format '{{join .RepoDigests " "}}' | grep -q "${SPARK_BACKEND#*@}" \
+  || { echo "$backend_tagged is not $SPARK_BACKEND"; exit 1; }
+kind load docker-image "$backend_tagged" --name "$cluster"
+kind load docker-image "$SPARK_RUNTIME" --name "$cluster"  # by digest, as booth-spark's own Integration does
 
 echo "=== booth-spark ${SPARK_CHART_VERSION}, from its published chart, beside its own PostgreSQL"
 kubectl create namespace booth-spark --dry-run=client -o yaml | kubectl apply -f -
@@ -56,7 +63,7 @@ helm pull "oci://ghcr.io/projectbooth/charts/booth-spark@$SPARK_CHART_DIGEST" --
 chart=$(ls "$tmp"/*.tgz)
 tar -xzOf "$chart" booth-spark/Chart.yaml | grep -qx "version: $SPARK_CHART_VERSION" || { echo "the chart at $SPARK_CHART_DIGEST is not $SPARK_CHART_VERSION"; exit 1; }
 helm upgrade --install booth-spark "$chart" --namespace booth-spark \
-  --set image.repository="${SPARK_BACKEND%@*}" --set image.tag="${SPARK_CHART_VERSION}@${SPARK_BACKEND#*@}" --set image.pullPolicy=IfNotPresent \
+  --set image.repository="${SPARK_BACKEND%@*}" --set image.tag="$SPARK_CHART_VERSION" --set image.pullPolicy=Never \
   --set postgres.provisionedByCore=false --set postgres.dsnSecret.name=booth-spark-db \
   --set oidc.issuerUrl="$core/test-idp" --set oidc.clientId=booth-spark-ci --set oidc.requireAudience=false \
   --set oidc.workloadIssuerUrl="$core" \
