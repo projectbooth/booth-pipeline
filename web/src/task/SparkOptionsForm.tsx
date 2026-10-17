@@ -6,23 +6,60 @@ import { Button, Field, inputClass, monoClass } from "../ui/primitives";
 // inline; Spark checks its conf allowlist and its limits when the run starts, and a refusal fails the
 // attempt with Spark's own message.
 
-/** booth-spark's GET /v1/limits for this caller. Provisional: the route isn't in booth-spark 0.3.0 (it is
- *  coming in 0.3.1), so these names follow its design note until the real body is published; with no
- *  answer the panel simply shows no hint. */
+/** booth-spark's GET /v1/limits for this caller (booth-spark 0.3.1; not in 0.3.0, where the request is a
+ *  404 and the panel shows no hint). Durations are Go duration strings ("6h0m0s"). Every field optional:
+ *  the panel uses what is there. */
 export interface SparkLimits {
   maxExecutors?: number;
+  defaultExecutors?: number;
+  driverMemory?: string;
+  executorMemory?: string;
   maxMemory?: string;
   maxDuration?: string;
+  sessionIdleTimeout?: string;
+  sessionMaxLifetime?: string;
+  dataAccess?: { database?: boolean; lakehouse?: boolean; storage?: boolean };
+  role?: string;
+  canSubmit?: boolean;
+  submitMinRole?: string;
+  maxStorageLocations?: number;
+}
+
+const GO_UNIT_SECONDS: Record<string, number> = { h: 3600, m: 60, s: 1, ms: 1e-3, us: 1e-6, "µs": 1e-6, ns: 1e-9 };
+
+/** Seconds in a Go duration string ("6h0m0s", "1h30m", "90s", "1.5h"), or null if it isn't one. */
+export function parseGoDuration(s: string | undefined | null): number | null {
+  const text = (s ?? "").trim();
+  if (text === "" || text === "0") return text === "0" ? 0 : null;
+  const re = /(\d+(?:\.\d*)?|\.\d+)(h|ms|us|µs|ns|m|s)/gy;
+  let total = 0;
+  let at = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    total += Number(m[1]) * GO_UNIT_SECONDS[m[2]];
+    at = re.lastIndex;
+  }
+  return at === text.length && at > 0 ? total : null;
+}
+
+/** A duration as people write it: "6h", "1h 30m", "45s". */
+export function formatSeconds(total: number): string {
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = Math.round(total % 60);
+  return [h ? `${h}h` : "", m ? `${m}m` : "", s || (!h && !m) ? `${s}s` : ""].filter(Boolean).join(" ");
 }
 
 export function SparkOptionsForm({
   value,
   limits,
+  timeoutSeconds,
   error,
   onChange,
 }: {
   value: SparkOptions;
   limits?: SparkLimits | null;
+  /** The task's timeout, which is the Spark run's maxDuration. */
+  timeoutSeconds?: number;
   error?: string;
   onChange: (v: SparkOptions) => void;
 }) {
@@ -39,6 +76,8 @@ export function SparkOptionsForm({
   const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
   const text = (s: string) => (s.trim() === "" ? undefined : s.trim());
   const setStorage = (i: number, loc: SparkStorageLocation) => setData({ ...data, storage: storage.map((s, j) => (j === i ? loc : s)) });
+  const maxRunSeconds = parseGoDuration(limits?.maxDuration);
+  const maxLocations = limits?.maxStorageLocations ?? 4;
 
   return (
     <section aria-label="Spark options" className="flex flex-col gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-700">
@@ -46,15 +85,21 @@ export function SparkOptionsForm({
       <p className="-mt-1 text-xs text-slate-500 dark:text-slate-400">
         This task's code runs on booth-spark as PySpark (<code>ctx.spark</code> is its SparkSession), acting as the run: its owner's access, capped by the
         platform access cap. Its driver log is shown to editors and owners only.
-        {limits && (limits.maxExecutors !== undefined || limits.maxMemory || limits.maxDuration) && (
+        {limits && (limits.maxExecutors !== undefined || limits.maxMemory || maxRunSeconds !== null) && (
           <>
             {" "}
             booth-spark allows{limits.maxExecutors !== undefined ? ` up to ${limits.maxExecutors} executors` : ""}
             {limits.maxMemory ? `, ${limits.maxMemory} per JVM` : ""}
-            {limits.maxDuration ? `, ${limits.maxDuration} per run` : ""}.
+            {maxRunSeconds !== null ? `, ${formatSeconds(maxRunSeconds)} per run` : ""}.
           </>
         )}
       </p>
+      {maxRunSeconds !== null && timeoutSeconds !== undefined && timeoutSeconds > maxRunSeconds && (
+        <p className="text-xs text-amber-800 dark:text-amber-300">
+          This task's timeout ({formatSeconds(timeoutSeconds)}) is longer than booth-spark allows a run ({formatSeconds(maxRunSeconds)}): booth-spark will
+          refuse it. Lower the timeout below.
+        </p>
+      )}
       {error && (
         <p role="alert" className="text-xs text-red-700 dark:text-red-400">
           {error}
@@ -130,7 +175,7 @@ export function SparkOptionsForm({
             </Button>
           </div>
         ))}
-        {storage.length < 4 && (
+        {storage.length < maxLocations && (
           <div>
             <Button size="sm" onClick={() => setData({ ...data, storage: [...storage, { backendId: "", path: "", access: "read" }] })}>
               + Storage location

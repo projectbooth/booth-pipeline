@@ -52,7 +52,22 @@ export class FakeBackend {
   /** Set to make the owner-only list fail (a non-owner, or a core older than 0.3.7). */
   serviceAccountsListError: { status: number; error: string } | null = null;
   /** booth-spark's GET /v1/limits through the gateway (ADR 0119). */
-  sparkLimits: Record<string, unknown> = { maxExecutors: 2, maxMemory: "4g", maxDuration: "2h" };
+  // booth-spark's real body (booth-spark@0fcd236), its chart's defaults.
+  sparkLimits: Record<string, unknown> | null = {
+    maxExecutors: 2,
+    defaultExecutors: 2,
+    driverMemory: "512m",
+    executorMemory: "512m",
+    maxMemory: "2g",
+    maxDuration: "6h0m0s",
+    sessionIdleTimeout: "20m0s",
+    sessionMaxLifetime: "12h0m0s",
+    dataAccess: { database: false, lakehouse: false, storage: false },
+    role: "editor",
+    canSubmit: true,
+    submitMinRole: "editor",
+    maxStorageLocations: 4,
+  };
   runners = [
     { id: "base", displayName: "Base", available: true, reason: null },
     { id: "spark", displayName: "Spark", available: true, reason: null },
@@ -168,7 +183,8 @@ export class FakeBackend {
       return a ? this.json({ name: a.name, role: a.role, disabled: a.disabled }) : new Response("service account not found", { status: 404 });
     }
     if (isSpark) {
-      if (path === "/v1/limits") return this.json(this.sparkLimits);
+      // null: booth-spark 0.3.0, which has no such route (its own 404).
+      if (path === "/v1/limits") return this.sparkLimits ? this.json(this.sparkLimits) : this.json({ error: "not found" }, 404);
       return this.json({ error: "not found" }, 404);
     }
     if (isCatalog) {
