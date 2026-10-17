@@ -20,7 +20,7 @@
 # mint (POST /api/internal/workload-tokens: a token per request, refused on demand through
 # POST /_control/mint {"owner": ..., "code": ...|null}, with the code core gives for a service account;
 # GET /mints lists every request) and, when the fake-spark ConfigMap is mounted, for booth-spark behind
-# the gateway (/modules/spark/*, fixtures/spark/spark_standin.py).
+# the gateway (/modules/spark/*, fixtures/spark/spark_standin.py, mounted at /spark).
 #
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
 # NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
@@ -107,11 +107,12 @@ data:
         exp = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
         return 200, {"token": f"tok-{req['workspace']}-{uuid.uuid4().hex}", "tokenType": "Bearer", "expiresAt": exp, "role": req.get("roleCeiling", "viewer")}
 
-    # ---- booth-spark behind the gateway, when fixtures/spark is mounted at /app/spark ----
+    # ---- booth-spark behind the gateway, when fixtures/spark is mounted at /spark ----
+    # (an absent optional ConfigMap still mounts, as an empty directory: look for the file)
     standin = None
-    if os.path.isdir("/app/spark"):
+    if os.path.isfile("/spark/spark_standin.py"):
         import sys
-        sys.path.insert(0, "/app/spark")
+        sys.path.insert(0, "/spark")
         import spark_standin
         standin = spark_standin.StandIn()
 
@@ -216,7 +217,7 @@ spec:
             periodSeconds: 2
           volumeMounts:
             - {name: app, mountPath: /app}
-            - {name: spark, mountPath: /app/spark}
+            - {name: spark, mountPath: /spark}
       volumes:
         - name: app
           configMap: {name: fake-core-broker}
