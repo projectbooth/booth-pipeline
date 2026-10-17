@@ -167,6 +167,8 @@ class TaskRun:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    # ADR 0119: where the latest attempt ran outside its pod ({kind: spark, id, state, reason}).
+    external: dict[str, Any] | None = None
 
 
 @dataclass

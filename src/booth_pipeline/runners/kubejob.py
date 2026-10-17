@@ -168,7 +168,7 @@ class KubernetesJobRunner:
         none, the task has no platform access, or the workspace has no warehouse (404). This makes
         booth-lakehouse a runtime dependency at task start, for s3-enabled installs only."""
         sidecar = _init_container(self._template["spec"]["template"]["spec"], S3_SIDECAR)
-        if sidecar is None or inv.access is None:
+        if sidecar is None or inv.access is None or inv.spark is not None:
             return None
         core = _arg(sidecar, "--core-url").rstrip("/")
         try:
@@ -268,10 +268,13 @@ def _personalize_sidecars(pod: dict[str, Any], inv: TaskInvocation, warehouse: d
     # A viewer's token may only read: the broker refuses `readwrite` to it, and a refusal makes the
     # sidecar exit (contracts/credential-sidecar.md).
     access = "read" if inv.access is not None and inv.access.role == "viewer" else "readwrite"
+    # ADR 0119: a Spark task's pod runs only the module's Spark client, which needs the run's token but
+    # no database or S3 lease (Spark's own pods get those), so it gets no sidecar.
+    spark = inv.spark is not None
     for c in pod.get("initContainers", []):
         name = c.get("name")
         if name == POSTGRES_SIDECAR:
-            if inv.access is None:
+            if inv.access is None or spark:
                 env_drop |= _POSTGRES_ENV
                 continue
             ws = inv.access.workspace
@@ -279,7 +282,7 @@ def _personalize_sidecars(pod: dict[str, Any], inv: TaskInvocation, warehouse: d
             task.setdefault("env", []).append({"name": "DATABASE_URL", "value": f"postgresql://localhost:5432/{workspace_database(ws)}"})
             healthz.append(f"http://{_arg(c, '--listen')}/healthz")
         elif name == S3_SIDECAR:
-            if inv.access is None or warehouse is None:
+            if inv.access is None or warehouse is None or spark:
                 env_drop |= _S3_ENV
                 continue
             scope = {"backendId": warehouse["backendId"], "path": warehouse["path"]}

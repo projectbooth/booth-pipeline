@@ -33,6 +33,10 @@ from . import languages
 from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
 
 TOKEN_FILE = ".booth-platform-token"
+# A harness may write the task's failure reason here before exiting non-zero, so the task fails with
+# that message rather than "exited with code N" (the Spark client does: Spark's own reason).
+FAILURE_FILE = "failure.txt"
+SPARK_CLIENT = Path(__file__).with_name("_spark_client.py")
 MAX_LOG_CHUNK = 8192
 
 # Variables a subprocess needs just to start. Everything else in the service's environment —
@@ -149,6 +153,8 @@ class SubprocessRunner:
                     "params": inv.params,
                     "inputs": inv.inputs,
                     "access": access_meta,
+                    "timeoutSeconds": inv.timeout_seconds,
+                    "spark": inv.spark,
                 }
             ),
             encoding="utf-8",
@@ -163,8 +169,11 @@ class SubprocessRunner:
         else:  # pragma: no cover - exercised on Windows dev machines
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
+        # ADR 0119: a Spark task's pod runs the module's Spark client, which submits the task's code to
+        # booth-spark; nothing of the task's own runs in this pod.
+        harness = SPARK_CLIENT if inv.spark is not None else handler.harness
         proc = subprocess.Popen(
-            [self._python, "-I", str(handler.harness), workdir, result_path],
+            [self._python, "-I", str(harness), workdir, result_path],
             cwd=workdir,
             env=self._env(inv, workdir),
             stdin=subprocess.DEVNULL,
@@ -203,7 +212,11 @@ class SubprocessRunner:
         if outcome == "timeout":
             raise TaskFailed(f"timed out after {inv.timeout_seconds}s")
         if proc.returncode != 0:
-            raise TaskFailed(f"task exited with code {proc.returncode}")
+            try:
+                reason = Path(workdir, FAILURE_FILE).read_text(encoding="utf-8").strip()
+            except OSError:
+                reason = ""
+            raise TaskFailed(reason or f"task exited with code {proc.returncode}")
         try:
             with open(result_path, encoding="utf-8") as f:
                 return json.load(f)["output"]

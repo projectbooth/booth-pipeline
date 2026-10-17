@@ -312,6 +312,11 @@ jobs:
         # the pip init container and reports what it can reach and see. See the script's header.
         run: bash tests/integration/pip.sh .
 
+      - name: Spark tasks — scheduled runs submit to a stand-in booth-spark as the run, hand output downstream, fail whole on a refused mint, stop on cancel, and retry safely after a lost pod (ADR 0119, ADR 0120)
+        # Through the API pod's own service, store, engine and runners, against the stand-in core's mint
+        # and a stand-in booth-spark that runs the submitted code. See the script's header.
+        run: bash tests/integration/spark.sh .
+
       - name: Dump logs on failure
         if: failure()
         run: |
@@ -320,3 +325,4 @@ jobs:
           kubectl -n booth-pipeline logs deployment/booth-pipeline --tail=200 || true
           kubectl -n booth-pipeline describe pods -l app.kubernetes.io/component=task || true
           kubectl -n pypi-ci logs deploy/pypi --tail=100 || true
+          kubectl -n booth-system logs deploy/booth-core --tail=100 || true

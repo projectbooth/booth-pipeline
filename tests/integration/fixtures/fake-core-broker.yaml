@@ -16,6 +16,12 @@
 # pinned sidecar doesn't know fails the test, not silently. S3_CREDENTIAL_SHAPE=keys sends only the
 # keys (what booth-core@eb24bb3 accepted), kept for comparing against an older sidecar.
 #
+# For the Spark runner (ADR 0119, tests/integration/spark.sh) it also stands in for core's workload-token
+# mint (POST /api/internal/workload-tokens: a token per request, refused on demand through
+# POST /_control/mint {"owner": ..., "code": ...|null}, with the code core gives for a service account;
+# GET /mints lists every request) and, when the fake-spark ConfigMap is mounted, for booth-spark behind
+# the gateway (/modules/spark/*, fixtures/spark/spark_standin.py).
+#
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
 # NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
 apiVersion: v1
@@ -88,13 +94,51 @@ data:
                 "scope": {"workspace": ws},
                 "credential": {"host": PG_HOST, "port": PG_PORT, "database": db, "username": user, "password": password, "sslMode": "disable"}}
 
+    # ---- core's workload-token mint (ADR 0056/0058), for the Spark runner's scheduled runs ----
+    mints, refusals = [], {}  # owner -> None (one indistinguishable 403) or a service-account code
+
+    def mint(req):
+        with lock:
+            mints.append(req)
+            owner = req.get("owner", "")
+            if owner in refusals:
+                code = refusals[owner]
+                return 403, {"error": "forbidden", **({"code": code} if code else {})}
+        exp = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        return 200, {"token": f"tok-{req['workspace']}-{uuid.uuid4().hex}", "tokenType": "Bearer", "expiresAt": exp, "role": req.get("roleCeiling", "viewer")}
+
+    # ---- booth-spark behind the gateway, when fixtures/spark is mounted at /app/spark ----
+    standin = None
+    if os.path.isdir("/app/spark"):
+        import sys
+        sys.path.insert(0, "/app/spark")
+        import spark_standin
+        standin = spark_standin.StandIn()
+
     class H(BaseHTTPRequestHandler):
+        def raw(self, code, headers, raw):
+            self.send_response(code)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
+        def spark(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if standin is None:
+                return self.reply(404, {"error": "booth-spark is not installed here"})
+            return self.raw(*standin.route(self.command, self.path, dict(self.headers), body))
+
         def reply(self, code, body):
             raw = json.dumps(body).encode()
             self.send_response(code); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
 
         def do_GET(self):
+            if self.path.startswith("/modules/spark/"):
+                return self.spark()
+            if self.path == "/mints":
+                with lock:
+                    return self.reply(200, mints)
             if self.path == "/leases":
                 with lock:
                     return self.reply(200, leases)
@@ -107,6 +151,20 @@ data:
             return self.reply(200 if self.path == "/healthz" else 404, {"status": "ok"})
 
         def do_POST(self):
+            if self.path.startswith("/modules/spark/"):
+                return self.spark()
+            if self.path == "/api/internal/workload-tokens":
+                if not self.headers.get("Authorization", "").startswith("Bearer "):
+                    return self.reply(401, {"error": "missing minting credential"})
+                return self.reply(*mint(json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))))
+            if self.path == "/_control/mint":
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                with lock:
+                    if req.get("clear"):
+                        refusals.clear()
+                    else:
+                        refusals[req["owner"]] = req.get("code")
+                    return self.reply(200, dict(refusals))
             if self.path != "/api/credentials":
                 return self.reply(404, {"error": "not found"})
             if not self.headers.get("Authorization", "").startswith("Bearer "):
@@ -158,9 +216,19 @@ spec:
             periodSeconds: 2
           volumeMounts:
             - {name: app, mountPath: /app}
+            - {name: spark, mountPath: /app/spark}
       volumes:
         - name: app
           configMap: {name: fake-core-broker}
+        # The stand-in booth-spark (fixtures/spark/), created by spark.sh; absent before that.
+        - name: spark
+          configMap:
+            name: fake-spark
+            optional: true
+            items:
+              - {key: spark_standin.py, path: spark_standin.py}
+              - {key: pyspark_init.py, path: pyspark/__init__.py}
+              - {key: pyspark_sql_init.py, path: pyspark/sql/__init__.py}
 ---
 apiVersion: v1
 kind: Service

@@ -177,7 +177,7 @@ class Store(Protocol):
 
     # ---- logs ----
     def append_logs(self, lines: list[LogLine]) -> None: ...
-    def list_logs(self, run_id: str, task_key: str | None, after_seq: int, limit: int) -> list[LogLine]:
+    def list_logs(self, run_id: str, task_key: str | None, after_seq: int, limit: int, exclude_streams: tuple[str, ...] = ()) -> list[LogLine]:
         """Lines with ``seq > after_seq`` in order. ``task_key`` filters to one task's lines."""
         ...
 

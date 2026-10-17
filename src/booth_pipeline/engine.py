@@ -27,6 +27,7 @@ logs live in our own store (``store/``), where the API, retention and workspace 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -56,6 +57,12 @@ from .workload import AccessProvider, MintNotConfigured, MintRefused
 log = logging.getLogger(__name__)
 
 RESULT = "result"
+
+
+def _wait(seconds: float, cancel: Cancellation) -> None:
+    deadline = time.monotonic() + seconds
+    while not cancel.canceled and time.monotonic() < deadline:
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
 
 def op_name(key: str) -> str:
@@ -137,6 +144,7 @@ def _make_op(
                 access=grant,
                 language=code_language(config.code),
                 requirements=tuple(config.requirements),
+                spark=config.spark.model_dump(by_alias=True, mode="json") if config.spark is not None else None,
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskCanceled:
@@ -161,6 +169,12 @@ def _make_op(
                     f"task {ref.key!r} attempt {attempt} failed ({message}); retrying "
                     f"(attempt {attempt + 1} of {max_retries + 1})"
                 )
+                # ADR 0119: a Spark attempt whose application ran may have left an emptied output folder,
+                # which SeaweedFS keeps about 2 minutes; an errorifexists write retried sooner fails.
+                floor = float(getattr(e, "retry_not_before", 0) or 0)
+                if floor > 0:
+                    recorder.system(f"task {ref.key!r} waits at least {floor:g}s before its retry (its Spark application ran; SeaweedFS keeps an emptied folder about 2 minutes)")
+                    _wait(floor, cancel)
             raise  # re-raised so Dagster's retry policy sees it (fact 1 above)
         recorder.task_attempt_finished(ref.key, attempt, "succeeded", None)
         yield Output(output, output_name=RESULT)

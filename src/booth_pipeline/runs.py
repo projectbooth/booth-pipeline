@@ -113,7 +113,17 @@ class StoreRecorder:
             def line(self, stream: str, message: str) -> None:
                 rec._emit(key, attempt, stream, message)
 
+            def external(self, record: dict) -> None:
+                """ADR 0119: where this attempt runs outside its pod (a Spark application)."""
+                rec._external(key, record)
+
         return _TaskLog()
+
+    def _external(self, key: str, record: dict) -> None:
+        with self._lock:
+            t = self._tasks[key]
+            t.external = record
+        self._save(t)
 
     # ---- task state ----
     def _save(self, t: TaskRun) -> None:

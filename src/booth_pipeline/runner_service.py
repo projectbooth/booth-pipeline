@@ -72,6 +72,8 @@ class RunBody(BaseModel):
     access: AccessBody | None = None
     # ADR 0115: the task's requirements, already installed by the pod's pip init container.
     requirements: list[str] = []
+    # ADR 0119: a Spark task's options; the pod then runs the module's Spark client, not user code.
+    spark: dict[str, Any] | None = None
 
 
 class TokenBody(BaseModel):
@@ -154,6 +156,7 @@ def create_runner_app(
             access=access,
             language=body.language,
             requirements=tuple(body.requirements),
+            spark=body.spark,
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()

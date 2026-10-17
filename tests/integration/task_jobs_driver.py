@@ -35,6 +35,12 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   the task's runner bearer and platform token. Then the same pod's task checks it does have both.
 * ``pip-run REQUIREMENT ...`` — a trivial task with these requirements; reports how it ended.
 * ``pip-scrape PAGE_URL`` — a task requiring requests and beautifulsoup4 fetches and parses a page.
+* ``spark-e2e`` — ADR 0119/0120: scheduled runs of pipelines with a Spark task, through THIS pod's own
+  service (its store, engine, Job runner and Spark runner, built from its environment), against the
+  stand-in core's mint and stand-in booth-spark (fake-core-broker.yaml, fixtures/spark/): output handed
+  downstream, the driver log and state in the run log, the attempt's Spark record, a refused mint for a
+  disabled service account and for a person owner, cancel stopping the application, and a task pod
+  killed mid-run whose application is stopped before the retry, which waits the floor.
 """
 
 from __future__ import annotations
@@ -603,6 +609,156 @@ def pip_scrape(page: str) -> int:
     return 0
 
 
+# ---- ADR 0119/0120: the Spark runner, end to end through this pod's own service ---------------------
+
+SPARK_AGG = """
+def run(ctx):
+    n = ctx.spark.range(ctx.params["n"]).count()
+    print("counted", n, "rows on attempt", ctx.attempt)
+    return {"rows": n}
+"""
+SPARK_USE = "def run(ctx):\n    print('downstream got', ctx.inputs['agg']['rows'])\n    return ctx.inputs['agg']['rows'] * 2\n"
+SPARK_LONG = "import time\ndef run(ctx):\n    if ctx.attempt == 1:\n        print('first attempt: waiting to be interrupted', flush=True)\n        time.sleep(600)\n    return 'done on attempt %d' % ctx.attempt\n"
+
+
+def spark_e2e() -> int:
+    import urllib.request
+
+    from booth_pipeline.app import create_app
+    from booth_pipeline.auth import Identity
+    from booth_pipeline.config import Config
+    from booth_pipeline.kube import KubeClient
+    from booth_pipeline.model import PipelineSpec, Schedule, TaskConfig, TaskRef
+    from booth_pipeline.runners.kubejob import RUN_LABEL
+
+    cfg = Config.from_env()
+    app = create_app(cfg, start_scheduler=False)
+    svc = app.state.service
+    core = cfg.core_url
+    owner = Identity("u-ci-owner", "ci-owner", "acme", "owner", "tok-ci-owner")
+    checks: dict[str, bool] = {}
+    report: dict[str, object] = {}
+
+    def http(method: str, path: str, body: object = None):
+        req = urllib.request.Request(core + path, data=None if body is None else json.dumps(body).encode(), method=method, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+
+    def apps() -> list[dict]:
+        return http("GET", "/modules/spark/_standin/apps")
+
+    def check(name: str, ok: bool) -> None:
+        checks[name] = bool(ok)
+        print(("ok: " if ok else "FAIL: ") + name, file=sys.stderr, flush=True)
+
+    def pipeline(name: str, nodes: list[tuple[str, str, list[str], dict]]) -> str:
+        refs = []
+        for key, src, deps, cfg_kw in nodes:
+            config = TaskConfig.model_validate({"code": {"type": "inline", "source": src}, **cfg_kw})
+            t, _ = svc.create_task(owner, f"{name}-{key}", "", config, "")
+            refs.append(TaskRef(key=key, task_id=t.id, task_version=1, depends_on=deps))
+        p, _ = svc.create_pipeline(owner, f"{name}-{uuid.uuid4().hex[:6]}", "", PipelineSpec(tasks=refs), "")
+        svc.update_schedule(owner, p.id, Schedule(cron="0 6 * * 1"), False, "editor", None)  # owner: ci-owner
+        return p.id
+
+    def start(pid: str) -> str:
+        return svc.start_scheduled(svc.get_pipeline(owner, pid)).id
+
+    def wait(run_id: str, timeout: float = 300):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            run, tasks = svc.get_run(owner, run_id)
+            if run.status in ("succeeded", "failed", "canceled"):
+                return run, {t.task_key: t for t in tasks}
+            time.sleep(1)
+        raise AssertionError(f"run {run_id} did not finish in {timeout}s")
+
+    def wait_running(run_id: str, key: str, timeout: float = 180) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, tasks = svc.get_run(owner, run_id)
+            ext = next((t.external for t in tasks if t.task_key == key), None) or {}
+            if ext.get("state") == "running":
+                return ext
+            time.sleep(0.5)
+        raise AssertionError(f"{key} of run {run_id} never reached running")
+
+    def log_lines(run_id: str) -> list:
+        return svc.logs(owner, run_id, None, 0, 5000)
+
+    # 1. a scheduled run: Spark output handed downstream, the driver log and state in the run log
+    pid = pipeline("spark-ok", [("agg", SPARK_AGG, [], {"runner": "spark", "spark": {}, "params": {"n": 21}}), ("use", SPARK_USE, ["agg"], {})])
+    before = len(apps())
+    run, tasks = wait(start(pid))
+    lines = log_lines(run.id)
+    mine = [a for a in apps()[before:] if a["idempotencyKey"].startswith(run.id)]
+    report["ok"] = {"status": run.status, "error": run.error, "external": tasks["agg"].external, "apps": [a["idempotencyKey"] for a in mine]}
+    check("a scheduled Spark task succeeds", run.status == "succeeded")
+    check("its application ran on booth-spark, keyed by run, task and attempt", [a["idempotencyKey"] for a in mine] == [f"{run.id}/agg/1"])
+    check("the attempt records its application", (tasks["agg"].external or {}).get("state") == "succeeded" and (tasks["agg"].external or {}).get("id") == mine[0]["id"] if mine else False)
+    check("the driver log is in the run log as the spark stream", any(ln.stream == "spark" and "counted 21 rows on attempt 1" in ln.message for ln in lines))
+    check("its state changes are system lines", any(ln.stream == "system" and ln.message == "spark: running → succeeded" for ln in lines))
+    check("the output reached the downstream task", any(ln.task_key == "use" and "downstream got 21" in ln.message for ln in lines))
+    check("the run was authorized at its start", any("authorized: core will issue this run's tokens" in ln.message for ln in lines))
+    mints = [m for m in http("GET", "/mints") if m["subject"] == f"pipeline:acme:{run.id}"]
+    check("its tokens name pipeline:acme:<runId> and the owner", bool(mints) and all(m["owner"] == "u-ci-owner" for m in mints))
+
+    # 2. a disabled service account: the whole run fails at its start, nothing is submitted
+    svc.set_owner(owner, pid, "svc:acme:nfl-weekly")
+    http("POST", "/_control/mint", {"owner": "svc:acme:nfl-weekly", "code": "service_account_disabled"})
+    before = len(apps())
+    run, tasks = wait(start(pid))
+    report["disabled"] = {"status": run.status, "error": run.error}
+    check("a disabled account's scheduled run fails with its reason", run.status == "failed" and "service account svc:acme:nfl-weekly, is disabled" in (run.error or ""))
+    check("and runs nothing", len(apps()) == before and all(t.status == "skipped" for t in tasks.values()))
+
+    # 3. a refused person owner: one indistinguishable message, naming Take over
+    svc.set_owner(owner, pid, "me")
+    http("POST", "/_control/mint", {"owner": "u-ci-owner", "code": None})
+    run, tasks = wait(start(pid))
+    report["person"] = {"status": run.status, "error": run.error}
+    check("a refused person owner's run fails with the one message", run.status == "failed" and "would not issue a token for ci-owner" in (run.error or "") and "Take over" in (run.error or ""))
+    http("POST", "/_control/mint", {"clear": True})
+
+    # 4. cancel stops the application
+    pid = pipeline("spark-cancel", [("agg", SPARK_LONG, [], {"runner": "spark", "spark": {}})])
+    run_id = start(pid)
+    ext = wait_running(run_id, "agg")
+    svc.cancel_run(owner, run_id)
+    run, tasks = wait(run_id)
+    time.sleep(3)
+    app_ = next(a for a in apps() if a["id"] == ext["id"])
+    report["cancel"] = {"status": run.status, "app": app_["state"]}
+    check("a canceled run is canceled", run.status == "canceled")
+    check("and its application was stopped", bool(app_["stopRequestedAt"]) and app_["state"] == "stopped")
+
+    # 5. a task pod killed mid-run: its application is stopped before the retry, which waits the floor
+    pid = pipeline("spark-retry", [("agg", SPARK_LONG, [], {"runner": "spark", "spark": {}, "retry": {"maxRetries": 1, "delaySeconds": 0}})])
+    run_id = start(pid)
+    ext = wait_running(run_id, "agg")
+    kube = KubeClient.in_cluster()
+    jobs = {p["metadata"]["labels"]["booth.projectbooth.io/task-job"] for p in kube.list_pods(f"{RUN_LABEL}={run_id}")}
+    for name in jobs:
+        kube.delete_job(name)  # the pod goes with its Job: the attempt loses its runner mid-stream
+    run, tasks = wait(run_id, 600)
+    mine = sorted((a for a in apps() if a["idempotencyKey"].startswith(run_id)), key=lambda a: a["createdAt"])
+    report["retry"] = {"status": run.status, "error": run.error, "apps": [(a["idempotencyKey"], a["state"], a["stopRequestedAt"], a["createdAt"], a["finishedAt"]) for a in mine]}
+    check("the retried run succeeds", run.status == "succeeded" and tasks["agg"].attempts == 2)
+    if len(mine) == 2:
+        a1, a2 = mine
+        check("the lost attempt's application was stopped before the retry submitted", bool(a1["stopRequestedAt"]) and a1["stopRequestedAt"] <= a2["createdAt"] and a1["state"] == "stopped")
+        from datetime import datetime as _dt
+
+        gap = (_dt.fromisoformat(a2["createdAt"]) - _dt.fromisoformat(a1["stopRequestedAt"])).total_seconds()
+        report["retry_gap_seconds"] = round(gap, 1)
+        check(f"the retry waited the floor ({gap:.1f}s >= runner.spark.retryMinDelaySeconds)", gap >= float(os.environ.get("BOOTH_PIPELINE_SPARK_RETRY_MIN_DELAY_SECONDS", "0")))
+    else:
+        check("exactly two applications for two attempts", False)
+
+    print(json.dumps(report, default=str))
+    return 0 if all(checks.values()) else 1
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -638,6 +794,8 @@ def main() -> int:
         return pip_run_mode(args)
     if mode == "pip-scrape":
         return pip_scrape(args[0])
+    if mode == "spark-e2e":
+        return spark_e2e()
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")
 
 

@@ -383,9 +383,13 @@ class MemoryStore:
                 if existing is not None and all(e.seq != ln.seq for e in existing):
                     existing.append(copy.copy(ln))
 
-    def list_logs(self, run_id, task_key, after_seq, limit):
+    def list_logs(self, run_id, task_key, after_seq, limit, exclude_streams=()):
         with self._lock:
-            out = [ln for ln in self._logs.get(run_id, []) if ln.seq > after_seq and (task_key is None or ln.task_key == task_key)]
+            out = [
+                ln
+                for ln in self._logs.get(run_id, [])
+                if ln.seq > after_seq and (task_key is None or ln.task_key == task_key) and ln.stream not in exclude_streams
+            ]
             out.sort(key=lambda ln: ln.seq)
             return copy.deepcopy(out[:limit])
 

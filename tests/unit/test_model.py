@@ -156,7 +156,7 @@ def test_task_config_params_must_be_json_serialisable_and_bounded():
 def test_validate_task_config_checks_runner_availability_not_validate_structure():
     """ADR 0071 moves this off the pipeline entirely: it is the referenced Task's own concern,
     checked when that task's version is saved — validate_structure (above) never touches it."""
-    c = TaskConfig.model_validate(task_config(runner="spark"))
+    c = TaskConfig.model_validate(task_config(runner="spark", spark={}))
     validate_task_config(c)  # availability is only checked when the caller supplies the set
     with pytest.raises(ModelError, match="runner 'spark' is not available; available: base") as ei:
         validate_task_config(c, {"base"})

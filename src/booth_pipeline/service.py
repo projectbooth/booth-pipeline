@@ -51,6 +51,7 @@ from .resolve import resolve_task_configs, resolve_task_ref
 from .runners import languages
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
+from .runners.spark import SPARK_STREAM
 from .runs import RunManager
 from .schedule import next_fire_trigger
 from .storage_client import StorageClient, StorageDenied, StorageNotFound, StorageUnavailable
@@ -315,6 +316,10 @@ class PipelineService:
     # ---- the save task version: validate -> resolve code -> validate again ----
     def _prepare_task_config(self, ident: Identity, config: TaskConfig, previous: TaskConfig | None) -> TaskConfig:
         validate_task_config(config, self.registry.available_ids())
+        if config.runner != BASE_RUNNER:
+            reason = self.registry.availability(config.runner, ident.token, ident.workspace)
+            if reason:
+                raise ModelError(f"{config.runner} is not available in this workspace: {reason}", "runner")
         resolved = self._resolve_task_code(ident, config, previous)
         validate_task_config(resolved, self.registry.available_ids())  # re-check: the byte budget now includes catalog/storage source
         return resolved
@@ -437,7 +442,10 @@ class PipelineService:
 
     def logs(self, ident: Identity, run_id: str, task_key: str | None, after_seq: int, limit: int) -> list[LogLine]:
         self._need(self.store.get_run(ident.workspace, run_id), "run")
-        return self.store.list_logs(run_id, task_key, after_seq, limit)
+        # ADR 0119 amendment 3 point 4: a Spark driver's log can carry whatever its code prints (its
+        # own token, its S3 lease keys), so, as booth-spark itself rules, viewers don't get it.
+        hidden = () if ident.can_write else (SPARK_STREAM,)
+        return self.store.list_logs(run_id, task_key, after_seq, limit, hidden)
 
     @staticmethod
     def _need(value, what: str):
