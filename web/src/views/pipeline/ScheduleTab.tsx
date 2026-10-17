@@ -7,6 +7,7 @@ import { ScheduleEditor, type TriggerShape } from "../../task/ScheduleEditor";
 import type { PipelineScheduleUpdate, Trigger } from "../../types";
 import { Banner, Button, Card, Field, KVRows, inputClass, type KV } from "../../ui/primitives";
 import type { PipelineData } from "./data";
+import { ownerLabel, TakeOver } from "./RunsAs";
 
 // S2d — the Schedule & Triggers tab (docs/decisions/0016 §4, Figma screen 5). The read-only summary
 // is the default view; "Edit schedule" swaps it in place for the editor (ADR 0065 triggers, plus
@@ -32,6 +33,7 @@ export function ScheduleTab({ v, d, reload }: { v: ViewCtx; d: PipelineData; rel
     <ScheduleSummary
       v={v}
       d={d}
+      reload={reload}
       saved={saved}
       onEdit={() => {
         setSaved(false);
@@ -41,7 +43,7 @@ export function ScheduleTab({ v, d, reload }: { v: ViewCtx; d: PipelineData; rel
   );
 }
 
-function ScheduleSummary({ v, d, saved, onEdit }: { v: ViewCtx; d: PipelineData; saved: boolean; onEdit: () => void }) {
+function ScheduleSummary({ v, d, reload, saved, onEdit }: { v: ViewCtx; d: PipelineData; reload: () => void; saved: boolean; onEdit: () => void }) {
   const p = d.pipeline;
   const s = p.schedule;
   const pinned = p.pinnedVersion ? d.versions.find((ver) => ver.version === p.pinnedVersion) : undefined;
@@ -72,6 +74,15 @@ function ScheduleSummary({ v, d, saved, onEdit }: { v: ViewCtx; d: PipelineData;
     },
     { label: "Concurrent runs", value: p.allowConcurrentRuns ? "Allowed" : "Not allowed — a new run is refused while one is active" },
     { label: "Platform access cap", value: p.roleCeiling === "editor" ? "Editor — can read and write storage and the catalog" : "Viewer — read only" },
+    {
+      label: "Runs as",
+      value: (
+        <div className="flex flex-col gap-2">
+          <span>{p.owner ? ownerLabel(p.owner) : "No one yet — the first person to save a schedule becomes its owner"}</span>
+          <TakeOver v={v} p={p} onDone={reload} />
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -99,7 +110,7 @@ function ScheduleSummary({ v, d, saved, onEdit }: { v: ViewCtx; d: PipelineData;
         </Banner>
       )}
       {!p.hasOwner && s && (
-        <Banner tone="warn">This pipeline was scheduled before workload identity and has no owner, so its unattended runs get no platform access until its schedule is saved again.</Banner>
+        <Banner tone="warn">This pipeline was scheduled before workload identity and has no owner, so its scheduled runs can't start until someone takes it over.</Banner>
       )}
     </div>
   );

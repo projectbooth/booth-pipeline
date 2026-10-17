@@ -184,6 +184,21 @@ def test_update_schedule_persists_schedule_and_ownership_fields(store):
     assert scheduled(store, ghost) is None
 
 
+def test_the_owners_name_and_a_service_account_owner_persist_on_pipelines_and_runs(store):
+    """ADR 0120: owner_sub may be svc:<ws>:<name>; owner_name is how the UI says who."""
+    p = store.create_pipeline(WS, "etl", "", "a")
+    assert p.owner_name == ""
+    scheduled(store, p, owner_sub="svc:acme:nfl-weekly", owner_name="nfl-weekly")
+    got = store.get_pipeline(WS, p.id)
+    assert (got.owner_sub, got.owner_name) == ("svc:acme:nfl-weekly", "nfl-weekly")
+    store.add_version(WS, p.id, linear(), "", "a")
+    run = new_run(p)
+    run.owner_sub, run.owner_name = "svc:acme:nfl-weekly", "nfl-weekly"
+    store.create_run(run, ["a"])
+    back = store.get_run(WS, run.id)
+    assert (back.owner_sub, back.owner_name) == ("svc:acme:nfl-weekly", "nfl-weekly")
+
+
 def test_pinned_version_is_persisted_and_can_be_cleared(store):
     """ADR 0071's second "Open question, ruled 2026-09-24": a pipeline can pin every run to a
     specific saved version, independent of what is saved on top of it later."""

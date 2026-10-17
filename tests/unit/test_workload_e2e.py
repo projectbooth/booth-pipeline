@@ -22,7 +22,7 @@ from booth_pipeline.runner_service import create_runner_app
 from booth_pipeline.runners.remote import RemoteRunner
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
 from booth_pipeline.store.memory import MemoryStore
-from booth_pipeline.workload import OWNER_NOT_CURRENT, WorkloadMinter
+from booth_pipeline.workload import WorkloadMinter
 
 from .harness import FakeCatalog, FakeVerifier, task
 from .servers import FakeHttp, serve_asgi
@@ -143,7 +143,7 @@ def test_an_opted_in_task_reaches_storage_and_the_catalog_with_a_token_minted_fo
     (mint,) = world.mints()  # exactly one: 'src' did not opt in, so it cost nothing
     assert mint.headers["authorization"] == f"Bearer {CRED}"
     body = mint.json()
-    assert body["workspace"] == "acme" and body["subject"] == f"run:{run['id']}" and body["roleCeiling"] == "editor"
+    assert body["workspace"] == "acme" and body["subject"] == f"pipeline:acme:{run['id']}" and body["roleCeiling"] == "editor"
     assert body["owner"] == "u-editor"  # a manual run belongs to whoever pressed the button (their `sub`, not their name)
     assert not body["subject"].startswith("u-") and "olga" not in body["subject"]  # the token names the run, never a person
 
@@ -213,13 +213,13 @@ def test_a_lapsed_owner_fails_the_run_with_a_clear_reason_in_status_and_log_and_
     run = world.wait_run(world.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
     assert run["status"] == "failed"
     # in the run's OWN status, where a person looks first...
-    assert "signed in" in run["error"] and "recently enough" in run["error"] and "write:" in run["error"]
+    assert "signed in" in run["error"] and "Take over" in run["error"] and "write:" in run["error"]
     task_run = {t["taskKey"]: t for t in run["tasks"]}
     assert task_run["write"]["status"] == "failed" and task_run["write"]["attempts"] == 1  # never retried
     assert task_run["src"]["status"] == "succeeded"  # the task that needed nothing was unaffected
     # ...and in the log, with the explanation
     logs = world.logs(run["id"])
-    assert OWNER_NOT_CURRENT in logs and "not given platform access" in logs
+    assert "booth-core would not issue a token for" in logs and "not given platform access" in logs
     assert len(world.mints()) == 1  # three retries configured, one mint attempt
     assert world.platform.requests == []  # the task's code never ran, so it never called storage
 
@@ -238,7 +238,7 @@ def test_a_pipeline_that_predates_workload_identity_says_how_to_fix_it(world: Wo
     world.store.update_schedule(stored)
     run_id = world.app.state.service.start_scheduled(world.store.get_pipeline("acme", p["id"]))
     run = world.wait_run(run_id.id)
-    assert run["status"] == "failed" and "no recorded owner" in run["error"] and "save its schedule again" in run["error"]
+    assert run["status"] == "failed" and "no recorded owner" in run["error"] and "an editor can Take over" in run["error"]
     # saving a schedule (by anyone active) adopts it
     world.call("PUT", f"/pipelines/{p['id']}/schedule", "tok-owner", json={"schedule": {"cron": "0 9 * * *"}})
     assert world.store.get_pipeline("acme", p["id"]).owner_sub == "u-owner"

@@ -67,6 +67,15 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Who a run acts as** (ADR 0058, ADR 0119 amendment 3, ADR 0120). A scheduled run acts as the pipeline's
+  *owner*: whoever first saved a schedule onto it, until an editor **takes it over** or a workspace owner gives it to
+  a **service account** (`svc:<workspace>:<name>`). A Run-now run acts as whoever pressed the button. Its tasks
+  (and, later, its Spark runs) get that identity's access, capped by the pipeline's platform access cap, so the
+  owner may be someone who didn't write the tasks' code. A person owner's runs stop getting tokens once they
+  haven't signed in for core's `ownerMaxAge` (7 days by default); a service account's don't lapse, but stop at
+  once when the account is disabled. Only workspace owners choose or remove a service account; nobody hands a
+  pipeline to another person. The pipelines list shows which pipelines run as each account: core keeps no such
+  record, and an account must be disabled before it can be deleted.
 - **Python packages** (ADR 0115): a Python task can list requirements (`requests==2.32.3`, one per line; package
   specifiers only, no URLs, paths or pip options). Each run installs them into the task's own pod before its code
   runs, from the install's package index (`runner.pip`), in an init container that holds no token or credentials,

@@ -28,7 +28,7 @@ from .runners.registry import RunnerRegistry
 from .runners.subprocess_runner import SubprocessRunner
 from .runs import RunManager
 from .scheduler import Scheduler
-from .service import NotFound, PipelineBusy, PipelineService, Unavailable
+from .service import Forbidden, NotFound, PipelineBusy, PipelineService, Unavailable
 from .storage_client import StorageClient
 from .store.base import Conflict, InUse, Store
 from .workload import WorkloadMinter
@@ -197,6 +197,10 @@ def create_app(
     async def _validation(_: Request, e: RequestValidationError):
         first = e.errors()[0]
         return err(422, _pydantic_message(first), field_path(first["loc"]))
+
+    @app.exception_handler(Forbidden)
+    async def _forbidden(_: Request, e: Forbidden):
+        return err(403, str(e))
 
     @app.exception_handler(NotFound)
     async def _not_found(_: Request, e: NotFound):

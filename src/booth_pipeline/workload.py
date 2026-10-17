@@ -6,8 +6,9 @@ one thing that must never reach code a workspace member wrote (ADR 0057). The ta
 the resulting token. ``config.py`` refuses to start if that Secret is present while tasks would run
 in this same pod.
 
-A token names the *run* (``sub`` = ``run:<id>``), never a person; core caps its role at the lesser of
-our ``roleCeiling`` and what the run's ``owner`` (a user's ``sub``) currently holds in the workspace.
+A token names the *run* (``sub`` = ``pipeline:<workspace>:<runId>``), never a person; core caps its
+role at the lesser of our ``roleCeiling`` and what the run's ``owner`` holds in the workspace: a
+person's live role, or a service account's stored role (``svc:<workspace>:<name>``, ADR 0120).
 """
 
 from __future__ import annotations
@@ -19,18 +20,29 @@ from pathlib import Path
 
 import httpx
 
+from .owners import describe
 from .runners.base import TaskAccess
 
 log = logging.getLogger(__name__)
 
-# What a person reads in the run log. Core deliberately answers 403 identically for "the owner's
-# access is not current" and "this module is no longer entitled" (so membership cannot be probed),
-# so the message names the overwhelmingly likely cause and does not overclaim.
-OWNER_NOT_CURRENT = (
-    "the owner of this run hasn't signed in to the platform recently enough to authorize its "
-    "access to storage and the catalog (or no longer has access to this workspace). Ask them to "
-    "sign in, or have someone who is active save the job to take it over."
-)
+# What a person reads in the run log. For a person owner core answers every refusal with the same
+# 403 (not signed in recently, no longer a member or demoted, or this module not entitled), so
+# membership cannot be probed (ADR 0058; ADR 0119 amendment 3 point 5). The message names the
+# likely causes and what to do, and does not claim to know which it was.
+def owner_not_current(owner: str) -> str:
+    return (
+        f"booth-core would not issue a token for {owner}: they haven't signed in to Booth recently, no "
+        "longer have the access this pipeline needs, or this module isn't entitled in this workspace. "
+        "Ask them to sign in, or an editor can Take over the pipeline (or a workspace owner can make a "
+        "service account its owner)."
+    )
+
+
+# For a service-account owner core says which (ADR 0120 addendum 2): members can see accounts anyway.
+SERVICE_ACCOUNT_REFUSALS = {
+    "service_account_disabled": "the pipeline's owner, service account {owner}, is disabled; a workspace owner can enable it or choose another owner",
+    "service_account_not_found": "the pipeline's owner, service account {owner}, no longer exists; a workspace owner can choose another owner",
+}
 
 
 class MintRefused(Exception):
@@ -87,15 +99,18 @@ class WorkloadMinter:
     def close(self) -> None:
         self._http.close()
 
-    def mint(self, workspace: str, subject: str, role_ceiling: str, owner: str) -> WorkloadToken:
+    def mint(self, workspace: str, subject: str, role_ceiling: str, owner: str, owner_name: str = "") -> WorkloadToken:
         body = {"workspace": workspace, "subject": subject, "roleCeiling": role_ceiling, "owner": owner}
         try:
             resp = self._http.post(self._url, json=body, headers={"Authorization": f"Bearer {self._credential}"})
         except httpx.HTTPError as e:
             raise MintUnavailable(f"booth-core is unreachable: {e.__class__.__name__}") from e
         if resp.status_code == 403:
-            log.warning("mint refused (403) for %s in %s", subject, workspace)
-            raise MintRefused(OWNER_NOT_CURRENT)
+            code = _error_code(resp)
+            log.warning("mint refused (403%s) for %s in %s", f", {code}" if code else "", subject, workspace)
+            if code in SERVICE_ACCOUNT_REFUSALS:
+                raise MintRefused(SERVICE_ACCOUNT_REFUSALS[code].format(owner=owner))
+            raise MintRefused(owner_not_current(describe(owner, owner_name)))
         if resp.status_code == 401:
             # Our own credential was rejected: an operator problem, not the owner's.
             raise MintRefused(
@@ -116,6 +131,14 @@ class WorkloadMinter:
             raise MintUnavailable("booth-core returned an unreadable mint response") from e
 
 
+def _error_code(resp: httpx.Response) -> str:
+    try:
+        body = resp.json()
+    except ValueError:
+        return ""
+    return str(body.get("code", "")) if isinstance(body, dict) else ""
+
+
 class AccessProvider:
     """Hands out ``TaskAccess`` for one run. ``grant()`` mints fresh each call, so every task attempt
     starts with a full-lifetime token; ``refresh`` on the result is how a long-running task keeps one."""
@@ -130,9 +153,11 @@ class AccessProvider:
         owner: str,
         storage_url: str,
         catalog_url: str,
+        owner_name: str = "",
     ) -> None:
         self._minter = minter
         self._workspace, self._subject, self._ceiling, self._owner = workspace, subject, role_ceiling, owner
+        self._owner_name = owner_name
         self._storage_url, self._catalog_url = storage_url, catalog_url
 
     def _mint(self) -> WorkloadToken:
@@ -141,8 +166,8 @@ class AccessProvider:
                 "this deployment has no workload-identity credential, so tasks cannot be given access to storage or the catalog"
             )
         if not self._owner:
-            raise MintRefused("this pipeline has no recorded owner (it predates workload identity); save its schedule again to take ownership")
-        return self._minter.mint(self._workspace, self._subject, self._ceiling, self._owner)
+            raise MintRefused("this pipeline has no recorded owner (it predates workload identity); an editor can Take over the pipeline")
+        return self._minter.mint(self._workspace, self._subject, self._ceiling, self._owner, self._owner_name)
 
     def grant(self) -> TaskAccess:
         t = self._mint()

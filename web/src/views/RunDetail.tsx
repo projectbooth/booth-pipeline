@@ -23,6 +23,7 @@ import {
   thClass,
   theadClass,
 } from "../ui/primitives";
+import { ownerLabel } from "./pipeline/RunsAs";
 import { LogViewer } from "./run/LogViewer";
 
 // S3 — one Run (docs/decisions/0016 §4): its DAG coloured by each node's status, a per-node
@@ -129,6 +130,7 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
             ),
           },
           { label: "Triggered by", value: run.trigger === "schedule" ? "Schedule" : run.triggeredBy, mono: false },
+          ...(run.actsAs ? [{ label: "Ran as", value: ownerLabel(run.actsAs), mono: false }] : []),
           { label: "Tasks", value: `${doneCount}/${run.tasks.length} done` },
         ]}
       />

@@ -152,6 +152,8 @@ export interface Pipeline {
   /** False for a pipeline scheduled before workload identity: its unattended runs cannot get
    *  platform access until its schedule is saved again. */
   hasOwner: boolean;
+  /** Who its scheduled runs act as (ADR 0120). Absent from a backend older than 0.2.0. */
+  owner?: OwnerInfo | null;
   nextRunAt: string | null;
   /** null: every run tracks the latest saved version. Set: every run targets exactly this
    *  version, regardless of what is saved on top of it later. */
@@ -205,6 +207,23 @@ export interface Run {
   finishedAt: string | null;
   error: string | null;
   cancelRequested: boolean;
+  /** Who the run acted as: the pipeline's owner (scheduled) or who pressed Run now. */
+  actsAs?: OwnerInfo | null;
+}
+
+/** A pipeline's owner or a run's identity (ADR 0120). A service account's id is shown; a person's
+ *  `sub` never is (`you` says whether it is the caller). */
+export interface OwnerInfo {
+  kind: "person" | "service";
+  id?: string;
+  name: string;
+  you: boolean;
+}
+
+/** GET /service-accounts/uses: which pipelines run as each service account (core keeps no record). */
+export interface ServiceAccountUse {
+  account: string;
+  pipelines: { id: string; name: string; scheduled: boolean }[];
 }
 
 export interface TaskRun {

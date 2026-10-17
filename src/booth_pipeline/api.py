@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from . import model as m
 from .auth import Identity, require_read, require_write
+from .owners import is_service_account
 from .records import (
     RUN_TERMINAL,
     LogLine,
@@ -33,6 +34,7 @@ from .runners.kubejob import NO_PIP_ROUTE, PIP_ROUTES
 from .schemas import (
     PipelineCreate,
     PipelineDraftSave,
+    PipelineOwnerUpdate,
     PipelineScheduleUpdate,
     PipelineUpdate,
     TaskCreate,
@@ -61,7 +63,17 @@ def _schedule(s: m.Trigger | None) -> dict[str, Any] | None:
     return s.model_dump(by_alias=True) if s else None
 
 
-def pipeline_json(p: Pipeline) -> dict[str, Any]:
+def owner_json(owner: str, name: str, ident: Identity | None) -> dict[str, Any] | None:
+    """Who runs act as (ADR 0120). A service account's id is shown; a person's ``sub`` is not
+    (``you`` says whether it is the caller)."""
+    if not owner:
+        return None
+    if is_service_account(owner):
+        return {"kind": "service", "id": owner, "name": name or owner, "you": False}
+    return {"kind": "person", "name": name, "you": ident is not None and ident.subject == owner}
+
+
+def pipeline_json(p: Pipeline, ident: Identity | None = None) -> dict[str, Any]:
     return {
         "id": p.id,
         "name": p.name,
@@ -75,6 +87,7 @@ def pipeline_json(p: Pipeline) -> dict[str, Any]:
         "allowConcurrentRuns": p.allow_concurrent_runs,
         "roleCeiling": p.role_ceiling,
         "hasOwner": bool(p.owner_sub),
+        "owner": owner_json(p.owner_sub, p.owner_name, ident),
         "nextRunAt": _iso(p.next_run_at),
         "pinnedVersion": p.pinned_version,
         # ADR 0073: whether a mutable draft has ever been saved (plain Save, or "Save as new
@@ -134,7 +147,7 @@ def task_draft_json(d: TaskDraft) -> dict[str, Any]:
     return {"taskId": d.task_id, "config": d.config.model_dump(by_alias=True, mode="json"), "updatedBy": d.updated_by, "updatedAt": _iso(d.updated_at)}
 
 
-def run_json(r: Run) -> dict[str, Any]:
+def run_json(r: Run, ident: Identity | None = None) -> dict[str, Any]:
     return {
         "id": r.id,
         "pipelineId": r.pipeline_id,
@@ -147,6 +160,8 @@ def run_json(r: Run) -> dict[str, Any]:
         "finishedAt": _iso(r.finished_at),
         "error": r.error,
         "cancelRequested": r.cancel_requested,
+        # Who this run acted as: the pipeline's owner (scheduled) or who pressed Run now (manual).
+        "actsAs": owner_json(r.owner_sub, r.owner_name, ident),
     }
 
 
@@ -225,13 +240,13 @@ def runners(request: Request, _: Identity = Depends(require_read)) -> dict[str, 
 @router.get("/pipelines")
 def list_pipelines(request: Request, q: str = "", limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
     page = svc(request).list_pipelines(ident, q, limit, offset)
-    return page_json(page.items, page.total, pipeline_json)
+    return page_json(page.items, page.total, lambda p: pipeline_json(p, ident))
 
 
 @router.post("/pipelines", status_code=201)
 def create_pipeline(request: Request, body: PipelineCreate, ident: Identity = Depends(require_write)):
     p, v = svc(request).create_pipeline(ident, body.name, body.description, body.spec, body.notes)
-    return {**pipeline_json(p), "version": version_json(v) if v else None}
+    return {**pipeline_json(p, ident), "version": version_json(v) if v else None}
 
 
 @router.post("/pipelines/validate")
@@ -248,12 +263,12 @@ def validate_pipeline(request: Request, body: ValidateRequest, ident: Identity =
 
 @router.get("/pipelines/{pipeline_id}")
 def get_pipeline(request: Request, pipeline_id: str, ident: Identity = Depends(require_read)):
-    return pipeline_json(svc(request).get_pipeline(ident, pipeline_id))
+    return pipeline_json(svc(request).get_pipeline(ident, pipeline_id), ident)
 
 
 @router.put("/pipelines/{pipeline_id}")
 def update_pipeline(request: Request, pipeline_id: str, body: PipelineUpdate, ident: Identity = Depends(require_write)):
-    return pipeline_json(svc(request).update_pipeline(ident, pipeline_id, body.name, body.description))
+    return pipeline_json(svc(request).update_pipeline(ident, pipeline_id, body.name, body.description), ident)
 
 
 @router.delete("/pipelines/{pipeline_id}", status_code=204)
@@ -264,13 +279,32 @@ def delete_pipeline(request: Request, pipeline_id: str, ident: Identity = Depend
 
 @router.put("/pipelines/{pipeline_id}/schedule")
 def update_schedule(request: Request, pipeline_id: str, body: PipelineScheduleUpdate, ident: Identity = Depends(require_write)):
-    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling, body.pinned_version))
+    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling, body.pinned_version), ident)
+
+
+@router.put("/pipelines/{pipeline_id}/owner")
+def set_owner(request: Request, pipeline_id: str, body: PipelineOwnerUpdate, ident: Identity = Depends(require_write)):
+    """Take over (``"me"``), or, as a workspace owner, give the pipeline to a service account
+    (``svc:<workspace>:<name>``). Never to another person (owners.py)."""
+    return pipeline_json(svc(request).set_owner(ident, pipeline_id, body.owner), ident)
+
+
+@router.get("/service-accounts/uses")
+def service_account_uses(request: Request, ident: Identity = Depends(require_read)):
+    """Which pipelines run as each service account. Core keeps no usage record (ADR 0120 addendum 2),
+    so before disabling or deleting an account a workspace owner looks here."""
+    return {
+        "items": [
+            {"account": account, "pipelines": [{"id": p.id, "name": p.name, "scheduled": bool(p.schedule and p.schedule.enabled)} for p in ps]}
+            for account, ps in svc(request).service_account_uses(ident)
+        ]
+    }
 
 
 @router.post("/pipelines/{pipeline_id}/run", status_code=202)
 def run_pipeline(request: Request, pipeline_id: str, ident: Identity = Depends(require_write)):
     """Run now. 202: the run is queued and executes asynchronously — poll ``GET /api/runs/{id}``."""
-    return run_json(svc(request).run_now(ident, pipeline_id))
+    return run_json(svc(request).run_now(ident, pipeline_id), ident)
 
 
 @router.get("/pipelines/{pipeline_id}/versions")
@@ -379,18 +413,18 @@ def save_task_draft(request: Request, task_id: str, body: TaskDraftSave, ident: 
 @router.get("/runs")
 def list_runs(request: Request, pipelineId: str | None = None, status: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
     page = svc(request).list_runs(ident, pipelineId, status, limit, offset)
-    return page_json(page.items, page.total, run_json)
+    return page_json(page.items, page.total, lambda r: run_json(r, ident))
 
 
 @router.get("/runs/{run_id}")
 def get_run(request: Request, run_id: str, ident: Identity = Depends(require_read)):
     run, tasks = svc(request).get_run(ident, run_id)
-    return {**run_json(run), "tasks": [task_run_json(t) for t in tasks]}
+    return {**run_json(run, ident), "tasks": [task_run_json(t) for t in tasks]}
 
 
 @router.post("/runs/{run_id}/cancel", status_code=202)
 def cancel_run(request: Request, run_id: str, ident: Identity = Depends(require_write)):
-    return run_json(svc(request).cancel_run(ident, run_id))
+    return run_json(svc(request).cancel_run(ident, run_id), ident)
 
 
 @router.get("/runs/{run_id}/logs")

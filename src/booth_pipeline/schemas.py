@@ -56,6 +56,12 @@ class PipelineScheduleUpdate(Wire):
     pinned_version: int | None = Field(None, ge=1)
 
 
+class PipelineOwnerUpdate(Wire):
+    """Who the pipeline's scheduled runs act as: ``"me"`` (Take over) or ``svc:<workspace>:<name>``."""
+
+    owner: str = Field(min_length=1, max_length=256)
+
+
 class TaskCreate(Wire):
     name: str = Field(min_length=1, max_length=MAX_NAME)
     description: str = Field("", max_length=MAX_DESCRIPTION)

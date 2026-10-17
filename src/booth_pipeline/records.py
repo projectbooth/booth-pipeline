@@ -47,10 +47,13 @@ class Pipeline:
     schedule: Trigger | None = None
     allow_concurrent_runs: bool = False
     next_run_at: datetime | None = None
-    # The `sub` of the user whose live role caps this pipeline's workload tokens when it runs
-    # unattended (ADR 0058) — whoever created it, or last saved a schedule onto it. Distinct from
-    # `created_by`, which is a display name, not a `sub`.
+    # Who this pipeline's scheduled runs act as (ADR 0058, ADR 0120): a person's `sub`, or a service
+    # account `svc:<workspace>:<name>`, whose live role (capped by role_ceiling) core mints for. Set
+    # by whoever FIRST saves a schedule, and afterwards only by Take over or a workspace owner
+    # choosing a service account (ADR 0119 amendment 3). Distinct from `created_by`, a display name.
     owner_sub: str = ""
+    # How the UI names the owner, taken when it was set (empty for owners set before names were kept).
+    owner_name: str = ""
     # The most a run's token may be granted, whatever the owner holds (least privilege).
     role_ceiling: str = "editor"
     # None: every run (scheduled or manual) uses the latest saved version. Set: every run targets
@@ -152,6 +155,7 @@ class Run:
     # Whose live role caps this run's workload tokens: the pipeline's owner for a scheduled run,
     # the person who pressed "Run now" for a manual one.
     owner_sub: str = ""
+    owner_name: str = ""
 
 
 @dataclass

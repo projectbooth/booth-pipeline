@@ -30,6 +30,7 @@ from .model import (
     validate_structure,
     validate_task_config,
 )
+from .owners import is_service_account, parse_service_account
 from .records import (
     RUN_ACTIVE,
     RUN_QUEUED,
@@ -60,6 +61,10 @@ log = logging.getLogger(__name__)
 
 class NotFound(Exception):
     pass
+
+
+class Forbidden(Exception):
+    """The caller's role doesn't allow this (403), e.g. an editor choosing a service account owner."""
 
 
 class Unavailable(Exception):
@@ -204,10 +209,47 @@ class PipelineService:
         p.role_ceiling = role_ceiling
         p.pinned_version = pinned_version
         p.next_run_at = _next(schedule, datetime.now(UTC))
-        # The owner stays whoever first gave the pipeline a schedule. One saved before workload
-        # identity existed has none, and the first person to save a schedule onto it takes it over.
-        p.owner_sub = p.owner_sub or ident.subject
+        # The owner stays whoever first gave the pipeline a schedule; after that it changes only
+        # through set_owner (Take over, or a workspace owner choosing a service account).
+        if not p.owner_sub:
+            p.owner_sub, p.owner_name = ident.subject, ident.display_name
         return self._need(self.store.update_schedule(p), "pipeline")
+
+    def set_owner(self, ident: Identity, pipeline_id: str, owner: str) -> Pipeline:
+        """Take over (``owner == "me"``) or give the pipeline to a service account (owners.py's rules)."""
+        p = self.get_pipeline(ident, pipeline_id)
+        is_ws_owner = ident.role == "owner"
+        if owner == "me":
+            if is_service_account(p.owner_sub) and not is_ws_owner:
+                raise Forbidden("only a workspace owner can take over a pipeline that runs as a service account")
+            p.owner_sub, p.owner_name = ident.subject, ident.display_name
+        elif is_service_account(owner):
+            if not is_ws_owner:
+                raise Forbidden("only a workspace owner can make a service account a pipeline's owner")
+            ref = parse_service_account(owner)
+            if ref is None:
+                raise ModelError(f"{owner!r} is not a service account id (svc:<workspace>:<name>)", "owner")
+            if ref.workspace != ident.workspace:
+                raise ModelError(f"{owner!r} belongs to another workspace; choose one of this workspace's service accounts", "owner")
+            p.owner_sub, p.owner_name = ref.id, ref.name
+        else:
+            raise ModelError('a pipeline can be taken over ("me") or given to a service account (svc:<workspace>:<name>), never handed to another person', "owner")
+        return self._need(self.store.update_schedule(p), "pipeline")
+
+    def service_account_uses(self, ident: Identity) -> list[tuple[str, list[Pipeline]]]:
+        """Which of this workspace's pipelines run as each service account (ADR 0120 addendum 2:
+        core keeps no usage record, so this module shows it). Sorted by account id."""
+        uses: dict[str, list[Pipeline]] = {}
+        offset = 0
+        while True:
+            page = self.store.list_pipelines(ident.workspace, "", 500, offset)
+            for p in page.items:
+                if is_service_account(p.owner_sub):
+                    uses.setdefault(p.owner_sub, []).append(p)
+            offset += len(page.items)
+            if not page.items or offset >= page.total:
+                break
+        return sorted(uses.items())
 
     # ---- tasks (ADR 0071: standalone, versioned, reusable — the direct counterpart of pipelines) ----
     def create_task(self, ident: Identity, name: str, description: str, config: TaskConfig | None, notes: str) -> tuple[TaskEntity, TaskVersionRecord | None]:
@@ -339,7 +381,7 @@ class PipelineService:
         )
 
     # ---- runs ----
-    def start_run(self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str) -> Run:
+    def start_run(self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str, owner_name: str = "") -> Run:
         """The single implementation of "start a run": used by Run-now and by the scheduler.
 
         Runs the pipeline's `pinned_version` if it has one, otherwise the latest saved version —
@@ -358,6 +400,7 @@ class PipelineService:
             triggered_by=by,
             created_at=datetime.now(UTC),
             owner_sub=owner_sub,
+            owner_name=owner_name,
         )
         try:
             self.store.create_run(run, [t.key for t in version.spec.tasks], exclusive=not pipeline.allow_concurrent_runs)
@@ -369,11 +412,11 @@ class PipelineService:
     def run_now(self, ident: Identity, pipeline_id: str) -> Run:
         # A manual run belongs to the person who pressed the button: they are present and
         # authenticated, so their live role (not a possibly-lapsed owner) is what caps it.
-        return self.start_run(ident.workspace, self.get_pipeline(ident, pipeline_id), TRIGGER_MANUAL, ident.display_name, ident.subject)
+        return self.start_run(ident.workspace, self.get_pipeline(ident, pipeline_id), TRIGGER_MANUAL, ident.display_name, ident.subject, ident.display_name)
 
     def start_scheduled(self, pipeline: Pipeline) -> Run | None:
         try:
-            return self.start_run(pipeline.workspace, pipeline, TRIGGER_SCHEDULE, "schedule", pipeline.owner_sub)
+            return self.start_run(pipeline.workspace, pipeline, TRIGGER_SCHEDULE, "schedule", pipeline.owner_sub, pipeline.owner_name)
         except PipelineBusy:
             log.info("scheduled run of pipeline %s skipped: previous run still active", pipeline.id)
         except ModelError as e:

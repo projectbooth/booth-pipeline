@@ -13,6 +13,7 @@ import type {
   RunDetail,
   ModuleConfig,
   RunnerInfo,
+  ServiceAccountUse,
   RunStatus,
   StorageBackendSummary,
   StorageObjectSummary,
@@ -110,6 +111,8 @@ const e = encodeURIComponent;
 export const api = {
   runners: (c: ApiContext) => request<{ items: RunnerInfo[] }>(c, PIPELINE, "/runners").then((r) => r.items),
   config: (c: ApiContext) => request<ModuleConfig>(c, PIPELINE, "/config"),
+  setOwner: (c: ApiContext, id: string, owner: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/owner`, json("PUT", { owner })),
+  serviceAccountUses: (c: ApiContext) => request<{ items: ServiceAccountUse[] }>(c, PIPELINE, "/service-accounts/uses").then((r) => r.items),
 
   listPipelines: (c: ApiContext, q = "") => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, limit: 200 })}`),
   getPipeline: (c: ApiContext, id: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}`),
