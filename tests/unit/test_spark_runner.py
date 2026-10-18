@@ -299,3 +299,46 @@ def test_a_spark_tasks_pod_gets_its_token_but_no_credential_sidecar():
     assert "initContainers" not in spark["spec"]["template"]["spec"] or not spark["spec"]["template"]["spec"]["initContainers"]
     env = {e["name"] for e in spark["spec"]["template"]["spec"]["containers"][0].get("env", [])}
     assert "DATABASE_URL" not in env and "BOOTH_RUNNER_SIDECAR_HEALTHZ" not in env
+
+
+def test_resources_are_memory_only_cores_are_refused_at_save_and_never_sent(spark):
+    """booth-spark sizes runs by memory only; a body with cores is a 400 there."""
+    import json as _json
+
+    for where in ({"driver": {"cores": 1}}, {"executors": {"cores": 2}}):
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            TaskConfig.model_validate({"code": {"type": "inline", "source": "x"}, "runner": "spark", "spark": {"resources": where}})
+    standin, url = spark
+    opts = {"resources": {"driver": {"memory": "1g"}, "executors": {"min": 1, "max": 2, "memory": "2g"}}}
+    result, _ = run(runner(url), spark_node("s", "x = 1\n", spark=opts))
+    assert result.success, result.error
+    (app,) = standin.apps.values()
+    assert "cores" not in _json.dumps(app.spec)
+
+
+def test_the_standins_limits_have_booth_sparks_shape():
+    """booth-spark's GET /v1/limits, as its own test pins it (internal/api/limits_test.go at
+    booth-spark@0fcd236); spark-real.sh compares against the real image once the pin is 0.3.1."""
+    real = {
+        "maxExecutors": 2.0, "defaultExecutors": 1.0, "driverMemory": "512m", "executorMemory": "768m", "maxMemory": "2g",
+        "maxDuration": "6h0m0s", "sessionIdleTimeout": "30m0s", "sessionMaxLifetime": "8h0m0s",
+        "dataAccess": {"database": False, "lakehouse": True, "storage": True},
+        "role": "editor", "canSubmit": True, "submitMinRole": "editor", "maxStorageLocations": 4.0,
+    }  # fmt: skip
+
+    def shape(v):
+        if isinstance(v, dict):
+            return {k: shape(x) for k, x in sorted(v.items())}
+        return "number" if isinstance(v, (int, float)) and not isinstance(v, bool) else type(v).__name__
+
+    got = StandIn().limits()
+    assert shape(got) == shape(real)
+    from datetime import timedelta as _td
+
+    def go(d: str) -> _td:  # Go's time.Duration.String() for whole seconds: "6h0m0s"
+        import re as _re
+
+        h, m, s = (int(x) for x in _re.fullmatch(r"(\d+)h(\d+)m(\d+)s", d).groups())
+        return _td(hours=h, minutes=m, seconds=s)
+
+    assert go(got["maxDuration"]) == _td(hours=6)  # the chart's runs.maxDuration, in booth-spark's own format

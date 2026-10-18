@@ -27,5 +27,10 @@ through the API pod's own service against the stand-in core's mint and a stand-i
 output reaches its downstream task and its driver log and state reach the run log; a disabled service account and
 a refused person owner fail the whole run at its start; cancel stops the application; and after a task pod is
 killed mid-run, its application is stopped before the retry, which waits the floor. Real Spark and its data access
-are booth-spark's to prove. It does
+are booth-spark's to prove. **`spark-real.sh`** runs pipeline's Spark calls against the REAL booth-spark
+(its published chart and backend image at pinned digests, real Spark runs on `apache/spark`): person and
+workload tokens through the gateway path, the availability probe (`/v1/limits`, and the stand-in's body
+compared shape for shape once booth-spark has the route), a scheduled Spark task run by real Spark through
+pipeline's own client, booth-spark's own refusal, and cancel. The stand-in core signs real tokens for it
+and proxies `/modules/spark/*` as core's gateway does. It does
 **not** prove core reconciles the module or that the shell mounts the UI: that is `booth-e2e`.

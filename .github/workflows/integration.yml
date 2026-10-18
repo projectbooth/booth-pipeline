@@ -317,6 +317,12 @@ jobs:
         # and a stand-in booth-spark that runs the submitted code. See the script's header.
         run: bash tests/integration/spark.sh .
 
+      - name: Pipeline's Spark calls against the REAL booth-spark (published chart and image, pinned) — tokens, the availability probe, a real Spark run, its refusal and cancel (ADR 0119)
+        # So the stand-in can't drift from the real contract (gate 3 found /v1/limits was never built in
+        # booth-spark 0.3.0). The stand-in core signs real tokens and proxies as core's gateway does. See
+        # the script's header.
+        run: bash tests/integration/spark-real.sh .
+
       - name: Dump logs on failure
         if: failure()
         run: |
@@ -326,3 +332,5 @@ jobs:
           kubectl -n booth-pipeline describe pods -l app.kubernetes.io/component=task || true
           kubectl -n pypi-ci logs deploy/pypi --tail=100 || true
           kubectl -n booth-system logs deploy/booth-core --tail=100 || true
+          kubectl -n booth-spark logs deploy/booth-spark --tail=100 || true
+          kubectl get ns -l booth.projectbooth.io/spark-run || true

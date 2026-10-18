@@ -23,6 +23,14 @@
 # when the fake-spark ConfigMap is mounted, for booth-spark behind
 # the gateway (/modules/spark/*, fixtures/spark/spark_standin.py, mounted at /spark).
 #
+# For the check against the REAL booth-spark (spark-real.sh) it signs what it mints: workload tokens are
+# RS256 JWTs from issuer WORKLOAD_ISSUER (keys at /.well-known/jwks.json, as booth-spark reads core's),
+# with sub, groups (/workspaces/<ws>/<role>), booth_module=pipeline and booth_owner. A test identity
+# provider at WORKLOAD_ISSUER/test-idp (discovery, keys, and POST /test-idp/token {sub, workspace, role})
+# issues person tokens. POST /_control/spark {"upstream": URL|null} sends /modules/spark/* to a real
+# booth-spark the way core's gateway does (prefix stripped, X-Workspace forwarded as X-Booth-Workspace),
+# or back to the stand-in.
+#
 # Pod labels match booth-core's (app.kubernetes.io/name: booth-core) in booth-system, so the task
 # NetworkPolicy's existing core rule is what lets a task pod's sidecar reach it.
 apiVersion: v1
@@ -95,6 +103,22 @@ data:
                 "scope": {"workspace": ws},
                 "credential": {"host": PG_HOST, "port": PG_PORT, "database": db, "username": user, "password": password, "sslMode": "disable"}}
 
+    # ---- signing: core's workload issuer, and a test identity provider for person tokens ----
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from jwt.algorithms import RSAAlgorithm
+
+    WORKLOAD_ISSUER = os.environ.get("WORKLOAD_ISSUER", "http://booth-core.booth-system.svc.cluster.local:8080")
+    IDP = WORKLOAD_ISSUER + "/test-idp"
+    KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    JWK = {**json.loads(RSAAlgorithm.to_jwk(KEY.public_key())), "kid": "ci-1", "use": "sig", "alg": "RS256"}
+
+    def sign(claims):
+        now = int(time.time())
+        return pyjwt.encode({"iat": now, "nbf": now - 5, "exp": now + 600, **claims}, KEY, algorithm="RS256", headers={"kid": "ci-1"})
+
+    spark_upstream = [None]  # a real booth-spark's base URL, or None for the stand-in
+
     # ---- core's workload-token mint (ADR 0056/0058), for the Spark runner's scheduled runs ----
     mints, refusals = [], {}  # owner -> None (one indistinguishable 403) or a service-account code
     SERVICE_ACCOUNTS = {"nfl-weekly": {"role": "editor", "disabled": False}}  # in workspace acme
@@ -107,7 +131,10 @@ data:
                 code = refusals[owner]
                 return 403, {"error": "forbidden", **({"code": code} if code else {})}
         exp = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-        return 200, {"token": f"tok-{req['workspace']}-{uuid.uuid4().hex}", "tokenType": "Bearer", "expiresAt": exp, "role": req.get("roleCeiling", "viewer")}
+        role = req.get("roleCeiling", "viewer")
+        token = sign({"iss": WORKLOAD_ISSUER, "sub": req["subject"], "groups": [f"/workspaces/{req['workspace']}/{role}"],
+                      "booth_module": "pipeline", "booth_owner": req.get("owner", "")})
+        return 200, {"token": token, "tokenType": "Bearer", "expiresAt": exp, "role": role}
 
     # ---- booth-spark behind the gateway, when fixtures/spark is mounted at /spark ----
     # (an absent optional ConfigMap still mounts, as an empty directory: look for the file)
@@ -127,9 +154,25 @@ data:
 
         def spark(self):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if spark_upstream[0]:
+                return self.proxy(spark_upstream[0], self.path[len("/modules/spark"):], body)
             if standin is None:
                 return self.reply(404, {"error": "booth-spark is not installed here"})
             return self.raw(*standin.route(self.command, self.path, dict(self.headers), body))
+
+        def proxy(self, base, path, body):
+            """Core's gateway to a module: the prefix stripped, X-Workspace forwarded as X-Booth-Workspace."""
+            import urllib.error, urllib.request
+            h = {k: v for k, v in self.headers.items() if k.lower() in ("authorization", "content-type", "idempotency-key")}
+            h["X-Booth-Workspace"] = self.headers.get("X-Workspace", "")
+            req = urllib.request.Request(base + path, data=body if self.command == "POST" else None, headers=h, method=self.command)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    status, rh, raw = r.status, dict(r.headers), r.read()
+            except urllib.error.HTTPError as e:
+                status, rh, raw = e.code, dict(e.headers or {}), e.read()
+            keep = {k: v for k, v in rh.items() if k.lower() in ("content-type", "x-log-offset", "x-log-complete", "x-log-skipped")}
+            return self.raw(status, keep, raw)
 
         def reply(self, code, body):
             raw = json.dumps(body).encode()
@@ -139,6 +182,12 @@ data:
         def do_GET(self):
             if self.path.startswith("/modules/spark/"):
                 return self.spark()
+            if self.path == "/.well-known/jwks.json" or self.path == "/test-idp/jwks":
+                return self.reply(200, {"keys": [JWK]})
+            if self.path == "/test-idp/.well-known/openid-configuration":
+                return self.reply(200, {"issuer": IDP, "jwks_uri": IDP + "/jwks", "authorization_endpoint": IDP + "/auth",
+                                        "token_endpoint": IDP + "/token", "response_types_supported": ["id_token"],
+                                        "subject_types_supported": ["public"], "id_token_signing_alg_values_supported": ["RS256"]})
             if self.path.startswith("/api/service-accounts/"):  # core's per-account state (ADR 0120), any member
                 name = self.path.rsplit("/", 1)[1]
                 acct = SERVICE_ACCOUNTS.get(name)
@@ -164,6 +213,14 @@ data:
                 if not self.headers.get("Authorization", "").startswith("Bearer "):
                     return self.reply(401, {"error": "missing minting credential"})
                 return self.reply(*mint(json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))))
+            if self.path == "/test-idp/token":  # a person's token, for the real booth-spark check
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                return self.reply(200, {"token": sign({"iss": IDP, "sub": req["sub"], "preferred_username": req["sub"],
+                                                       "groups": [f"/workspaces/{req['workspace']}/{req['role']}"]})})
+            if self.path == "/_control/spark":
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                spark_upstream[0] = req.get("upstream")
+                return self.reply(200, {"upstream": spark_upstream[0]})
             if self.path == "/_control/mint":
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
                 with lock:

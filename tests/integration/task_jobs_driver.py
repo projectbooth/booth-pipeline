@@ -41,6 +41,10 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   downstream, the driver log and state in the run log, the attempt's Spark record, a refused mint for a
   disabled service account and for a person owner, cancel stopping the application, and a task pod
   killed mid-run whose application is stopped before the retry, which waits the floor.
+* ``spark-real`` — the same calls against the REAL booth-spark (tests/integration/spark-real.sh): /v1/me
+  with person and workload tokens, pipeline's availability probe (/v1/limits) and, where booth-spark has
+  it, the stand-in's /v1/limits shape against the real one; a scheduled Spark task run by real Spark;
+  booth-spark's own refusal; cancel.
 """
 
 from __future__ import annotations
@@ -759,6 +763,143 @@ def spark_e2e() -> int:
     return 0 if all(checks.values()) else 1
 
 
+def spark_real() -> int:
+    """Pipeline's Spark calls against the real booth-spark behind the stand-in gateway (spark-real.sh)."""
+    import urllib.error
+    import urllib.request
+
+    from booth_pipeline.app import create_app
+    from booth_pipeline.auth import Identity
+    from booth_pipeline.config import Config
+    from booth_pipeline.model import PipelineSpec, Schedule, TaskConfig, TaskRef
+    from booth_pipeline.runners.spark import SparkRunner
+
+    cfg = Config.from_env()
+    core = cfg.core_url
+    checks: dict[str, bool] = {}
+    report: dict[str, object] = {}
+
+    def check(name: str, ok: bool) -> None:
+        checks[name] = bool(ok)
+        print(("ok: " if ok else "FAIL: ") + name, file=sys.stderr, flush=True)
+
+    def call(method: str, path: str, body: object = None, token: str = "", ws: str = "acme") -> tuple[int, dict, object]:
+        h = {"Content-Type": "application/json", "X-Workspace": ws}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(core + path, data=None if body is None else json.dumps(body).encode(), method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw, status, headers = r.read(), r.status, dict(r.headers)
+        except urllib.error.HTTPError as e:
+            raw, status, headers = e.read(), e.code, dict(e.headers or {})
+        try:
+            return status, headers, json.loads(raw)
+        except ValueError:
+            return status, headers, raw.decode(errors="replace")
+
+    person = call("POST", "/test-idp/token", {"sub": "u-ci-owner", "workspace": "acme", "role": "editor"})[2]["token"]
+
+    def workload(subject: str) -> str:
+        return call("POST", "/api/internal/workload-tokens", {"workspace": "acme", "subject": subject, "roleCeiling": "editor", "owner": "u-ci-owner"}, token="ci")[2]["token"]
+
+    # 1. the gateway path and both kinds of token
+    st, _, me = call("GET", "/modules/spark/v1/me", token=person)
+    report["me_person"] = me
+    check("a person's token reaches the real /v1 through the gateway path", st == 200 and me.get("workspace") == "acme" and me.get("role") == "editor" and me.get("workload") is False)
+    st, _, me = call("GET", "/modules/spark/v1/me", token=workload("pipeline:acme:contract"))
+    report["me_workload"] = me
+    check("a pipeline workload token is accepted as a workload caller", st == 200 and me.get("workload") is True and me.get("subject") == "pipeline:acme:contract")
+
+    # 2. pipeline's availability probe, exactly as /api/runners and a save run it
+    reason = SparkRunner(None, core).availability(person, "acme")  # type: ignore[arg-type]
+    st, _, limits = call("GET", "/modules/spark/v1/limits", token=person)
+    report["probe"] = {"reason": reason, "limits_status": st, "limits": limits}
+    if os.environ.get("SPARK_HAS_LIMITS") == "1":
+        check("pipeline's availability probe finds the real booth-spark", reason is None and st == 200)
+        call("POST", "/_control/spark", {"upstream": None})
+        _, _, standin = call("GET", "/modules/spark/v1/limits", token=person)
+        call("POST", "/_control/spark", {"upstream": "http://booth-spark.booth-spark.svc:8080"})
+
+        def shape(v):
+            return {k: shape(x) for k, x in sorted(v.items())} if isinstance(v, dict) else type(v).__name__
+
+        report["limits_shapes"] = {"real": shape(limits), "standin": shape(standin)}
+        check("the stand-in's /v1/limits has exactly the real body's shape", isinstance(limits, dict) and shape(limits) == shape(standin))
+    else:
+        # booth-spark 0.3.0: the route was designed but never built. Recorded, not passed silently:
+        # the probe must say "not installed" here, which is the gate-3 finding, until the pin moves.
+        check("known gap (booth-spark has no /v1/limits yet): the probe reports it, as gate 3 saw", st == 404 and reason is not None and "not installed" in reason)
+
+    # 3. a scheduled run's Spark task, through pipeline's own client, run by real Spark
+    app = create_app(cfg, start_scheduler=False)
+    svc = app.state.service
+    owner = Identity("u-ci-owner", "ci-owner", "acme", "owner", person)
+    # The save checks availability, which 0.3.0 can't answer: register the runner as available for
+    # this in-process app (only the save path's check; the run itself goes to real booth-spark).
+    spark_runner = svc.registry.get("spark")
+    if os.environ.get("SPARK_HAS_LIMITS") != "1":
+        spark_runner.availability = lambda token, workspace: None
+
+    def pipeline(name: str, nodes: list[tuple[str, str, list[str], dict]]) -> str:
+        refs = []
+        for key, src, deps, cfg_kw in nodes:
+            t, _ = svc.create_task(owner, f"{name}-{key}", "", TaskConfig.model_validate({"code": {"type": "inline", "source": src}, **cfg_kw}), "")
+            refs.append(TaskRef(key=key, task_id=t.id, task_version=1, depends_on=deps))
+        p, _ = svc.create_pipeline(owner, f"{name}-{uuid.uuid4().hex[:6]}", "", PipelineSpec(tasks=refs), "")
+        svc.update_schedule(owner, p.id, Schedule(cron="0 6 * * 1"), False, "editor", None)
+        return p.id
+
+    def wait(run_id: str, timeout: float = 900):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            run, tasks = svc.get_run(owner, run_id)
+            if run.status in ("succeeded", "failed", "canceled"):
+                return run, {t.task_key: t for t in tasks}
+            time.sleep(2)
+        raise AssertionError(f"run {run_id} did not finish in {timeout}s")
+
+    small = {"resources": {"driver": {"memory": "512m"}, "executors": {"min": 1, "max": 1, "memory": "512m"}}}
+    pid = pipeline("real-ok", [("agg", SPARK_AGG, [], {"runner": "spark", "spark": small, "params": {"n": 21}, "timeoutSeconds": 900}), ("use", SPARK_USE, ["agg"], {})])
+    run, tasks = wait(svc.start_scheduled(svc.get_pipeline(owner, pid)).id)
+    lines = svc.logs(owner, run.id, None, 0, 5000)
+    report["ok"] = {"status": run.status, "error": run.error, "external": tasks["agg"].external}
+    check("real booth-spark runs a scheduled Spark task to success", run.status == "succeeded")
+    check("the attempt records the real application", (tasks["agg"].external or {}).get("state") == "succeeded")
+    check("the driver log came through the real log cursor", any(ln.stream == "spark" and "counted 21 rows on attempt 1" in ln.message for ln in lines))
+    check("its real state changes are system lines", any(ln.stream == "system" and ln.message.startswith("spark: ") and "→ running" in ln.message for ln in lines))
+    check("the output line was found and reached the downstream task", any(ln.task_key == "use" and "downstream got 21" in ln.message for ln in lines))
+
+    # 4. booth-spark's own refusal, as Spark says it
+    pid = pipeline("real-refused", [("agg", "x = 1\n", [], {"runner": "spark", "spark": {"conf": {"spark.driver.extraJavaOptions": "-Dx"}}})])
+    run, _ = wait(svc.start_scheduled(svc.get_pipeline(owner, pid)).id, 300)
+    report["refused"] = {"status": run.status, "error": run.error}
+    check("booth-spark's refusal reaches the run as its own message", run.status == "failed" and "booth-spark refused the application (HTTP 400)" in (run.error or "") and "(invalid)" in (run.error or ""))
+
+    # 5. cancel: pipeline's stop reaches booth-spark
+    pid = pipeline("real-cancel", [("agg", SPARK_LONG, [], {"runner": "spark", "spark": small, "timeoutSeconds": 900})])
+    run_id = svc.start_scheduled(svc.get_pipeline(owner, pid)).id
+    deadline, ext = time.monotonic() + 600, {}
+    while time.monotonic() < deadline and ext.get("state") != "running":
+        time.sleep(2)
+        ext = next((t.external for t in svc.get_run(owner, run_id)[1] if t.task_key == "agg"), None) or {}
+    check("the long task's application reached running", ext.get("state") == "running")
+    svc.cancel_run(owner, run_id)
+    run, _ = wait(run_id, 300)
+    token = workload(f"pipeline:acme:{run_id}")  # the run's own subject: booth-spark lets its submitter look
+    state, deadline = "", time.monotonic() + 180
+    while time.monotonic() < deadline and state != "stopped":
+        time.sleep(3)
+        st, _, a = call("GET", f"/modules/spark/v1/applications/{ext.get('id')}", token=token)
+        state = a.get("state", "") if isinstance(a, dict) else ""
+    report["cancel"] = {"status": run.status, "spark_state": state}
+    check("a canceled run is canceled", run.status == "canceled")
+    check("and real booth-spark stopped its application", state == "stopped")
+
+    print(json.dumps(report, default=str))
+    return 0 if all(checks.values()) else 1
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -796,6 +937,8 @@ def main() -> int:
         return pip_scrape(args[0])
     if mode == "spark-e2e":
         return spark_e2e()
+    if mode == "spark-real":
+        return spark_real()
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")
 
 

@@ -181,6 +181,7 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, spa
           <SparkOptionsForm
             value={config.spark ?? {}}
             limits={sparkLimits}
+            timeoutSeconds={config.timeoutSeconds}
             error={isSparkField(error?.field) ? error?.message : undefined}
             onChange={(spark) => onChange({ ...config, spark })}
           />

@@ -10,6 +10,15 @@ succeeded | failed | stopped; its log (stdout and stderr) is served with the log
 adding (``?from=<offset>``, next offset in ``X-Log-Offset``; ADR 0119 amendment 3 point 7) and with
 ``?tail=``. Not modelled: data access, resources, admission beyond a settable capacity.
 
+Where it is NOT the real contract, and how that is caught: tests/integration/spark-real.sh runs the same
+calls against booth-spark's published chart and image. ``GET /v1/limits`` (not in booth-spark 0.3.0,
+which gate 3 found; built in booth-spark@0fcd236 for 0.3.1) returns booth-spark's body exactly, with its
+chart's default limits: durations are Go duration strings ("6h0m0s"), and the caller's role and whether it
+may submit are added. spark-real.sh compares it shape for shape with the real one once the pin is 0.3.1
+(SPARK_HAS_LIMITS=1).
+Real booth-spark also expects X-Booth-Workspace (core's gateway sets it from X-Workspace); this stand-in
+plays gateway and module in one, so it reads X-Workspace.
+
 Test-only routes (never on booth-spark): ``GET /_standin/apps`` (every run, with its timestamps and
 Idempotency-Key) and ``POST /_standin/control`` (``{"capacity": n}`` for 429 at_capacity).
 """
@@ -81,6 +90,16 @@ class StandIn:
         self.capacity: int | None = None
         self.lock = threading.Lock()
 
+    def limits(self) -> dict:
+        """booth-spark's GET /v1/limits (internal/api/server.go callerLimits at booth-spark@0fcd236), with
+        its chart's defaults. This stand-in checks no token, so the caller is taken to be an editor."""
+        return {
+            "maxExecutors": 2, "defaultExecutors": 2, "driverMemory": "512m", "executorMemory": "512m", "maxMemory": "2g",
+            "maxDuration": "6h0m0s", "sessionIdleTimeout": "20m0s", "sessionMaxLifetime": "12h0m0s",
+            "dataAccess": {"database": False, "lakehouse": False, "storage": False},
+            "role": "editor", "canSubmit": True, "submitMinRole": "editor", "maxStorageLocations": 4,
+        }  # fmt: skip
+
     # ---- running an application ----
     def _run(self, app: App) -> None:
         time.sleep(self.start_delay)
@@ -139,7 +158,7 @@ class StandIn:
             return self._json(401, {"error": "a bearer token is required", "code": "unauthenticated"})
         ws = h.get("x-workspace", "")
         if p == "/v1/limits" and method == "GET":
-            return self._json(200, {"maxExecutors": 2, "maxMemory": "4g", "maxDuration": "2h", "canSubmit": True})
+            return self._json(200, self.limits())
         if p == "/v1/applications" and method == "POST":
             return self._submit(ws, h.get("idempotency-key", ""), json.loads(body or b"{}"))
         parts = p.strip("/").split("/")

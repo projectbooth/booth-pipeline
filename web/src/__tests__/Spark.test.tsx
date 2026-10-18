@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { formatSeconds, parseGoDuration } from "../task/SparkOptionsForm";
 import type { TaskConfig } from "../types";
 import { renderApp } from "./render";
 import { FakeBackend } from "./testUtils";
@@ -35,7 +36,7 @@ describe("a Spark task in the task settings", () => {
     const card = await editCard(t.id);
     await userEvent.selectOptions(within(card).getByLabelText("Runs on"), "spark");
     const panel = within(card).getByRole("region", { name: "Spark options" });
-    expect(panel).toHaveTextContent("booth-spark allows up to 2 executors, 4g per JVM, 2h per run.");
+    expect(panel).toHaveTextContent("booth-spark allows up to 2 executors, 2g per JVM, 6h per run.");
     const access = within(card).getByRole("checkbox", { name: /Platform access/ });
     expect(access).toBeChecked();
     expect(access).toBeDisabled();
@@ -106,3 +107,35 @@ describe("a Spark task in the run view", () => {
     expect(await screen.findByText("counted 21 rows")).toBeInTheDocument();
   });
 });
+
+describe("booth-spark's Go durations", () => {
+  it("parses them tolerantly", () => {
+    expect(parseGoDuration("6h0m0s")).toBe(21600);
+    expect(parseGoDuration("2h")).toBe(7200);
+    expect(parseGoDuration("1h30m")).toBe(5400);
+    expect(parseGoDuration("90s")).toBe(90);
+    expect(parseGoDuration("1.5h")).toBe(5400);
+    expect(parseGoDuration("500ms")).toBeCloseTo(0.5);
+    expect(parseGoDuration("0")).toBe(0);
+    for (const bad of ["", "6 hours", "h", "6x", "6h junk", undefined]) expect(parseGoDuration(bad)).toBeNull();
+    expect(formatSeconds(21600)).toBe("6h");
+    expect(formatSeconds(5400)).toBe("1h 30m");
+    expect(formatSeconds(45)).toBe("45s");
+  });
+
+  it("warns when the task's timeout is longer than booth-spark allows a run", async () => {
+    const t = b.addTask("agg", cfg({ runner: "spark", platformAccess: true, spark: {}, timeoutSeconds: 86400 }));
+    const card = await editCard(t.id);
+    const panel = within(card).getByRole("region", { name: "Spark options" });
+    expect(await within(panel).findByText(/This task's timeout \(24h\) is longer than booth-spark allows a run \(6h\)/)).toBeInTheDocument();
+  });
+
+  it("shows no hint where booth-spark has no /v1/limits (0.3.0)", async () => {
+    b.sparkLimits = null;
+    const t = b.addTask("agg", cfg({ runner: "spark", platformAccess: true, spark: {} }));
+    const card = await editCard(t.id);
+    const panel = within(card).getByRole("region", { name: "Spark options" });
+    expect(panel).not.toHaveTextContent("booth-spark allows up to");
+  });
+});
+
