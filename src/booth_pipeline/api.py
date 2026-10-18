@@ -165,8 +165,8 @@ def run_json(r: Run, ident: Identity | None = None) -> dict[str, Any]:
     }
 
 
-def task_run_json(t: TaskRun) -> dict[str, Any]:
-    return {
+def task_run_json(t: TaskRun, ident: Identity | None = None) -> dict[str, Any]:
+    body = {
         "taskKey": t.task_key,
         "status": t.status,
         "attempts": t.attempts,
@@ -176,6 +176,11 @@ def task_run_json(t: TaskRun) -> dict[str, Any]:
         # ADR 0119: a Spark task's application ({kind, id, state, reason}); null otherwise.
         "external": t.external,
     }
+    # What the task returned (runs.kept_output), for editors and owners only: like a Spark driver log, an
+    # output can carry whatever the code put in it. Absent for viewers; null until an attempt succeeds.
+    if ident is not None and ident.can_write:
+        body["output"] = t.output
+    return body
 
 
 def log_json(ln: LogLine) -> dict[str, Any]:
@@ -424,7 +429,7 @@ def list_runs(request: Request, pipelineId: str | None = None, status: str | Non
 @router.get("/runs/{run_id}")
 def get_run(request: Request, run_id: str, ident: Identity = Depends(require_read)):
     run, tasks = svc(request).get_run(ident, run_id)
-    return {**run_json(run, ident), "tasks": [task_run_json(t) for t in tasks]}
+    return {**run_json(run, ident), "tasks": [task_run_json(t, ident) for t in tasks]}
 
 
 @router.post("/runs/{run_id}/cancel", status_code=202)

@@ -83,6 +83,10 @@ class RunRecorder(Protocol):
         """``status`` is succeeded, failed (final), retrying (will run again) or canceled."""
         ...
 
+    def task_output(self, key: str, attempt: int, output: Any) -> None:
+        """What a successful attempt returned; reported just before it is ``succeeded``."""
+        ...
+
     def task_log(self, key: str, attempt: int) -> Any:
         """A ``TaskLog`` for one attempt's stdout/stderr/system lines."""
         ...
@@ -176,6 +180,7 @@ def _make_op(
                     recorder.system(f"task {ref.key!r} waits at least {floor:g}s before its retry (its Spark application ran; SeaweedFS keeps an emptied folder about 2 minutes)")
                     _wait(floor, cancel)
             raise  # re-raised so Dagster's retry policy sees it (fact 1 above)
+        recorder.task_output(ref.key, attempt, output)
         recorder.task_attempt_finished(ref.key, attempt, "succeeded", None)
         yield Output(output, output_name=RESULT)
 

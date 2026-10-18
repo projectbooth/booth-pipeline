@@ -25,6 +25,7 @@ from booth_pipeline.runners.subprocess_runner import SubprocessRunner
 class Rec:
     def task_started(self, k, a): print("started", k, a)
     def task_attempt_finished(self, k, a, s, e): print("finished", k, s, e)
+    def task_output(self, k, a, o): print("output", k, o)
     def system(self, m): print("system", m)
     def task_log(self, k, a):
         class L:

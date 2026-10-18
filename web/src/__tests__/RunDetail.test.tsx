@@ -75,4 +75,33 @@ describe("Run detail", () => {
     await screen.findByRole("heading", { name: `Run ${r.id.slice(0, 8)}` });
     expect(screen.queryByRole("button", { name: /Cancel/ })).not.toBeInTheDocument();
   });
+
+  it("shows a selected task's output to editors and owners", async () => {
+    const { r } = seededRun();
+    r.tasks[0].output = { value: { accuracy: 0.93, rows: [1, 2] } };
+    renderApp(b, { path: `/pipeline/runs/${r.id}?task=train`, role: "editor" });
+    const panel = await screen.findByRole("region", { name: "Output of train" });
+    expect(within(panel).getByLabelText("Returned value of train").textContent).toBe(JSON.stringify({ accuracy: 0.93, rows: [1, 2] }, null, 2));
+    await userEvent.click(screen.getByRole("button", { name: "Logs for evaluate" }));
+    expect(await screen.findByRole("region", { name: "Output of evaluate" })).toHaveTextContent("No output: the task didn't succeed.");
+  });
+
+  it("says why an output wasn't kept, and when a task returned nothing", async () => {
+    const { r } = seededRun();
+    r.tasks[0].output = { omitted: "tooLarge", bytes: 70002 };
+    r.tasks[1] = { ...r.tasks[1], status: "succeeded", error: null, output: { value: null } };
+    renderApp(b, { path: `/pipeline/runs/${r.id}?task=train` });
+    expect(await screen.findByRole("region", { name: "Output of train" })).toHaveTextContent(
+      "Not kept: the output is 69 KB, more than the 64 KB a run keeps to show. Its downstream tasks still received it in full.",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Logs for evaluate" }));
+    expect(await screen.findByRole("region", { name: "Output of evaluate" })).toHaveTextContent("The task returned nothing (null).");
+  });
+
+  it("shows viewers no output", async () => {
+    const { r } = seededRun();
+    renderApp(b, { path: `/pipeline/runs/${r.id}?task=train`, role: "viewer" });
+    await screen.findByRole("log", { name: "Logs for task train" });
+    expect(screen.queryByRole("region", { name: /Output of/ })).not.toBeInTheDocument();
+  });
 });

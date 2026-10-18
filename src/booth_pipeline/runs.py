@@ -8,6 +8,7 @@ per-run heartbeats and cancellation, and finalises runs — including runs whose
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -44,6 +45,23 @@ log = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 0.5
 FLUSH_BATCH = 200
+
+# The most of a task's output a run keeps to show on its run page; a bigger output still reaches its
+# downstream tasks (up to the runner's own limit, 1 MiB), it just isn't kept.
+MAX_KEPT_OUTPUT = 64 * 1024
+
+
+def kept_output(output) -> dict:
+    """A successful attempt's output as its task run keeps it: ``{"value": output}``, or, when it isn't
+    kept, ``{"omitted": "tooLarge"|"unstorable", "bytes": n}``. PostgreSQL's jsonb can't hold a NUL
+    character, and a refused write would lose the task's status with it."""
+    encoded = json.dumps(output, default=str)
+    size = len(encoded.encode("utf-8"))
+    if size > MAX_KEPT_OUTPUT:
+        return {"omitted": "tooLarge", "bytes": size}
+    if "\\u0000" in encoded:  # json.dumps escapes a NUL character as \u0000
+        return {"omitted": "unstorable", "bytes": size}
+    return {"value": json.loads(encoded)}
 
 
 def _now() -> datetime:
@@ -132,10 +150,15 @@ class StoreRecorder:
         except Exception:  # noqa: BLE001
             log.exception("run %s: could not persist state of task %s", self._run_id, t.task_key)
 
+    def task_output(self, key: str, attempt: int, output) -> None:
+        # Saved with the "succeeded" that follows.
+        with self._lock:
+            self._tasks[key].output = kept_output(output)
+
     def task_started(self, key: str, attempt: int) -> None:
         with self._lock:
             t = self._tasks[key]
-            t.status, t.attempts, t.error, t.finished_at = TASK_RUNNING, attempt, None, None
+            t.status, t.attempts, t.error, t.finished_at, t.output = TASK_RUNNING, attempt, None, None, None
             t.started_at = t.started_at or _now()
         self._save(t)
         self._emit(key, attempt, "system", f"task {key!r} started (attempt {attempt})")

@@ -495,13 +495,17 @@ class PostgresStore:
     def list_task_runs(self, run_id):
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM task_runs WHERE run_id=%s ORDER BY task_key", (run_id,)).fetchall()
-        return [TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"], r["external"]) for r in rows]
+        return [TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"], r["external"], r["output"]) for r in rows]
 
     def update_task_run(self, t):
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s, external=%s WHERE run_id=%s AND task_key=%s",
-                (t.status, t.attempts, t.started_at, t.finished_at, t.error, Jsonb(t.external) if t.external is not None else None, t.run_id, t.task_key),
+                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s, external=%s, output=%s WHERE run_id=%s AND task_key=%s",
+                (
+                    t.status, t.attempts, t.started_at, t.finished_at, t.error,
+                    Jsonb(t.external) if t.external is not None else None, Jsonb(t.output) if t.output is not None else None,
+                    t.run_id, t.task_key,
+                ),  # fmt: skip
             )
 
     # ---- logs ----

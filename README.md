@@ -55,7 +55,8 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
 - **Pipeline** is versioned; every save is a new *immutable* version holding the graph **and a snapshot of all code**.
 - **Job** follows the pipeline's latest version or is pinned to one. Each **Run** records the version it ran.
 - **Task code** — define `run(ctx)`; `ctx.inputs[<upstream key>]` are upstream return values, `ctx.params`, `ctx.log`,
-  `ctx.attempt`; the JSON return value (≤ 1 MiB) is the output. `print` goes to the task log. A plain script with no
+  `ctx.attempt`; the JSON return value (≤ 1 MiB) is the output, and the run keeps up to 64 KiB of it to show editors
+  and owners on the run page (viewers don't see outputs, as with a Spark driver log). `print` goes to the task log. A plain script with no
   `run` is executed top to bottom. **Do not put secrets in params** (stored in the spec in clear). A task that turns on
   *Platform access* also gets `ctx.storage` (`backends/list/read/read_text/write/delete`) and `ctx.catalog`
   (`datasets/dataset/register_dataset`), acting as the run — see [0007](docs/decisions/0007-workload-identity-adoption.md).
@@ -113,7 +114,7 @@ the field, 409 conflict, 404, 403, 503 dependency down). Lists take `?q&limit&of
 | `POST /api/pipelines/validate` | any | live check for the canvas; never saves, never calls the catalog |
 | `GET/POST /api/pipelines/{id}/versions` · `GET …/versions/{n\|latest}` | read · write | save = new immutable version |
 | `GET/POST /api/jobs` · `GET/PUT/DELETE /api/jobs/{id}` · `POST /api/jobs/{id}/run` | read · write | run → 202 queued; 409 if one is active and overlap isn't allowed |
-| `GET /api/runs` `?jobId&status` · `GET /api/runs/{id}` · `POST /api/runs/{id}/cancel` | read · write | run detail includes per-task state |
+| `GET /api/runs` `?jobId&status` · `GET /api/runs/{id}` · `POST /api/runs/{id}/cancel` | read · write | run detail includes per-task state and, for editors and owners, each task's `output`: `{value}`, or `{omitted: tooLarge\|unstorable, bytes}` when not kept |
 | `GET /api/runs/{id}/logs` `?task&after&limit` | any | poll with the last `seq`; `done` means finished *and* nothing more can arrive |
 | `GET /healthz` · `GET /livez` | none | readiness (own database only — what core polls) · liveness |
 
