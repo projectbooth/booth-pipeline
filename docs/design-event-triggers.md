@@ -242,6 +242,23 @@ Where the build differs from sections 1-9, or settles what they left open:
     - two replicas;
     - a redelivery after a failed write;
     - the app's own consumer and scheduler end to end.
-  - `tests/integration/events.sh` (kind, the deployed pod's consumer) is written but has **not been run**: Integration
-    runs only on a pushed branch, and this branch isn't pushed.
+  - `tests/integration/events.sh` (kind, the deployed pod's consumer, an unauthenticated stand-in NATS): in
+    Integration.
+  - `tests/integration/realstack-events.sh`, against the real publishers. Keycloak, booth-core (its authenticated
+    NATS and `BOOTH_EVENTS`), booth-database, booth-catalog, booth-api and booth-storage are each built from source on
+    kind, and every bus credential is core's. Through core's gateway only, it checks:
+    - an upload fires a trigger;
+    - a burst makes one run, and a trickle fires at the max wait;
+    - queue_one makes one follow-up and skip none;
+    - the run's own write through booth-storage is ignored;
+    - an app's write through booth-api fires a trigger.
+- **Found on the real stack: `nats-py[nkeys]`.** Core's bus credential is a `.creds` file, and nats-py signs in with it
+  through `nkeys`, an optional extra. Without it the deployed consumer retried forever. A unit test now signs in with a
+  credential file. Also confirmed there:
+  - the publishers' `publishedAt` carries nanoseconds and parses;
+  - `BOOTH_EVENTS` keeps a 2 h duplicate window and 7 days of events;
+  - the consumer's two filter subjects work on core's NATS 2.14.6.
+- **Workspaces on the bus.** Core grants `booth.*.<type>` (every workspace), not the per-workspace subjects ADR 0123
+  point 4 names. The consumer reads every workspace's events and matches only triggers in the event's own workspace.
+  The subject is authoritative, and an envelope that disagrees is dropped.
 

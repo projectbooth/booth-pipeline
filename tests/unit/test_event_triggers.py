@@ -261,6 +261,9 @@ def test_events_published_before_the_trigger_was_turned_on_are_not_its_business(
     assert bus.send(file_event(published="2026-10-21T10:00:00Z"), at(0)) == {}
     assert bus.send(file_event(published="2026-10-21T11:30:00+00:00"), at(1)) == {p.id: "pending"}
     assert bus.send(file_event(published="not a time"), at(2)) == {p.id: "pending"}  # unreadable: let it through
+    # booth-storage and booth-api publish Go's RFC 3339 with nanoseconds (seen on the real stack).
+    assert bus.send(file_event(published="2026-10-21T10:59:59.999999999Z"), at(3)) == {}
+    assert bus.send(file_event(published="2026-10-21T11:00:00.212335252Z"), at(4)) == {p.id: "pending"}
 
 
 def test_turning_a_trigger_off_drops_what_it_was_waiting_for(store):
