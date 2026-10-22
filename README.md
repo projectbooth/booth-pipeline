@@ -55,7 +55,7 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
 - **Pipeline** is versioned; every save is a new *immutable* version holding the graph **and a snapshot of all code**.
 - **Job** follows the pipeline's latest version or is pinned to one. Each **Run** records the version it ran.
 - **Task code** — define `run(ctx)`; `ctx.inputs[<upstream key>]` are upstream return values, `ctx.params`, `ctx.log`,
-  `ctx.attempt`; the JSON return value (≤ 1 MiB) is the output, and the run keeps up to 64 KiB of it to show editors
+  `ctx.attempt`, `ctx.trigger` (how the run started; below); the JSON return value (≤ 1 MiB) is the output, and the run keeps up to 64 KiB of it to show editors
   and owners on the run page (viewers don't see outputs, as with a Spark driver log). `print` goes to the task log. A plain script with no
   `run` is executed top to bottom. **Do not put secrets in params** (stored in the spec in clear). A task that turns on
   *Platform access* also gets `ctx.storage` (`backends/list/read/read_text/write/delete`) and `ctx.catalog`
@@ -83,6 +83,19 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   may act for its owner**, even if none of its tasks needs a token: if core refuses (a lapsed or removed person, a
   disabled or deleted account), the whole run fails before any task runs, with the reason. Run-now runs aren't
   checked (the person is present), nor are runs on an install with no workload identity.
+- **Event triggers** (ADR 0123; [design](docs/design-event-triggers.md)). Beside its schedule, a pipeline can have
+  one event trigger: it runs when files are created in booth-storage under a folder (the Storage page, an app upload,
+  the API) or rows are written through booth-api to listed APIs (or every API whose slug starts with a prefix). One
+  run per burst: it fires `debounceSeconds` (10) after the last matching event, at most `maxWaitSeconds` (60) after the
+  first, never sooner than `minGapSeconds` (5) after its last run. If a run is active and overlapping runs aren't
+  allowed, `whenRunning` either runs once more afterwards (`queue_one`, the default) or ignores what arrived during
+  it (`skip`). A run acts as the owner exactly like a scheduled run (asked of core at its start), and its tasks get
+  `ctx.trigger` (`type`, `events` — the first 100 — and `count`). **That is a hint, not a work list**: delivery is at
+  least once and Storage's is best effort, so a task still scans its own inbox and stays idempotent. Writes by the
+  pipeline's own runs (`pipeline:<ws>:<runId>`) don't trigger it. Not covered: files written straight to object
+  storage (Spark, the lakehouse) and rows written straight to PostgreSQL; keep a slow schedule as the safety net. Paths
+  and API names (the last event, a run's events) are shown to editors and owners only. Needs the chart's
+  `eventTriggers.enabled` (default on), which declares `events.subscribe` so core grants a bus credential.
 - **Spark tasks** (ADR 0119; [design](docs/design-spark-runner.md)). A Python task can run on booth-spark: "Runs on:
   Spark" in its settings, with driver and executor sizes, a few Spark settings, arguments, and the data it may use
   (the workspace's database, its lakehouse, up to 4 storage locations). Its saved code runs as PySpark with the same
@@ -114,7 +127,9 @@ the field, 409 conflict, 404, 403, 503 dependency down). Lists take `?q&limit&of
 | `POST /api/pipelines/validate` | any | live check for the canvas; never saves, never calls the catalog |
 | `GET/POST /api/pipelines/{id}/versions` · `GET …/versions/{n\|latest}` | read · write | save = new immutable version |
 | `GET/POST /api/jobs` · `GET/PUT/DELETE /api/jobs/{id}` · `POST /api/jobs/{id}/run` | read · write | run → 202 queued; 409 if one is active and overlap isn't allowed |
-| `GET /api/runs` `?jobId&status` · `GET /api/runs/{id}` · `POST /api/runs/{id}/cancel` | read · write | run detail includes per-task state and, for editors and owners, each task's `output`: `{value}`, or `{omitted: tooLarge\|unstorable, bytes}` when not kept |
+| `PUT /api/pipelines/{id}/schedule` | write | `schedule`, `eventTrigger` (left out: kept; null: removed), concurrency, cap, pin |
+| `GET /api/pipelines/{id}/event-trigger` | read | the event trigger's state: next fire, pending events, queued follow-up, last event (its path or API for editors and owners only) |
+| `GET /api/runs` `?jobId&status` · `GET /api/runs/{id}` · `POST /api/runs/{id}/cancel` | read · write | run detail includes per-task state, an event-fired run's `triggerEvents` (count; the events for editors and owners) and, for editors and owners, each task's `output`: `{value}`, or `{omitted: tooLarge\|unstorable, bytes}` when not kept |
 | `GET /api/runs/{id}/logs` `?task&after&limit` | any | poll with the last `seq`; `done` means finished *and* nothing more can arrive |
 | `GET /healthz` · `GET /livez` | none | readiness (own database only — what core polls) · liveness |
 
@@ -126,13 +141,13 @@ Keycloak).
 
 ```sh
 pip install -e ".[dev]"
-docker compose -f hack/docker-compose.test.yml up -d --wait      # PostgreSQL on :15434
+docker compose -f hack/docker-compose.test.yml up -d --wait      # PostgreSQL on :15434, NATS JetStream on :14222
 eval "$(sh hack/test-env.sh)"
 pytest tests/unit tests/contract                                  # the CI layers 1-2 (needs helm)
 (cd web && npm ci && npm run typecheck && npm run lint && npm test -- --run && npm run build)
 ```
 
-Without Postgres the store tests **skip** locally; CI sets `BOOTH_TEST_REQUIRE_EMULATORS=1`, which turns a missing
+Without Postgres (or NATS) the store (or event-bus) tests **skip** locally; CI sets `BOOTH_TEST_REQUIRE_EMULATORS=1`, which turns a missing
 database or `helm` into a failure. Beyond CI:
 
 ```sh

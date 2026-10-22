@@ -20,6 +20,7 @@ dependencies = [
   "duckdb>=1.0",       # the base runner's SQL language strategy (ADR 0064); embedded, no server to reach
   "pyyaml>=6",         # a pipeline version's YAML export (ADR 0071 phase 4)
   "packaging>=24",     # parsing a task's Python requirements at save (ADR 0115)
+  "nats-py>=2.9",      # event triggers' JetStream consumer (ADR 0123)
 ]
 
 [project.optional-dependencies]

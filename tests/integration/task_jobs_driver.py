@@ -35,6 +35,12 @@ Modes (each prints a JSON report and exits non-zero on any violation):
   the task's runner bearer and platform token. Then the same pod's task checks it does have both.
 * ``pip-run REQUIREMENT ...`` — a trivial task with these requirements; reports how it ended.
 * ``pip-scrape PAGE_URL`` — a task requiring requests and beautifulsoup4 fetches and parses a page.
+* ``events`` — ADR 0123: event triggers through THIS pod's deployed consumer and scheduler (the driver
+  only sets triggers in the database and publishes to the bus): a burst of 74 files makes one run whose
+  task sees ``ctx.trigger``; events during a run make exactly one follow-up under queue_one and none
+  under skip; this pipeline's own run's writes are ignored.
+* ``events-burst`` / ``events-after-restart`` — a burst published, the pod restarted mid-debounce by
+  tests/integration/events.sh, then exactly one run for it.
 * ``spark-e2e`` — ADR 0119/0120: scheduled runs of pipelines with a Spark task, through THIS pod's own
   service (its store, engine, Job runner and Spark runner, built from its environment), against the
   stand-in core's mint and stand-in booth-spark (fake-core-broker.yaml, fixtures/spark/): output handed
@@ -59,6 +65,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from booth_pipeline.runners import kubejob
 from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskFailed, TaskInvocation
@@ -902,6 +909,179 @@ def spark_real() -> int:
     return 0 if all(checks.values()) else 1
 
 
+EVENT_TASK = "def run(ctx):\n    print('trigger', ctx.trigger.type, ctx.trigger.count, len(ctx.trigger.events))\n"
+SLOW_EVENT_TASK = "import time\ndef run(ctx):\n    print('trigger', ctx.trigger.type, ctx.trigger.count)\n    time.sleep(25)\n"
+
+
+def _events_env():
+    """This pod's store and service (the same database the deployed scheduler reads), and a publisher."""
+    from booth_pipeline.app import create_app
+    from booth_pipeline.config import Config
+
+    cfg = Config.from_env()
+    app = create_app(cfg, start_scheduler=False)
+    return cfg, app.state.store, app.state.service
+
+
+async def _js(url: str):
+    import nats
+
+    nc = await nats.connect(url)
+    return nc, nc.jetstream()
+
+
+def _ensure_stream(url: str) -> None:
+    import asyncio
+
+    from nats.js.api import StreamConfig
+    from nats.js.errors import NotFoundError
+
+    async def go():
+        nc, js = await _js(url)
+        try:
+            try:
+                await js.stream_info("BOOTH_EVENTS")
+            except NotFoundError:
+                await js.add_stream(StreamConfig(name="BOOTH_EVENTS", subjects=["booth.>"], max_age=7 * 24 * 3600))
+        finally:
+            await nc.close()
+
+    asyncio.run(go())
+
+
+def _publish(url: str, paths: list[str], principal: str = "streamlit:acme:finance-dev") -> None:
+    import asyncio
+
+    async def go():
+        nc, js = await _js(url)
+        try:
+            for path in paths:
+                data = {"backendId": "local", "path": path, "size": 10, "principal": principal, "via": "app-upload"}
+                env = {"workspace": "acme", "eventType": "storage.object.created", "publishedAt": datetime.now(UTC).isoformat(), "publishedBy": "storage", "data": data}
+                await js.publish("booth.acme.storage.object.created", json.dumps(env).encode())
+        finally:
+            await nc.close()
+
+    asyncio.run(go())
+
+
+def _event_pipeline(store, svc, name: str, prefix: str, source: str, **trigger_kw):
+    """A pipeline with an event trigger, written straight to the database as a save would leave it
+    (the save's backend check needs booth-storage, which this cluster doesn't run)."""
+    from booth_pipeline.auth import Identity
+    from booth_pipeline.model import EventTrigger, PipelineSpec, TaskConfig, TaskRef
+
+    owner = Identity("u-ci-owner", "ci-owner", "acme", "owner", "")
+    t, _ = svc.create_task(owner, f"{name}-t-{uuid.uuid4().hex[:6]}", "", TaskConfig.model_validate({"code": {"type": "inline", "source": source}}), "")
+    p, _ = svc.create_pipeline(owner, f"{name}-{uuid.uuid4().hex[:6]}", "", PipelineSpec(tasks=[TaskRef(key="load", task_id=t.id, task_version=1)]), "")
+    p = store.get_pipeline("acme", p.id)
+    p.event_trigger = EventTrigger.model_validate({"match": [{"storage": {"backendId": "local", "prefix": prefix}}], **trigger_kw})
+    p.event_trigger_since = datetime.now(UTC) - timedelta(seconds=5)
+    p.owner_sub, p.owner_name = "u-ci-owner", "ci-owner"
+    store.update_schedule(p)
+    return p
+
+
+def _runs_of(store, pid: str):
+    return store.list_runs("acme", pid, None, 100, 0).items
+
+
+def _wait_runs(store, pid: str, n: int, timeout: float, settle: float = 0.0):
+    """Wait for n runs of the pipeline to finish, then `settle` seconds more for any run that shouldn't come."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        runs = _runs_of(store, pid)
+        if len(runs) >= n and all(r.status in ("succeeded", "failed", "canceled") for r in runs):
+            break
+        time.sleep(1)
+    if settle:
+        time.sleep(settle)
+    return sorted(_runs_of(store, pid), key=lambda r: r.created_at)
+
+
+def _log(store, run_id: str) -> list[str]:
+    return [ln.message for ln in store.list_logs(run_id, None, 0, 5000)]
+
+
+def events() -> int:
+    cfg, store, svc = _events_env()
+    url = cfg.event_bus_url
+    checks: dict[str, bool] = {}
+    report: dict[str, object] = {"bus": url}
+
+    def check(name: str, ok: bool) -> None:
+        checks[name] = bool(ok)
+        print(("ok: " if ok else "FAIL: ") + name, file=sys.stderr, flush=True)
+
+    _ensure_stream(url)
+    # The deployed consumer may have started before the stream existed: it retries, so wait for its record.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and store.trigger_bus() is None:
+        time.sleep(1)
+    check("the deployed pod's consumer is reading the bus", store.trigger_bus() is not None)
+
+    # 1. a burst of 74 files makes one run, and its task sees ctx.trigger
+    p = _event_pipeline(store, svc, "ev-burst", "inbox/burst/", EVENT_TASK, debounceSeconds=3, maxWaitSeconds=120)
+    _publish(url, [f"inbox/burst/{i:02}.csv" for i in range(74)] + ["inbox/elsewhere/x.csv"])
+    runs = _wait_runs(store, p.id, 1, 240, settle=15)
+    report["burst"] = [(r.status, r.trigger, r.triggered_by, (r.trigger_events or {}).get("count")) for r in runs]
+    check("74 files make exactly one run", len(runs) == 1)
+    if runs:
+        check("it is an event-fired run that succeeded", runs[0].trigger == "event" and runs[0].status == "succeeded")
+        check("it was told about all 74", (runs[0].trigger_events or {}).get("count") == 74)
+        check("its task saw ctx.trigger", "trigger event 74 74" in _log(store, runs[0].id))
+
+    # 2. events during a run: exactly one follow-up under queue_one, none under skip
+    for mode, follow_ups in (("queue_one", 1), ("skip", 0)):
+        q = _event_pipeline(store, svc, f"ev-{mode}", f"inbox/{mode}/", SLOW_EVENT_TASK, debounceSeconds=2, whenRunning=mode)
+        _publish(url, [f"inbox/{mode}/first.csv"])
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not any(r.status == "running" for r in _runs_of(store, q.id)):
+            time.sleep(1)
+        _publish(url, [f"inbox/{mode}/during-{i}.csv" for i in range(5)])
+        runs = _wait_runs(store, q.id, 1 + follow_ups, 240, settle=20)
+        report[mode] = [(r.status, (r.trigger_events or {}).get("count")) for r in runs]
+        check(f"events during a run under {mode}: {follow_ups} follow-up", len(runs) == 1 + follow_ups)
+        if mode == "queue_one" and len(runs) == 2:
+            check("the follow-up carries the 5 events that arrived during the run", (runs[1].trigger_events or {}).get("count") == 5)
+
+    # 3. the loop guard: a file written by this pipeline's own run doesn't fire it again
+    if runs and (first := _runs_of(store, p.id)):
+        _publish(url, ["inbox/burst/written-by-the-run.csv"], principal=f"pipeline:acme:{first[0].id}")
+        time.sleep(10)
+        st = store.get_event_trigger_state("acme", p.id)
+        check("a write by this pipeline's own run is ignored", len(_runs_of(store, p.id)) == 1 and st is not None and st.ignored_own_runs == 1)
+
+    print(json.dumps(report, default=str))
+    return 0 if all(checks.values()) else 1
+
+
+def events_burst() -> int:
+    cfg, store, svc = _events_env()
+    p = _event_pipeline(store, svc, "ev-restart", "inbox/restart/", EVENT_TASK, debounceSeconds=45, maxWaitSeconds=300)
+    _publish(cfg.event_bus_url, [f"inbox/restart/{i}.csv" for i in range(20)])
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        st = store.get_event_trigger_state("acme", p.id)
+        if st and st.event_count == 20:
+            print(json.dumps({"pipeline": p.id, "fireAt": str(st.fire_at)}))
+            return 0
+        time.sleep(1)
+    print("the burst was not recorded before the restart", file=sys.stderr)
+    return 1
+
+
+def events_after_restart() -> int:
+    _, store, _ = _events_env()
+    (p,) = [x for x in store.list_pipelines("acme", "ev-restart", 100, 0).items]
+    runs = _wait_runs(store, p.id, 1, 240, settle=20)
+    report = [(r.status, (r.trigger_events or {}).get("count")) for r in runs]
+    print(json.dumps({"runs": report}))
+    ok = len(runs) == 1 and runs[0].status == "succeeded" and (runs[0].trigger_events or {}).get("count") == 20
+    print(("ok: " if ok else "FAIL: ") + "a restart mid-debounce neither loses nor doubles the burst's run", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def sleep(seconds: int) -> int:
     runner(max_concurrent=1).run(inv(f"import time\ntime.sleep({seconds})\n", "sleep"), Lines(), Cancellation())
     return 0
@@ -941,6 +1121,12 @@ def main() -> int:
         return spark_e2e()
     if mode == "spark-real":
         return spark_real()
+    if mode == "events":
+        return events()
+    if mode == "events-burst":
+        return events_burst()
+    if mode == "events-after-restart":
+        return events_after_restart()
     raise SystemExit(f"unknown mode {mode!r}; expected isolation, coldstart or probe (label {TASK_JOB_LABEL})")
 
 

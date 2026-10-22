@@ -42,6 +42,15 @@ _BOOTH = _json.loads(%(booth)s)
 _SOURCE = %(source)s
 
 
+class _Trigger:
+    def __init__(self, t):
+        t = t or {}
+        self.type = t.get("type") or "manual"
+        self.events = list(t.get("events") or [])
+        self.count = int(t.get("count") or 0)
+        self.missed_events = bool(t.get("missedEvents"))
+
+
 class _Ctx:
     def __init__(self, spark):
         self.spark = spark
@@ -50,6 +59,7 @@ class _Ctx:
         self.run_id = _BOOTH["runId"]
         self.task_key = _BOOTH["taskKey"]
         self.attempt = _BOOTH["attempt"]
+        self.trigger = _Trigger(_BOOTH.get("trigger"))
         _logging.basicConfig(stream=_sys.stderr, level=_logging.INFO, format="%%(levelname)s %%(message)s")
         self.log = _logging.getLogger("task." + self.task_key)
 
@@ -115,6 +125,7 @@ def build_code(source: str, inv: dict, spark: dict) -> str:
         "taskKey": inv["taskKey"],
         "attempt": inv["attempt"],
         "args": list(spark.get("args") or []),
+        "trigger": inv.get("trigger"),
     }
     code = PRELUDE % {"booth": repr(json.dumps(booth)), "source": repr(source), "max_output": MAX_OUTPUT, "marker": OUTPUT}
     if len(code.encode("utf-8")) > MAX_INLINE:

@@ -44,6 +44,9 @@ export class FakeBackend {
   catalogEntries = [{ id: "e1", name: "loader", description: "loads things", language: "python", latestVersion: { version: "2.0.0" }, versionCount: 2 }];
   storageDown = false;
   storageBackends = [{ id: "b1", displayName: "Main" }];
+  /** ADR 0123: GET /config's eventTriggers, and GET /pipelines/{id}/event-trigger by pipeline id. */
+  eventTriggersAvailable = true;
+  eventTriggerStatus = new Map<string, Record<string, unknown>>();
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
@@ -90,6 +93,7 @@ export class FakeBackend {
       pinnedVersion: null,
       hasDraft: false,
       draftUpdatedAt: null,
+      eventTrigger: null,
     };
     this.pipelines.push(p);
     this.versions.set(p.id, []);
@@ -208,7 +212,26 @@ export class FakeBackend {
 
     let m: RegExpMatchArray | null;
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
-    if (method === "GET" && path === "/config") return this.json({ limits: {}, catalogConfigured: true, pip: this.pip, spark: { retryMinDelaySeconds: 150 } });
+    if (method === "GET" && path === "/config")
+      return this.json({ limits: {}, catalogConfigured: true, pip: this.pip, spark: { retryMinDelaySeconds: 150 }, eventTriggers: { available: this.eventTriggersAvailable } });
+    if ((m = path.match(/^\/pipelines\/([^/]+)\/event-trigger$/)) && method === "GET") {
+      const s = this.eventTriggerStatus.get(m[1]);
+      return this.json({
+        enabled: true,
+        bus: { configured: true, connected: true },
+        nextFireAt: null,
+        pendingSince: null,
+        pendingEvents: 0,
+        queued: false,
+        lastFiredAt: null,
+        lastEventAt: null,
+        lastEvent: null,
+        ignoredOwnRuns: 0,
+        skippedWhileRunning: 0,
+        missedEventsAt: null,
+        ...s,
+      });
+    }
     if (method === "GET" && path === "/pipelines") {
       const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
       return this.json(this.page(q ? this.pipelines.filter((p) => p.name.toLowerCase().includes(q)) : this.pipelines));

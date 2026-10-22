@@ -74,6 +74,8 @@ class RunBody(BaseModel):
     requirements: list[str] = []
     # ADR 0119: a Spark task's options; the pod then runs the module's Spark client, not user code.
     spark: dict[str, Any] | None = None
+    # ADR 0123: ctx.trigger. Absent from an older caller.
+    trigger: dict[str, Any] | None = None
 
 
 class TokenBody(BaseModel):
@@ -157,6 +159,7 @@ def create_runner_app(
             language=body.language,
             requirements=tuple(body.requirements),
             spark=body.spark,
+            trigger=body.trigger,
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()

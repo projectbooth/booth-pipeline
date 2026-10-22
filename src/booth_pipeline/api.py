@@ -90,6 +90,8 @@ def pipeline_json(p: Pipeline, ident: Identity | None = None) -> dict[str, Any]:
         "owner": owner_json(p.owner_sub, p.owner_name, ident),
         "nextRunAt": _iso(p.next_run_at),
         "pinnedVersion": p.pinned_version,
+        # ADR 0123: beside `schedule`. Its live state is GET /pipelines/{id}/event-trigger.
+        "eventTrigger": p.event_trigger.model_dump(by_alias=True, exclude_none=True) if p.event_trigger else None,
         # ADR 0073: whether a mutable draft has ever been saved (plain Save, or "Save as new
         # version", which also refreshes it) — separate from latestVersion above.
         "hasDraft": p.has_draft,
@@ -162,7 +164,19 @@ def run_json(r: Run, ident: Identity | None = None) -> dict[str, Any]:
         "cancelRequested": r.cancel_requested,
         # Who this run acted as: the pipeline's owner (scheduled) or who pressed Run now (manual).
         "actsAs": owner_json(r.owner_sub, r.owner_name, ident),
+        # ADR 0123: an event-fired run's events (the first 100) and count. Paths and API names are for
+        # editors and owners; viewers get the count.
+        "triggerEvents": _trigger_events(r.trigger_events, ident),
     }
+
+
+def _trigger_events(fired: dict[str, Any] | None, ident: Identity | None) -> dict[str, Any] | None:
+    if fired is None:
+        return None
+    out = {"count": int(fired.get("count") or 0), "missedEvents": bool(fired.get("missedEvents"))}
+    if ident is not None and ident.can_write:
+        out["events"] = list(fired.get("events") or [])
+    return out
 
 
 def task_run_json(t: TaskRun, ident: Identity | None = None) -> dict[str, Any]:
@@ -221,6 +235,8 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
         },
         "catalogConfigured": svc(request).catalog.configured,
         "pip": pip_status(cfg),
+        # ADR 0123: whether an event trigger can be turned on here (this module holds a bus credential).
+        "eventTriggers": {"available": request.app.state.event_bus.configured},
         # ADR 0119: the Spark runner's settings the builder explains, when this install has it.
         "spark": {"retryMinDelaySeconds": cfg.spark_retry_min_delay_seconds} if "spark" in svc(request).registry.available_ids() else None,
     }
@@ -289,7 +305,36 @@ def delete_pipeline(request: Request, pipeline_id: str, ident: Identity = Depend
 
 @router.put("/pipelines/{pipeline_id}/schedule")
 def update_schedule(request: Request, pipeline_id: str, body: PipelineScheduleUpdate, ident: Identity = Depends(require_write)):
-    return pipeline_json(svc(request).update_schedule(ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling, body.pinned_version), ident)
+    p = svc(request).update_schedule(
+        ident, pipeline_id, body.schedule, body.allow_concurrent_runs, body.role_ceiling, body.pinned_version,
+        event_trigger=body.event_trigger, keep_event_trigger="event_trigger" not in body.model_fields_set,
+    )  # fmt: skip
+    return pipeline_json(p, ident)
+
+
+@router.get("/pipelines/{pipeline_id}/event-trigger")
+def event_trigger_status(request: Request, pipeline_id: str, ident: Identity = Depends(require_read)):
+    """Where the event trigger stands (ADR 0123): the next fire, what is pending, and the last event
+    seen. The last event's detail (a path, an API) is for editors and owners; viewers get its time."""
+    p, st = svc(request).event_trigger_state(ident, pipeline_id)
+    bus = request.app.state.event_bus
+    last = st.last_event if st else None
+    if last is not None and not ident.can_write:
+        last = {"type": last.get("type")}
+    return {
+        "enabled": bool(p.event_trigger and p.event_trigger.enabled),
+        "bus": {"configured": bus.configured, "connected": bus.connected},
+        "nextFireAt": _iso(st.fire_at) if st else None,
+        "pendingSince": _iso(st.pending_since) if st else None,
+        "pendingEvents": st.event_count if st else 0,
+        "queued": bool(st and st.queued),
+        "lastFiredAt": _iso(st.last_fired_at) if st else None,
+        "lastEventAt": _iso(st.last_event_at) if st else None,
+        "lastEvent": last,
+        "ignoredOwnRuns": st.ignored_own_runs if st else 0,
+        "skippedWhileRunning": st.skipped_while_running if st else 0,
+        "missedEventsAt": _iso(st.gap_detected_at) if st else None,
+    }
 
 
 @router.put("/pipelines/{pipeline_id}/owner")

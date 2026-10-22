@@ -155,6 +155,7 @@ class SubprocessRunner:
                     "access": access_meta,
                     "timeoutSeconds": inv.timeout_seconds,
                     "spark": inv.spark,
+                    "trigger": inv.trigger,
                 }
             ),
             encoding="utf-8",

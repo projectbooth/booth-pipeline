@@ -26,3 +26,16 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # ADR 0123: event triggers' JetStream consumer, against a real server (tests/unit/test_event_bus_nats.py).
+  # Unauthenticated here; the deployed bus is core's, with per-module credentials (ADR 0050).
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-p", "4222", "-m", "8222"]
+    ports: ["14222:4222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz?js-enabled-only=true || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+

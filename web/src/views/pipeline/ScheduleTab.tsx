@@ -2,16 +2,18 @@ import { useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import type { ViewCtx } from "../../context";
 import { describeInterval, describeSchedule, formatRelative, formatStamp, formatTime, localTimezone } from "../../format";
-import { errorMessage } from "../../hooks";
+import { errorMessage, useLoad } from "../../hooks";
 import { ScheduleEditor, type TriggerShape } from "../../task/ScheduleEditor";
-import type { PipelineScheduleUpdate, Trigger } from "../../types";
+import type { EventTrigger, PipelineScheduleUpdate, Trigger } from "../../types";
 import { Banner, Button, Card, Field, KVRows, inputClass, type KV } from "../../ui/primitives";
 import type { PipelineData } from "./data";
+import { DEFAULT_EVENT_TRIGGER, EventTriggerEditor, EventTriggerHelp, EventTriggerStatusLine, describeMatch, describeTiming } from "./EventTrigger";
 import { OwnerBadge, OwnerPicker, ownerLabel, TakeOver } from "./RunsAs";
 
 // S2d — the Schedule & Triggers tab (docs/decisions/0016 §4, Figma screen 5). The read-only summary
 // is the default view; "Edit schedule" swaps it in place for the editor (ADR 0065 triggers, plus
-// ADR 0071's pinnedVersion with each version's creation time).
+// ADR 0071's pinnedVersion with each version's creation time). ADR 0123's event trigger sits beside
+// the schedule, in its own card, on a backend that has it.
 
 export function ScheduleTab({ v, d, reload }: { v: ViewCtx; d: PipelineData; reload: () => void }) {
   const [editing, setEditing] = useState(false);
@@ -103,9 +105,14 @@ function ScheduleSummary({ v, d, reload, saved, onEdit }: { v: ViewCtx; d: Pipel
       >
         <KVRows rows={rows} />
       </Card>
+      {p.eventTrigger !== undefined && <EventTriggerCard v={v} d={d} />}
       {s && s.enabled ? (
         <Banner tone="info">
           <strong>Scheduled.</strong> Runs {describeSchedule(s)}.{p.nextRunAt ? ` Next: ${formatTime(p.nextRunAt)}.` : ""}
+        </Banner>
+      ) : p.eventTrigger?.enabled ? (
+        <Banner tone="info">
+          <strong>Runs on events.</strong> {s ? "The schedule is paused." : "There is no schedule as a safety net."}
         </Banner>
       ) : (
         <Banner tone="info">
@@ -116,6 +123,28 @@ function ScheduleSummary({ v, d, reload, saved, onEdit }: { v: ViewCtx; d: Pipel
         <Banner tone="warn">This pipeline was scheduled before workload identity and has no owner, so its scheduled runs can't start until someone takes it over.</Banner>
       )}
     </div>
+  );
+}
+
+function EventTriggerCard({ v, d }: { v: ViewCtx; d: PipelineData }) {
+  const t = d.pipeline.eventTrigger;
+  const rows: KV[] = t
+    ? [
+        { label: "Watches", value: <ul className="flex flex-col gap-0.5">{t.match.map((m, i) => <li key={i}>{describeMatch(m)}</li>)}</ul> },
+        { label: "When", value: describeTiming(t, d.pipeline.allowConcurrentRuns).join(" ") },
+        { label: "Enabled", value: t.enabled ? "Yes" : "No — paused" },
+      ]
+    : [{ label: "Event trigger", value: "None" }];
+  return (
+    <Card title="Event trigger" label="Event trigger">
+      <KVRows rows={rows} />
+      {t && (
+        <div className="flex flex-col gap-2 border-t border-slate-200 p-4 dark:border-slate-700">
+          <EventTriggerStatusLine v={v} pipelineId={d.pipeline.id} />
+          <EventTriggerHelp />
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -131,6 +160,12 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
   const [concurrent, setConcurrent] = useState(p.allowConcurrentRuns);
   const [ceiling, setCeiling] = useState<"viewer" | "editor">(p.roleCeiling);
   const [pinned, setPinned] = useState<number | null>(p.pinnedVersion);
+  // ADR 0123. A backend without event triggers sends no eventTrigger field, so it's never sent back.
+  const hasEvents = p.eventTrigger !== undefined;
+  const moduleConfig = useLoad(() => api.config(v.api), [v.api]);
+  const eventsAvailable = moduleConfig.state.status !== "ready" || moduleConfig.state.data.eventTriggers?.available !== false;
+  const [onEvents, setOnEvents] = useState(p.eventTrigger != null);
+  const [eventTrigger, setEventTrigger] = useState<EventTrigger>(p.eventTrigger ?? DEFAULT_EVENT_TRIGGER);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
@@ -144,6 +179,7 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
         : { type: "cron", cron: shape.cron.trim(), timezone: shape.timezone.trim(), enabled }
       : null;
     const body: PipelineScheduleUpdate = { schedule, allowConcurrentRuns: concurrent, roleCeiling: ceiling, pinnedVersion: pinned };
+    if (hasEvents) body.eventTrigger = onEvents ? eventTrigger : null;
     try {
       await api.updateSchedule(v.api, p.id, body);
       onDone(true);
@@ -154,7 +190,8 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
   }
 
   const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
-  const routed = ["schedule.cron", "schedule.interval.seconds", "pinnedVersion"];
+  const routed = ["schedule.cron", "schedule.interval.seconds", "pinnedVersion", "eventTrigger.debounceSeconds", "eventTrigger.maxWaitSeconds", "eventTrigger.minGapSeconds"];
+  const routedHere = (f?: string) => !!f && (routed.includes(f) || /^eventTrigger\.match\[\d+\]\.storage\.backendId$/.test(f));
 
   return (
     <form onSubmit={submit} aria-label="Pipeline schedule" className="flex max-w-3xl flex-col gap-4">
@@ -177,6 +214,25 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
           )}
         </fieldset>
       </Card>
+
+      {hasEvents && (
+        <Card title="Event trigger">
+          <fieldset disabled={busy} className="flex flex-col gap-4 p-4">
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+              <input type="checkbox" checked={onEvents} onChange={(e) => setOnEvents(e.target.checked)} />
+              Run when files arrive or rows are written
+            </label>
+            {onEvents && !eventsAvailable && (
+              <Banner tone="warn">This install has no event-bus credential, so an event trigger can be saved paused but can't be turned on.</Banner>
+            )}
+            {onEvents ? (
+              <EventTriggerEditor v={v} value={eventTrigger} onChange={setEventTrigger} concurrent={concurrent} fieldError={fieldError} />
+            ) : (
+              <p className="text-xs text-slate-500 dark:text-slate-400">Runs only on the schedule above and Run now.</p>
+            )}
+          </fieldset>
+        </Card>
+      )}
 
       <Card title="What runs">
         <fieldset disabled={busy} className="flex flex-col gap-4 p-4">
@@ -214,11 +270,11 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
               </select>
             )}
           </Field>
-          {!p.hasOwner && scheduled && <Banner tone="warn">This pipeline has no owner yet (it predates workload identity). Saving this schedule makes you its owner.</Banner>}
+          {!p.hasOwner && (scheduled || onEvents) && <Banner tone="warn">This pipeline has no owner yet (it predates workload identity). Saving this schedule makes you its owner.</Banner>}
         </fieldset>
       </Card>
 
-      {error && (!error.field || !routed.includes(error.field)) && <Banner tone="error">{error.message}</Banner>}
+      {error && !routedHere(error.field) && <Banner tone="error">{error.message}</Banner>}
       <div className="flex gap-2">
         <Button type="submit" variant="primary" disabled={busy}>
           {busy ? "Saving…" : "Save schedule"}

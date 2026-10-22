@@ -183,6 +183,19 @@ class S3:
             raise PlatformError(str(e)) from None
 
 
+class Trigger:
+    """How the run started (ADR 0123): ``type`` is manual, schedule or event; an event-fired run also
+    gets the events that fired it (``events``, the first 100) and their ``count``. A hint, not a
+    work list: delivery is at least once and best effort, so scan your own inbox too."""
+
+    def __init__(self, t) -> None:
+        t = t or {}
+        self.type = t.get("type") or "manual"
+        self.events = list(t.get("events") or [])
+        self.count = int(t.get("count") or 0)
+        self.missed_events = bool(t.get("missedEvents"))
+
+
 class Context:
     def __init__(self, payload: dict) -> None:
         self.run_id = payload["runId"]
@@ -191,6 +204,7 @@ class Context:
         self.attempt = payload["attempt"]
         self.params = payload["params"]
         self.inputs = payload["inputs"]
+        self.trigger = Trigger(payload.get("trigger"))
         access = payload.get("access")
         token_file = os.environ.get("BOOTH_TOKEN_FILE")
         if access and token_file:

@@ -17,13 +17,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import TypeAdapter
 
-from ..model import PipelineSpec, TaskConfig, Trigger
+from .. import triggers
+from ..model import EventTrigger, PipelineSpec, TaskConfig, Trigger
 from ..records import (
     RUN_ACTIVE,
     RUN_QUEUED,
     RUN_RUNNING,
     RUN_TERMINAL,
     TASK_PENDING,
+    EventTriggerState,
     LogLine,
     Page,
     Pipeline,
@@ -41,6 +43,8 @@ from .base import Busy, Conflict, InUse
 # Arbitrary constant: the advisory lock that serialises schema migration across replicas that
 # start at the same moment.
 _MIGRATION_LOCK = 0x626F6F7470  # "boot p"
+# The shared JetStream consumer event triggers read through (ADR 0123); its row in trigger_bus.
+_BUS = "booth-pipeline-triggers"
 
 # A stored `schedule` JSON blob can be either union member (ADR 0065); dispatch on it rather than
 # assuming CronTrigger, which would blow up on a stored IntervalTrigger row.
@@ -104,6 +108,8 @@ class PostgresStore:
             pinned_version=r["pinned_version"],
             has_draft=r["draft_spec"] is not None,
             draft_updated_at=r["draft_updated_at"],
+            event_trigger=EventTrigger.model_validate(r["event_trigger"]) if r["event_trigger"] else None,
+            event_trigger_since=r["event_trigger_since"],
         )  # fmt: skip
 
     @staticmethod
@@ -141,7 +147,7 @@ class PostgresStore:
             triggered_by=r["triggered_by"], created_at=r["created_at"], started_at=r["started_at"],
             finished_at=r["finished_at"], error=r["error"], worker_id=r["worker_id"],
             heartbeat_at=r["heartbeat_at"], cancel_requested=r["cancel_requested"],
-            owner_sub=r["owner_sub"], owner_name=r["owner_name"],
+            owner_sub=r["owner_sub"], owner_name=r["owner_name"], trigger_events=r["trigger_events"],
         )  # fmt: skip
 
     # ---- pipelines ----
@@ -200,10 +206,10 @@ class PostgresStore:
             return cur.rowcount > 0
 
     def update_schedule(self, pipeline: Pipeline):
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
             cur = conn.execute(
-                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, owner_name=%s, role_ceiling=%s, pinned_version=%s, updated_at=%s"
-                " WHERE workspace=%s AND id=%s",
+                "UPDATE pipelines SET schedule=%s, allow_concurrent_runs=%s, next_run_at=%s, owner_sub=%s, owner_name=%s, role_ceiling=%s, pinned_version=%s,"
+                " event_trigger=%s, event_trigger_since=%s, updated_at=%s WHERE workspace=%s AND id=%s",
                 (
                     Jsonb(pipeline.schedule.model_dump(by_alias=True)) if pipeline.schedule else None,
                     pipeline.allow_concurrent_runs,
@@ -212,6 +218,8 @@ class PostgresStore:
                     pipeline.owner_name,
                     pipeline.role_ceiling,
                     pipeline.pinned_version,
+                    Jsonb(pipeline.event_trigger.model_dump(by_alias=True, exclude_none=True)) if pipeline.event_trigger else None,
+                    pipeline.event_trigger_since,
                     datetime.now(UTC),
                     pipeline.workspace,
                     pipeline.id,
@@ -219,6 +227,13 @@ class PostgresStore:
             )
             if cur.rowcount == 0:
                 return None
+            if pipeline.event_trigger is None or not pipeline.event_trigger.enabled:
+                # Turned off or removed: nothing it was waiting for still fires.
+                conn.execute(
+                    "UPDATE event_trigger_state SET pending_since=NULL, fire_at=NULL, queued=false, events='[]', event_count=0, missed_events=false"
+                    " WHERE pipeline_id=%s",
+                    (pipeline.id,),
+                )
         return self.get_pipeline(pipeline.workspace, pipeline.id)
 
     def add_version(self, workspace, pipeline_id, spec, notes, by):
@@ -408,6 +423,160 @@ class PostgresStore:
             ).fetchall()
         return [self._pipeline(r) for r in rows]
 
+    # ---- event triggers (ADR 0123) ----
+    _STATE_COLS = (
+        "pending_since", "last_event_at", "fire_at", "queued", "last_fired_at", "events", "event_count", "missed_events",
+        "ignored_own_runs", "skipped_while_running", "last_event", "gap_detected_at",
+    )  # fmt: skip
+
+    @staticmethod
+    def _state_row(r: dict[str, Any]) -> EventTriggerState:
+        return EventTriggerState(
+            pipeline_id=r["pipeline_id"], workspace=r["workspace"], pending_since=r["pending_since"], last_event_at=r["last_event_at"],
+            fire_at=r["fire_at"], queued=r["queued"], last_fired_at=r["last_fired_at"], events=list(r["events"] or []),
+            event_count=r["event_count"], missed_events=r["missed_events"], ignored_own_runs=r["ignored_own_runs"],
+            skipped_while_running=r["skipped_while_running"], last_event=r["last_event"], gap_detected_at=r["gap_detected_at"],
+        )  # fmt: skip
+
+    def _save_state(self, conn, st: EventTriggerState) -> None:
+        values = [Jsonb(getattr(st, c)) if c in ("events", "last_event") and getattr(st, c) is not None else getattr(st, c) for c in self._STATE_COLS]
+        conn.execute(
+            "UPDATE event_trigger_state SET " + ", ".join(f"{c}=%s" for c in self._STATE_COLS) + " WHERE pipeline_id=%s",
+            (*values, st.pipeline_id),
+        )
+
+    def _lock_state(self, conn, pipeline_id: str, *, queued_only: bool = False, create: bool = False) -> tuple[Pipeline, EventTriggerState] | None:
+        """The pipeline (with an enabled event trigger) and its state row, locked for this transaction."""
+        if create:
+            conn.execute(
+                "INSERT INTO event_trigger_state (pipeline_id, workspace) SELECT id, workspace FROM pipelines WHERE id=%s ON CONFLICT DO NOTHING",
+                (pipeline_id,),
+            )
+        r = conn.execute(
+            "SELECT * FROM event_trigger_state WHERE pipeline_id=%s" + (" AND queued" if queued_only else "") + " FOR UPDATE",
+            (pipeline_id,),
+        ).fetchone()
+        if r is None:
+            return None
+        pr = conn.execute(self._PIPELINE_SELECT + " WHERE p.id=%s", (pipeline_id,)).fetchone()
+        p = self._pipeline(pr) if pr else None
+        if p is None or p.event_trigger is None or not p.event_trigger.enabled:
+            return None
+        return p, self._state_row(r)
+
+    @staticmethod
+    def _active(conn, pipeline_id: str) -> bool:
+        return conn.execute("SELECT 1 FROM runs WHERE pipeline_id=%s AND status = ANY(%s) LIMIT 1", (pipeline_id, list(RUN_ACTIVE))).fetchone() is not None
+
+    def ingest_trigger_event(self, ev, seq, now):
+        with self._pool.connection() as conn, conn.transaction():
+            if seq is not None:
+                cur = conn.execute("INSERT INTO trigger_events_seen (stream_seq, seen_at) VALUES (%s,%s) ON CONFLICT DO NOTHING", (seq, now))
+                if cur.rowcount == 0:
+                    return None
+            # Candidates are read without a lock; each one's state row is then locked in id order, so
+            # two replicas handling two events never deadlock on each other.
+            rows = conn.execute(
+                self._PIPELINE_SELECT + " WHERE p.workspace=%s AND p.event_trigger IS NOT NULL AND (p.event_trigger->>'enabled')::boolean ORDER BY p.id",
+                (ev.workspace,),
+            ).fetchall()
+            ids = [p.id for p in map(self._pipeline, rows) if triggers.concerns(p.event_trigger, p.event_trigger_since, ev)]  # type: ignore[arg-type]
+            if not ids:
+                return {}
+            run_id = triggers.own_run_id(ev.principal, ev.workspace)
+            own = conn.execute("SELECT pipeline_id FROM runs WHERE id=%s", (run_id,)).fetchone() if run_id else None
+            out: dict[str, str] = {}
+            for pid in ids:
+                loaded = self._lock_state(conn, pid, create=True)
+                if loaded is None:
+                    continue
+                p, st = loaded
+                out[pid] = triggers.ingest(
+                    st, p.event_trigger, ev, now,  # type: ignore[arg-type]
+                    own_run=bool(own and own["pipeline_id"] == pid), run_active=self._active(conn, pid), concurrent=p.allow_concurrent_runs,
+                )  # fmt: skip
+                self._save_state(conn, st)
+            return out
+
+    def claim_due_event_triggers(self, now, limit):
+        out = []
+        with self._pool.connection() as conn, conn.transaction():
+            # SKIP LOCKED, as claim_due_pipelines: replicas claiming at once take disjoint rows, so a
+            # fire is claimed exactly once. The second condition: a follow-up owed to a run that ended
+            # without releasing it (normally impossible: finish_run releases in its own transaction).
+            rows = conn.execute(
+                "SELECT s.* FROM event_trigger_state s WHERE (s.fire_at IS NOT NULL AND s.fire_at <= %s)"
+                " OR (s.queued AND s.fire_at IS NULL AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.pipeline_id = s.pipeline_id AND r.status = ANY(%s)))"
+                " ORDER BY s.fire_at NULLS LAST, s.pipeline_id LIMIT %s FOR UPDATE OF s SKIP LOCKED",
+                (now, list(RUN_ACTIVE), limit),
+            ).fetchall()
+            for r in rows:
+                st = self._state_row(r)
+                pr = conn.execute(self._PIPELINE_SELECT + " WHERE p.id=%s", (st.pipeline_id,)).fetchone()
+                p = self._pipeline(pr) if pr else None
+                if p is None or p.event_trigger is None or not p.event_trigger.enabled:
+                    continue
+                if st.queued and st.fire_at is None:
+                    triggers.on_run_finished(st, p.event_trigger, now)
+                    if st.fire_at is None or st.fire_at > now:
+                        self._save_state(conn, st)
+                        continue
+                fired = triggers.on_due(st, p.event_trigger, now, run_active=self._active(conn, p.id), concurrent=p.allow_concurrent_runs)
+                self._save_state(conn, st)
+                if fired is not None:
+                    out.append((p, fired))
+        return out
+
+    def requeue_event_trigger(self, pipeline_id, fired, now):
+        with self._pool.connection() as conn, conn.transaction():
+            loaded = self._lock_state(conn, pipeline_id)
+            if loaded:
+                p, st = loaded
+                triggers.requeue(st, p.event_trigger, fired, now)  # type: ignore[arg-type]
+                if not self._active(conn, pipeline_id):
+                    triggers.on_run_finished(st, p.event_trigger, now)  # type: ignore[arg-type]
+                self._save_state(conn, st)
+
+    def next_event_fire_at(self):
+        with self._pool.connection() as conn:
+            r = conn.execute("SELECT min(fire_at) AS at FROM event_trigger_state WHERE fire_at IS NOT NULL").fetchone()
+        return r["at"] if r else None
+
+    def get_event_trigger_state(self, workspace, pipeline_id):
+        with self._pool.connection() as conn:
+            r = conn.execute("SELECT * FROM event_trigger_state WHERE workspace=%s AND pipeline_id=%s", (workspace, pipeline_id)).fetchone()
+        return self._state_row(r) if r else None
+
+    def event_triggers_missed_events(self, now):
+        n = 0
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute("SELECT id FROM pipelines WHERE event_trigger IS NOT NULL AND (event_trigger->>'enabled')::boolean ORDER BY id").fetchall()
+            for r in rows:
+                loaded = self._lock_state(conn, r["id"], create=True)
+                if loaded:
+                    p, st = loaded
+                    triggers.on_missed_events(st, p.event_trigger, now)  # type: ignore[arg-type]
+                    self._save_state(conn, st)
+                    n += 1
+        return n
+
+    def trigger_bus(self):
+        with self._pool.connection() as conn:
+            r = conn.execute("SELECT created_at, last_contact_at FROM trigger_bus WHERE name=%s", (_BUS,)).fetchone()
+        return (r["created_at"], r["last_contact_at"]) if r else None
+
+    def record_trigger_bus_contact(self, now):
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO trigger_bus (name, created_at, last_contact_at) VALUES (%s, %s, %s)"
+                " ON CONFLICT (name) DO UPDATE SET last_contact_at = GREATEST(trigger_bus.last_contact_at, EXCLUDED.last_contact_at)",
+                (_BUS, now, now),
+            )
+
+    def prune_seen_trigger_events(self, before):
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM trigger_events_seen WHERE seen_at < %s", (before,)).rowcount
+
     # ---- runs ----
     def create_run(self, run, task_keys, exclusive=False):
         with self._pool.connection() as conn, conn.transaction():
@@ -422,9 +591,12 @@ class PostgresStore:
                 if n:
                     raise Busy("this pipeline already has an active run")
             conn.execute(
-                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub, owner_name)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (run.id, run.workspace, run.pipeline_id, run.pipeline_version, run.status, run.trigger, run.triggered_by, run.created_at, run.owner_sub, run.owner_name),
+                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub, owner_name, trigger_events)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    run.id, run.workspace, run.pipeline_id, run.pipeline_version, run.status, run.trigger, run.triggered_by, run.created_at,
+                    run.owner_sub, run.owner_name, Jsonb(run.trigger_events) if run.trigger_events is not None else None,
+                ),  # fmt: skip
             )
             with conn.cursor() as cur:
                 cur.executemany(
@@ -468,11 +640,21 @@ class PostgresStore:
             conn.execute("UPDATE runs SET heartbeat_at=%s WHERE id=%s AND status = ANY(%s)", (now, run_id, list(RUN_ACTIVE)))
 
     def finish_run(self, run_id, status, error, now):
-        with self._pool.connection() as conn:
-            cur = conn.execute(
-                "UPDATE runs SET status=%s, error=%s, finished_at=%s WHERE id=%s AND status <> ALL(%s)", (status, error, now, run_id, list(RUN_TERMINAL))
-            )
-            return cur.rowcount > 0
+        with self._pool.connection() as conn, conn.transaction():
+            r = conn.execute(
+                "UPDATE runs SET status=%s, error=%s, finished_at=%s WHERE id=%s AND status <> ALL(%s) RETURNING pipeline_id",
+                (status, error, now, run_id, list(RUN_TERMINAL)),
+            ).fetchone()
+            if r is None:
+                return False
+            # ADR 0123: a follow-up owed by queue_one is due now that the run has ended. Same
+            # transaction, so a run can't end without its follow-up being released.
+            loaded = self._lock_state(conn, r["pipeline_id"], queued_only=True)
+            if loaded:
+                p, st = loaded
+                triggers.on_run_finished(st, p.event_trigger, now)  # type: ignore[arg-type]
+                self._save_state(conn, st)
+            return True
 
     def request_cancel(self, workspace, run_id):
         with self._pool.connection() as conn:

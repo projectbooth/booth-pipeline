@@ -150,6 +150,56 @@ export interface IntervalTrigger {
 export type Trigger = CronTrigger | IntervalTrigger;
 export type Schedule = CronTrigger;
 
+/** ADR 0123: what an event trigger watches. Exactly one of `storage` (a file created under a folder of a
+ *  booth-storage backend; "" is the whole backend) or `api` (a committed write through booth-api). */
+export interface EventMatch {
+  storage?: { backendId: string; prefix: string };
+  api?: { slugs: string[]; slugPrefix?: string } | { slugs?: string[]; slugPrefix: string };
+}
+
+/** ADR 0123: run when files are created or rows are written. Beside `schedule`, not instead of it. */
+export interface EventTrigger {
+  type: "event";
+  enabled: boolean;
+  match: EventMatch[];
+  debounceSeconds: number;
+  maxWaitSeconds: number;
+  whenRunning: "queue_one" | "skip";
+  minGapSeconds: number;
+}
+
+/** GET /pipelines/{id}/event-trigger. `lastEvent` has a path or API only for editors and owners. */
+export interface EventTriggerStatus {
+  enabled: boolean;
+  bus: { configured: boolean; connected: boolean };
+  nextFireAt: string | null;
+  pendingSince: string | null;
+  pendingEvents: number;
+  queued: boolean;
+  lastFiredAt: string | null;
+  lastEventAt: string | null;
+  lastEvent: TriggerEventRecord | { type: string } | null;
+  ignoredOwnRuns: number;
+  skippedWhileRunning: number;
+  missedEventsAt: string | null;
+}
+
+/** One event as a run (ctx.trigger.events) and the status line see it. */
+export interface TriggerEventRecord {
+  type: "storage.object.created" | "api.write.committed";
+  publishedAt: string;
+  principal: string;
+  backendId?: string;
+  path?: string;
+  size?: number | null;
+  via?: string;
+  apiSlug?: string;
+  dataset?: string;
+  table?: string;
+  operation?: string;
+  rows?: number | null;
+}
+
 export interface Pipeline {
   id: string;
   name: string;
@@ -176,6 +226,8 @@ export interface Pipeline {
   /** Whether a mutable draft (ADR 0073) has ever been saved onto this pipeline. */
   hasDraft: boolean;
   draftUpdatedAt: string | null;
+  /** ADR 0123. Absent from a backend without event triggers. */
+  eventTrigger?: EventTrigger | null;
 }
 
 /** A pipeline's mutable, unversioned "current" state (ADR 0073) — the direct counterpart of
@@ -205,6 +257,8 @@ export interface PipelineScheduleUpdate {
   allowConcurrentRuns: boolean;
   roleCeiling: "viewer" | "editor";
   pinnedVersion: number | null;
+  /** ADR 0123. Left out, the saved one is kept (so an older backend never sees it). */
+  eventTrigger?: EventTrigger | null;
 }
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -215,7 +269,7 @@ export interface Run {
   pipelineId: string;
   pipelineVersion: number;
   status: RunStatus;
-  trigger: "manual" | "schedule";
+  trigger: "manual" | "schedule" | "event";
   triggeredBy: string;
   createdAt: string;
   startedAt: string | null;
@@ -224,6 +278,8 @@ export interface Run {
   cancelRequested: boolean;
   /** Who the run acted as: the pipeline's owner (scheduled) or who pressed Run now. */
   actsAs?: OwnerInfo | null;
+  /** ADR 0123: what fired an event-fired run. `events` (the first 100) only for editors and owners. */
+  triggerEvents?: { count: number; missedEvents: boolean; events?: TriggerEventRecord[] } | null;
 }
 
 /** A pipeline's owner or a run's identity (ADR 0120). A service account's id is shown; a person's
@@ -317,6 +373,8 @@ export interface ModuleConfig {
   pip?: PipStatus;
   /** ADR 0119: the Spark runner's settings, when this install has it. */
   spark?: { retryMinDelaySeconds: number } | null;
+  /** ADR 0123: whether an event trigger can be turned on here. Absent from a backend without event triggers. */
+  eventTriggers?: { available: boolean };
 }
 
 export interface RunnerInfo {

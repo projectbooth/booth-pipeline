@@ -1,11 +1,12 @@
 # Design: event triggers for pipelines (ADR 0123), booth-pipeline's part
 
-Status: **proposed**, for coordinator review. No code. Inputs: booth-architecture ADR 0123 (proposed), 0007, 0021,
-0026, 0046, 0049–0051, 0065, 0117, 0120; this repo's `docs/decisions/0009` (how the interval trigger was added),
-`scheduler.py`, `service.start_scheduled`, `runs.py`; booth-core `internal/natsauth/permissions.go` and
+Status: **accepted and built** (ADR 0123, accepted 2026-10-21 with the rulings in its "Revision 2026-10-21"
+section, which took this note's sections 1-7 and answered section 10: `ctx.trigger.events` yes, first 100 plus a
+count; one time trigger plus one event trigger; fire once when events may have been lost; the loop guard keyed on
+the run). Section 11 lists where the build differs from the proposal below. Inputs: booth-architecture ADR 0123,
+0007, 0021, 0026, 0046, 0049-0051, 0065, 0117, 0120; this repo's `docs/decisions/0009` (how the interval trigger was
+added), `scheduler.py`, `service.start_scheduled`, `runs.py`; booth-core `internal/natsauth/permissions.go` and
 `internal/eventbus/nats.go`; booth-catalog `internal/events/nats.go` (the one working JetStream consumer).
-
-Two points change ADR 0123's text (sections 4 and 7). Questions for the user are in section 10.
 
 ## 1. Model
 
@@ -193,3 +194,54 @@ follow-up under `queue_one`, and a restart of the pipeline pod mid-debounce.
    (recommended), or only show the warning?
 4. **The loop guard keyed on the run's subject** (section 4) rather than the owner's identity: please confirm,
    since it changes ADR 0123's wording.
+
+## 11. As built
+
+Where the build differs from sections 1-9, or settles what they left open:
+
+- **Not a member of `Trigger`.** `EventTrigger` has `type: "event"` but is its own model in its own field
+  (`pipelines.event_trigger`, migration `0009_event_triggers.sql`; PR #21's task outputs use `0008`, and the two merge
+  in either order). In the union, `schedule` could have held one.
+- **"Before the trigger" is `event_trigger_since`.** Set when the trigger is turned on or its match changes. An event
+  whose `publishedAt` is earlier is ignored (an unreadable time is let through). A publisher clock running behind
+  pipeline's could drop an event published in the first seconds after a save; nothing else depends on clocks.
+- **Lost events are detected by silence, not sequence numbers.** Every replica that is reading records the time
+  (`trigger_bus.last_contact_at`, every 30 s). On (re)connect, a silence longer than the stream's `max_age` means
+  events may be gone, and every enabled event trigger fires once with `missedEvents: true`. The stream is shared
+  with other event types, so comparing sequence numbers would also count other modules' expired events. A consumer
+  that has gone while this module had one is recreated from 60 s before the last contact (a replay; recorded
+  sequences make the overlap harmless). First creation delivers new events only.
+- **Firing.** The scheduler claims due rows `FOR UPDATE SKIP LOCKED`, as it claims schedules, and the consumer
+  wakes the local scheduler after recording an event. A run that ends releases a queued follow-up in the same
+  transaction as its status (`finish_run`). A claim that finds the pipeline busy because a run slipped in between
+  is put back (`requeue_event_trigger`).
+- **Save-time check.** Only Storage backends new to the save are asked about (`GET /backends/{id}` as the caller),
+  so an unrelated edit saves while booth-storage is down. API slugs are not checked: a prefix is meant to match
+  APIs created later, and booth-api's list needs a person's token anyway.
+- **Who sees what.** An event-fired run's "triggered by" says "3 files" or "1 write" with no path. Its
+  `triggerEvents.events` and the status endpoint's `lastEvent` detail are for editors and owners only. Viewers
+  get the counts and the time.
+- **The bus credential is the API pod's alone.** It's mounted there (not `optional`: the pod waits for core, as for
+  the minting credential), and `config.py` refuses to start if it's present while tasks would run in the same pod.
+  Chart value `eventTriggers.enabled` (default on) declares `events.subscribe` and mounts it.
+- **An older UI keeps the trigger.** `PUT /schedule` without `eventTrigger` keeps the saved one; `null` removes it.
+- **Tests.**
+  - `tests/unit/test_event_triggers.py`, against both stores:
+    - a burst of 74 makes 1 run; the first 100 events plus the exact count;
+    - max wait and minimum gap;
+    - an event during a run makes 1 follow-up under queue_one (from 30 events) and none under skip;
+    - duplicates before and after the fire;
+    - the loop guard, including the owner's own upload firing;
+    - workspaces, turning the trigger off, requeue, an outage backlog of 500 making 1 run, lost events;
+    - 4 threads claiming at once, and a restart (a second PostgreSQL store) mid-burst.
+  - `test_event_trigger_api.py`: save and validation, `ctx.trigger` end to end, viewers, the status line, and
+    start-time authorization.
+  - `test_event_bus_nats.py`, against a real JetStream server (now in `hack/docker-compose.test.yml`):
+    - new-only on first creation;
+    - a restart, a lost consumer, a long outage;
+    - two replicas;
+    - a redelivery after a failed write;
+    - the app's own consumer and scheduler end to end.
+  - `tests/integration/events.sh` (kind, the deployed pod's consumer) is written but has **not been run**: Integration
+    runs only on a pushed branch, and this branch isn't pushed.
+

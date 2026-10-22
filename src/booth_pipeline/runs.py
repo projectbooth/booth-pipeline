@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +31,7 @@ from .records import (
     TASK_RUNNING,
     TASK_SKIPPED,
     TASK_SUCCEEDED,
+    TRIGGER_EVENT,
     TRIGGER_SCHEDULE,
     LogLine,
     Run,
@@ -202,6 +204,16 @@ class RunManager:
         self._pool = ThreadPoolExecutor(max_workers=cfg.max_workers, thread_name_prefix="run")
         self._cancels: dict[str, Cancellation] = {}
         self._lock = threading.Lock()
+        # Called after a run ends (the app points it at the scheduler's wake): ending a run can make
+        # an event trigger's queued follow-up due (ADR 0123).
+        self.on_run_finished: Callable[[], None] | None = None
+
+    def _finished(self) -> None:
+        if self.on_run_finished is not None:
+            try:
+                self.on_run_finished()
+            except Exception:  # noqa: BLE001 - a wake-up is an optimisation; the index refresh catches up
+                log.exception("on_run_finished failed")
 
     def submit(self, run: Run) -> None:
         self._pool.submit(self._execute, run)
@@ -228,6 +240,7 @@ class RunManager:
         except Exception as e:  # noqa: BLE001 - a bug here must not leave the run "active" forever
             log.exception("run %s: unexpected failure", run.id)
             store.finish_run(run.id, RUN_FAILED, f"internal error: {e.__class__.__name__}", now)
+        self._finished()
 
     def _execute_inner(self, run: Run) -> None:
         store = self._store
@@ -282,7 +295,8 @@ class RunManager:
                 status, error = RUN_FAILED, refused
             else:
                 result = engine.execute(
-                    version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access
+                    version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access,
+                    trigger=run_trigger(run),
                 )
                 status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_FAILED)
                 error = None if result.success else result.error
@@ -301,19 +315,22 @@ class RunManager:
         store.finish_run(run.id, status, error, _now())
 
     def _authorize(self, run: Run, access: AccessProvider, recorder: StoreRecorder, cancel: Cancellation) -> str | None:
-        """A scheduled run acts for its owner with nobody present, so it starts only if core will issue
-        a token for that owner right now, even if no task needs one (ADR 0119 amendment 3, for person
-        owners and service accounts alike). Returns the run's failure reason, or None to go ahead.
-        A manual run skips this: the person who pressed Run now is present. An install with no minting
-        credential can't issue any token, so there is nothing to ask and its runs go ahead."""
-        if run.trigger != TRIGGER_SCHEDULE or not access.configured:
+        """A scheduled or event-fired run acts for its owner with nobody present, so it starts only if
+        core will issue a token for that owner right now, even if no task needs one (ADR 0119 amendment
+        3, for person owners and service accounts alike; ADR 0123 for event-fired runs, which is also
+        what makes "the owner can read what the trigger watches" hold). Returns the run's failure
+        reason, or None to go ahead. A manual run skips this: the person who pressed Run now is
+        present. An install with no minting credential can't issue any token, so there is nothing to
+        ask and its runs go ahead."""
+        if run.trigger not in (TRIGGER_SCHEDULE, TRIGGER_EVENT) or not access.configured:
             return None
+        kind = "scheduled" if run.trigger == TRIGGER_SCHEDULE else "event-fired"
         try:
             role = access.authorize(wait_seconds=self.authorize_wait_seconds, cancel=cancel)
         except MintRefused as e:
-            reason = f"not started: core would not authorize this scheduled run: {e}"
+            reason = f"not started: core would not authorize this {kind} run: {e}"
         except MintUnavailable as e:
-            reason = f"not started: could not reach booth-core to authorize this scheduled run ({e})"
+            reason = f"not started: could not reach booth-core to authorize this {kind} run ({e})"
         else:
             recorder.system(f"authorized: core will issue this run's tokens (role {role or 'unknown'})")
             return None
@@ -346,6 +363,7 @@ class RunManager:
             reason = "worker lost: no heartbeat" if r.status != RUN_QUEUED else "never started (the worker that accepted it went away)"
             if self._store.finish_run(r.id, RUN_FAILED, reason, now):
                 failed += 1
+                self._finished()
                 log.warning("run %s failed by sweep: %s", r.id, reason)
                 for t in self._store.list_task_runs(r.id):
                     if t.status in (TASK_PENDING, TASK_RUNNING, TASK_RETRYING):
@@ -367,3 +385,17 @@ def _next_seq(store: Store, run_id: str) -> int:
         if not page:
             return tail + 1
         tail = page[-1].seq
+
+
+def run_trigger(run: Run) -> dict:
+    """What a task sees as ``ctx.trigger`` (ADR 0123): how its run started and, for an event-fired run,
+    the events that fired it (the first 100) and their count. A hint, not a work list: delivery is
+    at least once and best effort, so a task still scans its own inbox."""
+    fired = run.trigger_events or {}
+    return {
+        "type": run.trigger,
+        "events": list(fired.get("events") or []),
+        "count": int(fired.get("count") or 0),
+        "missedEvents": bool(fired.get("missedEvents")),
+    }
+

@@ -1,6 +1,7 @@
 import type {
   CatalogCodeEntry,
   CatalogVersionSummary,
+  EventTriggerStatus,
   LogPage,
   Page,
   Pipeline,
@@ -144,6 +145,7 @@ export const api = {
     requestText(c, PIPELINE, `/pipelines/${e(id)}/versions/${version}/export`),
   updateSchedule: (c: ApiContext, id: string, body: PipelineScheduleUpdate) =>
     request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}/schedule`, json("PUT", body)),
+  eventTriggerStatus: (c: ApiContext, id: string) => request<EventTriggerStatus>(c, PIPELINE, `/pipelines/${e(id)}/event-trigger`),
   runPipeline: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/pipelines/${e(id)}/run`, { method: "POST" }),
 
   listTasks: (c: ApiContext, q = "") => request<Page<TaskEntity>>(c, PIPELINE, `/tasks${qs({ q, limit: 200 })}`),

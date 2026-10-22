@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from .model import PipelineSpec, TaskConfig, Trigger, Wire
+from .model import EventTrigger, PipelineSpec, TaskConfig, Trigger, Wire
 
 MAX_NAME = 200
 MAX_DESCRIPTION = 4000
@@ -54,6 +54,9 @@ class PipelineScheduleUpdate(Wire):
     # scheduled/manual run to it, mirroring the old Job's `pipeline_version` pin (ADR 0071's second
     # "Open question, ruled 2026-09-24").
     pinned_version: int | None = Field(None, ge=1)
+    # ADR 0123: beside `schedule`, not instead of it. Left out of the body (an older UI), the saved one
+    # is kept; null removes it.
+    event_trigger: EventTrigger | None = None
 
 
 class PipelineOwnerUpdate(Wire):

@@ -77,6 +77,7 @@ class FakeStorage:
     down: bool = False  # simulate unreachable
     not_installed: bool = False  # the gateway's plain-text 404
     requests: list[httpx.Request] = field(default_factory=list)
+    backends: set[str] = field(default_factory=lambda: {"local"})  # backends that exist with no objects yet
 
     def add(self, backend_id: str, path: str, content: str) -> None:
         self.objects.setdefault(backend_id, {})[path] = content
@@ -87,7 +88,11 @@ class FakeStorage:
             raise httpx.ConnectError("connection refused")
         if self.not_installed:
             return httpx.Response(404, text="module not found")
-        backend_id, _, obj_path = request.url.path.removeprefix("/modules/storage/api/backends/").partition("/objects/")
+        backend_id, has_objects, obj_path = request.url.path.removeprefix("/modules/storage/api/backends/").partition("/objects/")
+        if not has_objects:  # GET /backends/{id} (an event trigger's Storage match, ADR 0123)
+            if backend_id in self.objects or backend_id in self.backends:
+                return httpx.Response(200, json={"id": backend_id})
+            return httpx.Response(404, json={"error": "backend not found"})
         content = self.objects.get(backend_id, {}).get(obj_path)
         if content is None:
             return httpx.Response(404, json={"error": "object not found"})
@@ -149,14 +154,14 @@ class Env:
         raise AssertionError(f"run {run_id} did not finish within {timeout}s: {r}")
 
 
-def make_env(**cfg_overrides: Any) -> Env:
+def make_env(start_scheduler: bool = False, **cfg_overrides: Any) -> Env:
     cfg = Config(dev_memory=True, oidc_issuer_url="https://idp.test/realms/booth", oidc_client_id="booth-pipeline", **cfg_overrides)
     store = MemoryStore()
     catalog = FakeCatalog()
     storage = FakeStorage()
     client_catalog = CatalogClient("http://core.test", transport=httpx.MockTransport(catalog.handler))
     client_storage = StorageClient("http://core.test", transport=httpx.MockTransport(storage.handler))
-    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, storage=client_storage, start_scheduler=False)
+    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, storage=client_storage, start_scheduler=start_scheduler)
     return Env(TestClient(app), store, catalog, storage, app)
 
 

@@ -22,7 +22,7 @@ T0 = datetime(2026, 1, 1, tzinfo=UTC)
 def test_a_legacy_bare_cron_schedule_row_loads_as_a_crontrigger_and_still_schedules(pg_store):
     store = pg_store
     with store._pool.connection() as conn:
-        conn.execute("TRUNCATE run_logs, task_runs, runs, pipeline_versions, pipelines, task_versions, tasks")
+        conn.execute("TRUNCATE run_logs, task_runs, runs, event_trigger_state, trigger_events_seen, trigger_bus, pipeline_versions, pipelines, task_versions, tasks")
     p = store.create_pipeline(WS, f"etl-{uuid4().hex[:6]}", "", "a")
     store.add_version(WS, p.id, PipelineSpec(), "", "a")
 
