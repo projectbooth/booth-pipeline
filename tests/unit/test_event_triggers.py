@@ -354,3 +354,29 @@ def test_a_restart_mid_burst_neither_loses_nor_doubles_the_fire(pg_store):
         assert bus.fire(at(30)) == [] and again.fire(at(30)) == []
     finally:
         restarted.close()
+
+
+def test_the_bus_client_can_sign_in_with_a_credential_file(tmp_path):
+    """Core's bus credential is a .creds file (ADR 0050): nats-py signs its challenge with nkeys, an
+    optional extra. Without it the deployed consumer could never connect (found on the real stack)."""
+    import asyncio
+
+    import nats
+    import nkeys
+
+    seed = nkeys.from_seed(b"SUAMLK2ZNL35WSMW37E7UD4VZ7ELPKW7DHC3BWBSD2GCZ7IUQQXZIORRBU")  # a throwaway user nkey
+    creds = tmp_path / "nats.creds"
+    creds.write_text(
+        "-----BEGIN NATS USER JWT-----\neyJ0eXAiOiJKV1QifQ.e30.sig\n------END NATS USER JWT------\n\n"
+        f"-----BEGIN USER NKEY SEED-----\n{seed.seed.decode()}\n------END USER NKEY SEED------\n"
+    )
+
+    async def go():
+        # The credential is read and its signer set up before any dial; nothing listens here, so a
+        # connection error or the timeout follows. A missing nkeys fails at once instead.
+        await asyncio.wait_for(nats.connect("nats://127.0.0.1:1", user_credentials=str(creds), allow_reconnect=False, connect_timeout=1), 3)
+
+    with pytest.raises(Exception) as e:
+        asyncio.run(go())
+    assert not isinstance(e.value, ModuleNotFoundError), e.value
+
