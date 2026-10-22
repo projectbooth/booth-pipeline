@@ -142,24 +142,28 @@ def test_a_dead_runner_is_a_retryable_failure_not_a_hang():
 
 
 def test_refreshed_tokens_are_pushed_to_the_running_task():
-    """A token lives ~10 min and a task can run for hours: the trusted pod keeps minting and pushing."""
-    tokens = iter(f"tok-{i}" for i in range(2, 100))
+    """A token lives ~10 min and a task can run for hours: the trusted pod keeps minting and pushing.
+
+    No fixed timings: under load the first refresh (0.6 s) can land before the task's first look, and a
+    slow machine sees fewer refreshes in a fixed window. The task watches until it has seen three tokens
+    (or 30 s pass), and what must hold is that each one it sees is newer than the last."""
+    tokens = iter(f"tok-{i}" for i in range(2, 1000))
     access = TaskAccess("acme", "tok-1", "http://x", "http://x", refresh=lambda: next(tokens))
     src = (
         "import os, time\n"
         "def run(ctx):\n"
-        "    seen = []\n"
-        "    for _ in range(14):\n"
+        "    seen, deadline = [], time.monotonic() + 30\n"
+        "    while len(seen) < 3 and time.monotonic() < deadline:\n"
         "        tok = open(os.environ['BOOTH_TOKEN_FILE']).read()\n"
         "        if not seen or seen[-1] != tok:\n"
         "            seen.append(tok); print('token', tok, flush=True)\n"
-        "        time.sleep(0.25)\n"
+        "        time.sleep(0.05)\n"
     )
     with serve_asgi(create_runner_app(SECRET, SubprocessRunner())) as url:
         lines = Lines()
         remote(url, refresh_seconds=0.6).run(inv(src, access=access), lines, Cancellation())
-    seen = [m.split()[1] for m in lines.stdout if m.startswith("token ")]
-    assert seen[0] == "tok-1" and len(seen) >= 3 and seen[1] == "tok-2"  # it moved on while the task ran
+    seen = [int(m.split()[1].removeprefix("tok-")) for m in lines.stdout if m.startswith("token ")]
+    assert len(seen) >= 3 and seen == sorted(set(seen)), seen  # it moved on, forward, while the task ran
 
 
 def test_a_failed_refresh_is_reported_once_and_does_not_kill_the_task():
