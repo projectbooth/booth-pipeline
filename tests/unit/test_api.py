@@ -601,6 +601,36 @@ def test_run_now_executes_the_dag_and_records_per_task_state(env):
     assert env.call("GET", f"/runs?pipelineId={p['id']}").json()["total"] == 1
 
 
+def test_a_runs_task_outputs_are_shown_to_editors_and_owners_but_not_viewers(env):
+    spec = {
+        "tasks": [
+            *etl_spec()["tasks"],
+            task("big", source="def run(ctx):\n    return 'x' * 70000\n"),
+            task("uses_big", ["big"], source="def run(ctx):\n    return len(ctx.inputs['big'])\n"),
+            task("boom", source="raise ValueError('no output')\n"),
+            task("nul", source="def run(ctx):\n    return 'a' + chr(0)\n"),  # jsonb can't hold it
+        ]
+    }
+    p = new_pipeline(env, spec=spec)
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    for token in ("tok-editor", "tok-owner"):
+        out = {t["taskKey"]: t["output"] for t in env.call("GET", f"/runs/{run['id']}", token).json()["tasks"]}
+        assert out["extract"] == {"value": [1, 2, 3]} and out["clean"] == {"value": [10, 20, 30]}
+        assert out["load"] == {"value": None}  # returned nothing: kept as such, unlike a task with no output yet
+        # too big to keep, but still handed downstream in full
+        assert out["big"] == {"omitted": "tooLarge", "bytes": 70002} and out["uses_big"] == {"value": 70000}
+        assert out["boom"] is None and out["nul"] == {"omitted": "unstorable", "bytes": 9}
+    viewer = env.call("GET", f"/runs/{run['id']}", "tok-viewer").json()["tasks"]
+    assert viewer and all("output" not in t for t in viewer)
+
+
+def test_a_retried_tasks_output_is_its_successful_attempts(env):
+    flaky = "def run(ctx):\n    if ctx.attempt < 2:\n        raise RuntimeError('flaky')\n    return {'attempt': ctx.attempt}\n"
+    p = new_pipeline(env, spec={"tasks": [task("a", source=flaky, retry={"maxRetries": 1})]})
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run["tasks"][0]["output"] == {"value": {"attempt": 2}}
+
+
 def test_run_logs_per_run_per_task_with_a_polling_cursor(env):
     p = new_pipeline(env)
     run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])

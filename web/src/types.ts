@@ -268,7 +268,13 @@ export interface TaskRun {
   error: string | null;
   /** ADR 0119: where the latest attempt ran outside its pod (a booth-spark application). */
   external?: { kind: "spark"; id: string; state: string; reason: string | null } | null;
+  /** What the successful attempt returned. Editors and owners only (absent for viewers); null until an
+   *  attempt succeeds, and for runs from before outputs were kept. */
+  output?: TaskOutput | null;
 }
+
+/** A task's output as the run keeps it: the value, or why it wasn't kept (it still reached its downstream tasks). */
+export type TaskOutput = { value: unknown } | { omitted: "tooLarge" | "unstorable"; bytes: number };
 
 export interface RunDetail extends Run {
   tasks: TaskRun[];

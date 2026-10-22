@@ -169,6 +169,9 @@ class TaskRun:
     error: str | None = None
     # ADR 0119: where the latest attempt ran outside its pod ({kind: spark, id, state, reason}).
     external: dict[str, Any] | None = None
+    # What the successful attempt returned, as the run keeps it (runs.kept_output): {"value": ...}, or
+    # {"omitted": "tooLarge"|"unstorable", "bytes": n}. None until an attempt succeeds.
+    output: dict[str, Any] | None = None
 
 
 @dataclass

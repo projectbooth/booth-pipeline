@@ -25,6 +25,7 @@ import {
 } from "../ui/primitives";
 import { ownerLabel } from "./pipeline/RunsAs";
 import { LogViewer } from "./run/LogViewer";
+import { TaskOutputPanel } from "./run/TaskOutput";
 
 // S3 — one Run (docs/decisions/0016 §4): its DAG coloured by each node's status, a per-node
 // table, and logs for the whole run or one node. Refreshes while active, settles once it ends.
@@ -70,6 +71,7 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
   }, [version]);
   const { resolved } = useResolved(v.api, refs);
   const statuses = useMemo(() => Object.fromEntries(run.tasks.map((t) => [t.taskKey, t.status])) as Record<string, TaskStatus>, [run.tasks]);
+  const selectedTask = run.tasks.find((t) => t.taskKey === selected);
   const doneCount = run.tasks.filter((t) => !["pending", "running", "retrying"].includes(t.status)).length;
 
   async function cancel() {
@@ -192,6 +194,8 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
           </tbody>
         </table>
       </div>
+
+      {v.canWrite && selectedTask && <TaskOutputPanel task={selectedTask} />}
 
       <section aria-label="Logs" className="flex flex-col gap-2">
         <div className="flex items-center justify-between">

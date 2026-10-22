@@ -703,6 +703,7 @@ def spark_e2e() -> int:
     check("the driver log is in the run log as the spark stream", any(ln.stream == "spark" and "counted 21 rows on attempt 1" in ln.message for ln in lines))
     check("its state changes are system lines", any(ln.stream == "system" and ln.message == "spark: running → succeeded" for ln in lines))
     check("the output reached the downstream task", any(ln.task_key == "use" and "downstream got 21" in ln.message for ln in lines))
+    check("the run keeps both tasks' outputs to show", tasks["agg"].output == {"value": {"rows": 21}} and tasks["use"].output == {"value": 42})
     check("the run was authorized at its start", any("authorized: core will issue this run's tokens" in ln.message for ln in lines))
     mints = [m for m in http("GET", "/mints") if m["subject"] == f"pipeline:acme:{run.id}"]
     check("its tokens name pipeline:acme:<runId> and the owner", bool(mints) and all(m["owner"] == "u-ci-owner" for m in mints))
@@ -869,6 +870,7 @@ def spark_real() -> int:
     check("the driver log came through the real log cursor", any(ln.stream == "spark" and "counted 21 rows on attempt 1" in ln.message for ln in lines))
     check("its real state changes are system lines", any(ln.stream == "system" and ln.message.startswith("spark: ") and "→ running" in ln.message for ln in lines))
     check("the output line was found and reached the downstream task", any(ln.task_key == "use" and "downstream got 21" in ln.message for ln in lines))
+    check("the run keeps the Spark task's output to show", tasks["agg"].output == {"value": {"rows": 21}})
 
     # 4. booth-spark's own refusal, as Spark says it
     pid = pipeline("real-refused", [("agg", "x = 1\n", [], {"runner": "spark", "spark": {"conf": {"spark.driver.extraJavaOptions": "-Dx"}}})])

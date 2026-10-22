@@ -478,6 +478,17 @@ def test_concurrent_exclusive_triggers_admit_exactly_one(store):
     assert results.count("ok") == 1 and results.count("busy") == 7
 
 
+def test_a_task_runs_kept_output(store):
+    p = store.create_pipeline(WS, "etl", "", "a")
+    run = store.create_run(new_run(p), ["a"])
+    (t,) = store.list_task_runs(run.id)
+    assert t.output is None
+    for kept in ({"value": {"rows": [1, 2], "note": "é"}}, {"value": None}, {"omitted": "tooLarge", "bytes": 70002}):
+        t.output = kept
+        store.update_task_run(t)
+        assert store.list_task_runs(run.id)[0].output == kept
+
+
 def test_a_task_runs_external_record_and_hiding_a_log_stream(store):
     """ADR 0119: where an attempt ran (a Spark application), and the driver log hidden from viewers."""
     p = store.create_pipeline(WS, "etl", "", "a")
