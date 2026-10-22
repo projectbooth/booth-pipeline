@@ -84,7 +84,12 @@ export function EventTriggerStatusLine({ v, pipelineId }: { v: ViewCtx; pipeline
           catch up.
         </Banner>
       )}
-      {s.bus.configured && !s.bus.connected && s.enabled && <Banner tone="warn">This replica isn't connected to the event bus right now; events wait on the bus until it is.</Banner>}
+      {s.enabled && !s.bus.connected && (
+        <Banner tone="warn">
+          <strong>Event bus unavailable.</strong> {s.bus.reason ?? "This replica isn't connected to the event bus."} This trigger won&apos;t fire until it&apos;s back;
+          the schedule and Run now are unaffected.
+        </Banner>
+      )}
     </div>
   );
 }

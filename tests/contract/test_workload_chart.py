@@ -98,6 +98,9 @@ def test_the_event_bus_credential_is_mounted_into_the_api_pod_only(api, task):
     c = pod(api)["containers"][0]
     assert {"name": "event-bus", "mountPath": "/etc/booth/event-bus", "readOnly": True} in c["volumeMounts"]
     assert {e["name"]: e.get("value") for e in c["env"]}["BOOTH_PIPELINE_EVENT_BUS_DIR"] == "/etc/booth/event-bus"
+    # Optional (ADR 0123 revision 2026-10-22): the pod starts, and schedules run, before core writes it.
+    (vol,) = [v for v in pod(api)["volumes"] if v["name"] == "event-bus"]
+    assert vol["secret"] == {"secretName": "booth-event-bus-credentials", "optional": True}
 
 
 def test_disabling_event_triggers_omits_the_events_field_the_secret_and_the_mount():

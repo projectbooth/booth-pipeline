@@ -165,7 +165,9 @@ spec:
         {{- if .Values.eventTriggers.enabled }}
         - name: event-bus
           secret:
-            # Not `optional`, as above: without it event triggers can't be turned on, and a pod that
-            # waits for core to write it says so plainly.
+            # `optional` (ADR 0123 revision 2026-10-22): nothing but event triggers needs the bus, so the
+            # pod starts without it. The consumer idles until core writes it (picked up without a restart)
+            # and the Schedule tab says the bus is unavailable meanwhile.
             secretName: booth-event-bus-credentials
+            optional: true
         {{- end }}

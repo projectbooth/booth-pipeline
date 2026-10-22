@@ -62,6 +62,16 @@ describe("the event trigger", () => {
     expect(await screen.findByText(/Runs on events\./)).toBeInTheDocument();
   });
 
+  it("says plainly when the event bus is unavailable, and that schedules are unaffected", async () => {
+    const p = silver();
+    b.eventTriggerStatus.set(p.id, {
+      bus: { configured: true, connected: false, state: "unavailable", reason: "Authorization Violation" },
+    });
+    renderApp(b, { path: path(p.id, "schedule") });
+    const status = await screen.findByLabelText("Event trigger status");
+    expect(status).toHaveTextContent("Event bus unavailable. Authorization Violation This trigger won't fire until it's back; the schedule and Run now are unaffected.");
+  });
+
   it("warns when events may have been missed, and shows a queued follow-up", async () => {
     const p = silver();
     b.eventTriggerStatus.set(p.id, { queued: true, pendingEvents: 1, missedEventsAt: "2026-10-21T10:00:00+00:00" });

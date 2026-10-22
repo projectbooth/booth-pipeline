@@ -95,7 +95,9 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   pipeline's own runs (`pipeline:<ws>:<runId>`) don't trigger it. Not covered: files written straight to object
   storage (Spark, the lakehouse) and rows written straight to PostgreSQL; keep a slow schedule as the safety net. Paths
   and API names (the last event, a run's events) are shown to editors and owners only. Needs the chart's
-  `eventTriggers.enabled` (default on), which declares `events.subscribe` so core grants a bus credential.
+  `eventTriggers.enabled` (default on), which declares `events.subscribe` so core grants a bus credential. The bus is
+  optional: without it (or with it down) the pod starts, schedules and Run now work, and the Schedule tab says
+  "Event bus unavailable" with the reason.
 - **Spark tasks** (ADR 0119; [design](docs/design-spark-runner.md)). A Python task can run on booth-spark: "Runs on:
   Spark" in its settings, with driver and executor sizes, a few Spark settings, arguments, and the data it may use
   (the workspace's database, its lakehouse, up to 4 storage locations). Its saved code runs as PySpark with the same

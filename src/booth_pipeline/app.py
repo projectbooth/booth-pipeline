@@ -170,13 +170,18 @@ def create_app(
     # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
     manager.on_run_finished = scheduler.wake
     event_bus = EventBus(cfg, store, TriggerIngest(store, scheduler.wake))
-    service.event_bus = event_bus.configured
+    service.event_bus = lambda: event_bus.configured
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if start_scheduler:
             scheduler.start()
-            event_bus.start()
+            # Event triggers are optional (ADR 0123 revision 2026-10-22): the consumer starts on its own
+            # thread and can't keep the pod from starting or the scheduler from running.
+            try:
+                event_bus.start()
+            except Exception:  # noqa: BLE001
+                log.exception("event triggers: the consumer could not start; schedules are unaffected")
         yield
         event_bus.stop()
         scheduler.stop()

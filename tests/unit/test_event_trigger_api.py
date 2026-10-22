@@ -74,7 +74,7 @@ def test_a_trigger_is_refused_for_an_unknown_backend_or_without_the_bus(env: Env
     r = put_trigger(env, p["id"], {"match": [INBOX]})
     assert r.status_code == 422 and "event bus" in r.json()["error"]
     assert put_trigger(env, p["id"], {"match": [INBOX], "enabled": False}).status_code == 200  # a paused one still saves
-    assert env.call("GET", "/config").json()["eventTriggers"] == {"available": False}
+    assert env.call("GET", "/config").json()["eventTriggers"]["available"] is False
 
 
 def test_an_event_fired_run_end_to_end(env: Env):
@@ -111,7 +111,7 @@ def test_the_trigger_status_line(env: Env):
     assert s["enabled"] and s["pendingEvents"] == 1 and not s["queued"]
     assert s["nextFireAt"] == (now + timedelta(seconds=10)).isoformat()
     assert s["lastEvent"]["path"] == "finance/dev/inbox/a.csv" and s["lastEvent"]["principal"] == "streamlit:acme:finance-dev"
-    assert s["bus"] == {"configured": False, "connected": False}  # this test app has no real bus
+    assert s["bus"]["state"] == "unavailable" and "no event-bus credential" in s["bus"]["reason"]  # this test app has no bus
     viewer = env.call("GET", f"/pipelines/{p['id']}/event-trigger", "tok-viewer").json()
     assert viewer["lastEvent"] == {"type": "storage.object.created"} and viewer["lastEventAt"] == s["lastEventAt"]
 

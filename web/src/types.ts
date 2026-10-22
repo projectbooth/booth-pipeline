@@ -171,7 +171,8 @@ export interface EventTrigger {
 /** GET /pipelines/{id}/event-trigger. `lastEvent` has a path or API only for editors and owners. */
 export interface EventTriggerStatus {
   enabled: boolean;
-  bus: { configured: boolean; connected: boolean };
+  /** `state` and `reason` say why events may not be firing (absent from a backend before ADR 0123's 2026-10-22 revision). */
+  bus: { configured: boolean; connected: boolean; state?: "connected" | "unavailable"; reason?: string | null };
   nextFireAt: string | null;
   pendingSince: string | null;
   pendingEvents: number;

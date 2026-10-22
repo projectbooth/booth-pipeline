@@ -221,9 +221,18 @@ Where the build differs from sections 1-9, or settles what they left open:
 - **Who sees what.** An event-fired run's "triggered by" says "3 files" or "1 write" with no path. Its
   `triggerEvents.events` and the status endpoint's `lastEvent` detail are for editors and owners only. Viewers
   get the counts and the time.
-- **The bus credential is the API pod's alone.** It's mounted there (not `optional`: the pod waits for core, as for
-  the minting credential), and `config.py` refuses to start if it's present while tasks would run in the same pod.
-  Chart value `eventTriggers.enabled` (default on) declares `events.subscribe` and mounts it.
+- **The bus credential is the API pod's alone, and optional** (ADR 0123 revision 2026-10-22). It's mounted only
+  there, and `config.py` refuses to start if it's present while tasks would run in the same pod. The mount is
+  `optional`: nothing but event triggers needs the bus. Without the credential:
+  - the pod starts;
+  - the consumer idles and looks again every 15 s (a Secret written later is picked up without a restart);
+  - the status endpoint and the Schedule tab say "Event bus unavailable", with the reason;
+  - cron and interval schedules, Run now and every run are unaffected.
+
+  Every other failure (a credential the bus rejects, the client unable to use it, no stream, the bus gone
+  mid-session) only ends the consumer's own session, which it retries on its own thread.
+  `tests/unit/test_event_bus_failures.py` proves each of these against real NATS servers, with an interval schedule
+  firing throughout. Chart value `eventTriggers.enabled` (default on) declares `events.subscribe` and mounts it.
 - **An older UI keeps the trigger.** `PUT /schedule` without `eventTrigger` keeps the saved one; `null` removes it.
 - **Tests.**
   - `tests/unit/test_event_triggers.py`, against both stores:

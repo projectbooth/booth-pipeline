@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from .auth import Identity
@@ -98,8 +99,9 @@ class PipelineService:
     storage: StorageClient
     # ADR 0120: core's service accounts, read as the caller (checked when one is named as an owner).
     accounts: ServiceAccountsClient | None = None
-    # ADR 0123: whether this module holds an event-bus credential, without which no event trigger fires.
-    event_bus: bool = False
+    # ADR 0123: whether this module holds an event-bus credential, without which no event trigger fires. A
+    # callable (the app's EventBus.configured, read each time: the Secret may arrive later) or a fixed bool.
+    event_bus: Any = False
 
     # ---- pipelines ----
     def create_pipeline(self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str) -> tuple[Pipeline, PipelineVersion | None]:
@@ -224,7 +226,7 @@ class PipelineService:
         if event_trigger is not None and event_trigger.enabled:
             if p.latest_version == 0:
                 raise ModelError("the pipeline has no saved version to run — save it in the builder first", "eventTrigger")
-            if not self.event_bus:
+            if not (self.event_bus() if callable(self.event_bus) else self.event_bus):
                 raise ModelError(
                     "event triggers need the platform's event bus, and this module has no bus credential (booth-core grants one from the module's manifest)",
                     "eventTrigger",

@@ -225,7 +225,7 @@ def test_the_app_wires_its_consumer_to_its_scheduler_end_to_end(url):
         pid = r.json()["id"]
         r = env.call("PUT", f"/pipelines/{pid}/schedule", json={"eventTrigger": {"match": [{"storage": {"backendId": "local", "prefix": "inbox/"}}], "debounceSeconds": 1}})
         assert r.status_code == 200, r.text
-        assert env.call("GET", "/config").json()["eventTriggers"] == {"available": True}
+        assert env.call("GET", "/config").json()["eventTriggers"]["available"] is True
         publish(url, [f"inbox/{i:02}.csv" for i in range(74)])
         deadline, runs = time.monotonic() + 30, []
         while time.monotonic() < deadline and not runs:
@@ -236,7 +236,7 @@ def test_the_app_wires_its_consumer_to_its_scheduler_end_to_end(url):
         assert run["status"] == "succeeded" and run["trigger"] == "event" and run["triggerEvents"]["count"] == 74
         assert "trigger event 74" in [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs").json()["items"]]
         status = env.call("GET", f"/pipelines/{pid}/event-trigger").json()
-        assert status["bus"] == {"configured": True, "connected": True} and status["lastFiredAt"]
+        assert status["bus"] == {"configured": True, "connected": True, "state": "connected", "reason": None} and status["lastFiredAt"]
         time.sleep(3)
         assert len(env.call("GET", f"/runs?pipelineId={pid}").json()["items"]) == 1
 

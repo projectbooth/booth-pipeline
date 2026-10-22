@@ -236,7 +236,7 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
         "catalogConfigured": svc(request).catalog.configured,
         "pip": pip_status(cfg),
         # ADR 0123: whether an event trigger can be turned on here (this module holds a bus credential).
-        "eventTriggers": {"available": request.app.state.event_bus.configured},
+        "eventTriggers": {"available": request.app.state.event_bus.configured, "bus": request.app.state.event_bus.state()},
         # ADR 0119: the Spark runner's settings the builder explains, when this install has it.
         "spark": {"retryMinDelaySeconds": cfg.spark_retry_min_delay_seconds} if "spark" in svc(request).registry.available_ids() else None,
     }
@@ -323,7 +323,8 @@ def event_trigger_status(request: Request, pipeline_id: str, ident: Identity = D
         last = {"type": last.get("type")}
     return {
         "enabled": bool(p.event_trigger and p.event_trigger.enabled),
-        "bus": {"configured": bus.configured, "connected": bus.connected},
+        # {configured, connected, state: connected|unavailable, reason}: why events may not be firing.
+        "bus": bus.state(),
         "nextFireAt": _iso(st.fire_at) if st else None,
         "pendingSince": _iso(st.pending_since) if st else None,
         "pendingEvents": st.event_count if st else 0,
