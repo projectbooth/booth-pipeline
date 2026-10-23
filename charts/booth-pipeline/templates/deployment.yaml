@@ -95,6 +95,14 @@ spec:
             - name: BOOTH_WORKLOAD_MINT_DIR
               value: /etc/booth/workload
             {{- end }}
+            {{- if .Values.eventTriggers.enabled }}
+            - name: BOOTH_PIPELINE_EVENT_BUS_DIR
+              value: /etc/booth/event-bus
+            - name: BOOTH_PIPELINE_EVENTS_ACK_WAIT_SECONDS
+              value: {{ .Values.eventTriggers.ackWaitSeconds | quote }}
+            - name: BOOTH_PIPELINE_EVENTS_MAX_ACK_PENDING
+              value: {{ .Values.eventTriggers.maxAckPending | quote }}
+            {{- end }}
             - name: BOOTH_PIPELINE_MAX_WORKERS
               value: {{ .Values.execution.maxWorkers | quote }}
             - name: BOOTH_PIPELINE_SCHEDULER_INTERVAL_SECONDS
@@ -133,6 +141,13 @@ spec:
               mountPath: /etc/booth/workload
               readOnly: true
             {{- end }}
+            {{- if .Values.eventTriggers.enabled }}
+            # The event-bus credential (ADR 0050, 0123): it can read every workspace's Storage and API
+            # events, so, like the minting credential, never a task pod (config.py refuses otherwise).
+            - name: event-bus
+              mountPath: /etc/booth/event-bus
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
@@ -146,4 +161,13 @@ spec:
             # Not `optional`: if booth-core has not written it yet the pod waits, loudly, rather than
             # starting without an identity for its tasks.
             secretName: booth-workload-minting-credentials
+        {{- end }}
+        {{- if .Values.eventTriggers.enabled }}
+        - name: event-bus
+          secret:
+            # `optional` (ADR 0123 revision 2026-10-22): nothing but event triggers needs the bus, so the
+            # pod starts without it. The consumer idles until core writes it (picked up without a restart)
+            # and the Schedule tab says the bus is unavailable meanwhile.
+            secretName: booth-event-bus-credentials
+            optional: true
         {{- end }}

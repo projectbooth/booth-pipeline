@@ -58,6 +58,25 @@ class StorageClient:
     def close(self) -> None:
         self._http.close()
 
+    def backend_exists(self, token: str, workspace: str, backend_id: str) -> bool:
+        """Whether this workspace has the backend, asked as the caller (an event trigger's Storage match)."""
+        if not self._base:
+            raise StorageUnavailable("booth-storage is not configured for this pipeline module (BOOTH_CORE_URL is unset)")
+        url = f"{self._base}/backends/{quote(backend_id, safe='')}"
+        try:
+            resp = self._http.get(url, headers={"Authorization": f"Bearer {token}", "X-Workspace": workspace})
+        except httpx.HTTPError as e:
+            raise StorageUnavailable(f"booth-storage is unreachable: {e.__class__.__name__}") from e
+        if resp.status_code == 404:
+            if _is_json_error(resp):
+                return False
+            raise StorageUnavailable("booth-storage is not installed (the gateway does not know a 'storage' module)")
+        if resp.status_code in (401, 403):
+            raise StorageDenied("booth-storage refused your credentials")
+        if resp.status_code != 200:
+            raise StorageUnavailable(f"booth-storage returned HTTP {resp.status_code}")
+        return True
+
     def fetch(self, token: str, workspace: str, backend_id: str, path: str) -> StorageCode:
         if not self._base:
             raise StorageUnavailable("booth-storage is not configured for this pipeline module (BOOTH_CORE_URL is unset)")

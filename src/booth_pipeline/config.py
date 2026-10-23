@@ -93,6 +93,16 @@ class Config:
     storage_url: str = ""
     catalog_url: str = ""
 
+    # The event bus (ADR 0050, 0123): the Secret core writes when the manifest declares `events`
+    # (`url` and `nats.creds`). BOOTH_PIPELINE_EVENTS_URL overrides the URL (tests run an
+    # unauthenticated NATS with no credential file). No URL: no event trigger can be turned on.
+    event_bus_dir: str = "/etc/booth/event-bus"
+    event_bus_url_override: str = ""
+    # Event triggers' JetStream consumer: how long a delivered event may wait for its ack before
+    # it is redelivered, and how many may be outstanding at once.
+    events_ack_wait_seconds: int = 30
+    events_max_ack_pending: int = 1000
+
     @classmethod
     def from_env(cls) -> Config:
         dev_memory = _bool("BOOTH_PIPELINE_DEV_MEMORY")
@@ -126,6 +136,10 @@ class Config:
             workload_mint_dir=os.environ.get("BOOTH_WORKLOAD_MINT_DIR", "/etc/booth/workload"),
             storage_url=os.environ.get("BOOTH_PIPELINE_STORAGE_URL", "").rstrip("/"),
             catalog_url=os.environ.get("BOOTH_PIPELINE_CATALOG_URL", "").rstrip("/"),
+            event_bus_dir=os.environ.get("BOOTH_PIPELINE_EVENT_BUS_DIR", "/etc/booth/event-bus"),
+            event_bus_url_override=os.environ.get("BOOTH_PIPELINE_EVENTS_URL", ""),
+            events_ack_wait_seconds=_int("BOOTH_PIPELINE_EVENTS_ACK_WAIT_SECONDS", 30, 1),
+            events_max_ack_pending=_int("BOOTH_PIPELINE_EVENTS_MAX_ACK_PENDING", 1000, 1),
             runner_env_passthrough=tuple(
                 x.strip() for x in os.environ.get("BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH", "").split(",") if x.strip()
             ),
@@ -141,6 +155,22 @@ class Config:
     def catalog_base(self) -> str:
         return self.catalog_url or (f"{self.core_url}/modules/catalog" if self.core_url else "")
 
+    @property
+    def event_bus_url(self) -> str:
+        if self.event_bus_url_override:
+            return self.event_bus_url_override
+        from pathlib import Path
+
+        f = Path(self.event_bus_dir, "url")
+        return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
+
+    @property
+    def event_bus_creds_file(self) -> str:
+        from pathlib import Path
+
+        f = Path(self.event_bus_dir, "nats.creds")
+        return str(f) if f.is_file() else ""
+
     def has_minting_credential(self) -> bool:
         from pathlib import Path
 
@@ -155,6 +185,12 @@ class Config:
                 f"a workload-minting credential is mounted at {self.workload_mint_dir} but BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset, "
                 "so tasks would run in the same pod and could read it (ADR 0057/0096). Run tasks as Jobs, "
                 "or do not give it the credential"
+            )
+        if not self.task_job_template and self.event_bus_creds_file:
+            # The same rule for the bus credential: it reads every workspace's Storage and API events.
+            raise ConfigError(
+                f"an event-bus credential is mounted at {self.event_bus_dir} but BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset, "
+                "so tasks would run in the same pod and could read it. Run tasks as Jobs, or do not give it the credential"
             )
         if not self.dev_memory and not self.database_dsn:
             raise ConfigError(

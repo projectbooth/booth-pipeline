@@ -77,6 +77,15 @@ jobs:
             --from-literal=url=http://booth-core.booth-system.svc:8080/api/internal/workload-tokens \
             --from-literal=issuer=http://booth-core.booth-system.svc:8080
 
+      - name: NATS with JetStream, and the Secret booth-core would provision for the event bus (ADR 0050, 0123), as a stand-in
+        # The API pod mounts booth-event-bus-credentials and waits for it. Core's bus needs a credential;
+        # this stand-in doesn't, so the Secret carries only the URL (config.py then connects without one).
+        run: |
+          kubectl apply -n booth-pipeline -f tests/integration/fixtures/nats.yaml
+          kubectl -n booth-pipeline rollout status deployment/nats --timeout=180s
+          kubectl -n booth-pipeline create secret generic booth-event-bus-credentials \
+            --from-literal=url=nats://nats.booth-pipeline.svc:4222
+
       - name: Install the chart
         run: |
           helm install booth-pipeline charts/booth-pipeline \
@@ -94,6 +103,7 @@ jobs:
           # checked on the LIVE resource: a CRD that does not know a field prunes it silently
           test "$(m '{.spec.database.enabled}')" = "true"
           test "$(m '{.spec.workloadIdentity.mint}')" = "true"
+          test "$(m '{.spec.events.subscribe}')" = '["storage.object.created","api.write.committed"]'
 
       - name: /healthz is 200 (migrations ran, the database is reachable)
         run: |
@@ -322,6 +332,10 @@ jobs:
         # booth-spark 0.3.0). The stand-in core signs real tokens and proxies as core's gateway does. See
         # the script's header.
         run: bash tests/integration/spark-real.sh .
+
+      - name: Event triggers — a 74-file burst makes one run that sees ctx.trigger, queue_one makes one follow-up and skip none, the loop guard, and a restart mid-burst (ADR 0123)
+        # The deployed pod's own consumer and scheduler, against a real JetStream. See the script's header.
+        run: bash tests/integration/events.sh .
 
       - name: Dump logs on failure
         if: failure()

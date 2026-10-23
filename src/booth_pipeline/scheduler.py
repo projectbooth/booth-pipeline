@@ -23,6 +23,12 @@ interval, because the claim advances ``next_run_at`` from *now*. A nightly repor
 three nights should run once when the service returns, not three times in a row. This lives in the
 store's ``claim_due_pipelines`` and is untouched by any of the above.
 
+Event triggers (ADR 0123) ride on the same loop. The bus consumer only records a burst and its
+``fire_at`` in the database; this loop claims due fires (``claim_due_event_triggers``, the same
+SKIP LOCKED claim) and starts the runs, so a fire is started once whichever replica sees it, and a
+restart loses nothing. The consumer calls ``wake()`` after recording an event, so the replica that
+saw it re-indexes at once; the others see it within one refresh.
+
 Dagster ships its own scheduler daemon; we do not use it. It watches code locations, and our
 pipelines are rows in a database compiled per run (docs/decisions/0003) — driving Dagster's daemon
 would mean generating and hot-reloading code locations on every save.
@@ -56,6 +62,7 @@ class Scheduler:
         self._manager = manager
         self._index_refresh_seconds = interval_seconds
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         # Loop-only state (unused by direct tick() calls): the index's earliest known fire time,
         # and when (monotonic) it was last refreshed from the database.
@@ -71,8 +78,16 @@ class Scheduler:
             run = self._service.start_scheduled(pipeline)
             if run:
                 started.append(run.id)
+        for pipeline, fired in self._store.claim_due_event_triggers(now, CLAIM_BATCH):
+            run = self._service.start_event_fired(pipeline, fired)
+            if run:
+                started.append(run.id)
         self._manager.sweep()
         return started
+
+    def wake(self) -> None:
+        """Re-index now: something (an event, a run ending) may have made a fire due sooner."""
+        self._wake.set()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
@@ -80,12 +95,14 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout=10)
 
     def _refresh_index(self, now: datetime) -> None:
         upcoming = self._store.list_upcoming(INDEX_SCAN_LIMIT)
-        self._next_known_fire = upcoming[0].next_run_at if upcoming else None
+        fires = [t for t in (upcoming[0].next_run_at if upcoming else None, self._store.next_event_fire_at()) if t is not None]
+        self._next_known_fire = min(fires) if fires else None
         self._index_loaded_at = time.monotonic()
         if len(upcoming) >= INDEX_SCAN_LIMIT:
             # More pipelines are due soon than one scan covers — sweeping through them at
@@ -114,7 +131,15 @@ class Scheduler:
                 except Exception:  # noqa: BLE001 - a bad refresh (a database blip) must not end scheduling for good
                     log.exception("scheduler index refresh failed; will retry")
 
-            if self._stop.wait(self._sleep_seconds(now)):
+            if self._wake.wait(self._sleep_seconds(now)):
+                self._wake.clear()
+                if self._stop.is_set():
+                    break
+                try:
+                    self._refresh_index(datetime.now(UTC))
+                except Exception:  # noqa: BLE001
+                    log.exception("scheduler index refresh failed; will retry")
+            if self._stop.is_set():
                 break
 
             now = datetime.now(UTC)

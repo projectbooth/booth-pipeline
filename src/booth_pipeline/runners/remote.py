@@ -84,6 +84,7 @@ class RemoteRunner:
             "timeoutSeconds": inv.timeout_seconds,
             "requirements": list(inv.requirements),  # ADR 0115: installed before; the far side only checks
             "spark": inv.spark,  # ADR 0119: the far side runs the Spark client instead of the task's code
+            "trigger": inv.trigger,  # ADR 0123: ctx.trigger
             "access": None
             if inv.access is None
             else {

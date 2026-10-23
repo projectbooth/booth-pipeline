@@ -74,7 +74,7 @@ def secret_names(d: dict) -> set[str]:
 def test_the_manifest_declares_workload_identity_so_core_provisions_a_minting_credential(chart):
     module = by_kind(chart, "BoothModule", "pipeline")
     assert module["spec"]["workloadIdentity"] == {"mint": True}  # module-manifest.md: opt-in, omitted => no credential
-    assert "events" not in module["spec"]  # still no bus access
+    assert module["spec"]["events"] == {"subscribe": ["storage.object.created", "api.write.committed"]}  # ADR 0123, nothing more
 
 
 def test_disabling_workload_identity_omits_the_field_the_secret_and_the_mount():
@@ -90,6 +90,25 @@ def test_the_minting_credential_is_mounted_into_the_api_pod(api):
     c = pod(api)["containers"][0]
     assert {"name": "workload-minting", "mountPath": "/etc/booth/workload", "readOnly": True} in c["volumeMounts"]
     assert {e["name"]: e.get("value") for e in c["env"]}["BOOTH_WORKLOAD_MINT_DIR"] == "/etc/booth/workload"
+
+
+def test_the_event_bus_credential_is_mounted_into_the_api_pod_only(api, task):
+    """ADR 0123: it reads every workspace's Storage and API events, so it is the API pod's alone."""
+    assert "booth-event-bus-credentials" in secret_names(api) and "booth-event-bus-credentials" not in secret_names(task)
+    c = pod(api)["containers"][0]
+    assert {"name": "event-bus", "mountPath": "/etc/booth/event-bus", "readOnly": True} in c["volumeMounts"]
+    assert {e["name"]: e.get("value") for e in c["env"]}["BOOTH_PIPELINE_EVENT_BUS_DIR"] == "/etc/booth/event-bus"
+    # Optional (ADR 0123 revision 2026-10-22): the pod starts, and schedules run, before core writes it.
+    (vol,) = [v for v in pod(api)["volumes"] if v["name"] == "event-bus"]
+    assert vol["secret"] == {"secretName": "booth-event-bus-credentials", "optional": True}
+
+
+def test_disabling_event_triggers_omits_the_events_field_the_secret_and_the_mount():
+    items = docs("--set", "eventTriggers.enabled=false")
+    assert "events" not in by_kind(items, "BoothModule", "pipeline")["spec"]
+    api = by_kind(items, "Deployment")
+    assert "booth-event-bus-credentials" not in secret_names(api)
+    assert "BOOTH_PIPELINE_EVENT_BUS_DIR" not in {e["name"] for e in pod(api)["containers"][0]["env"]}
 
 
 def test_the_pod_that_runs_user_code_holds_no_module_credential(task):

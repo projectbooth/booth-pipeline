@@ -578,3 +578,91 @@ Trigger = Annotated[CronTrigger | IntervalTrigger, Field(discriminator="type"), 
 # means "the cron-shaped trigger" — kept so `Schedule(cron=..., ...)` still constructs the same
 # thing it always did. Prefer `CronTrigger` in new code; the wire shape is unaffected either way.
 Schedule = CronTrigger
+
+
+# ---- The event trigger (ADR 0123) ------------------------------------------------------------
+#
+# Not a member of `Trigger`: it lives in its own field beside `schedule` (ADR 0123 revision), so a
+# pipeline can have one time trigger AND one event trigger, the slow one being the safety net.
+
+MAX_EVENT_MATCHES = 10
+API_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")  # booth-api's slug grammar
+_API_SLUG_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def clean_storage_prefix(prefix: str) -> str:
+    """booth-storage's ``CleanPrefix``: "" (the whole backend) or relative segments ending in "/".
+    A leading "/" is refused, not stripped, as storage does: one folder must have one address."""
+    p = prefix.removesuffix("/")
+    if p == "":
+        return ""
+    if p.startswith("/") or "\\" in p or "\x00" in p:
+        raise ValueError("a folder is relative to the backend root, with forward slashes and no leading '/'")
+    if any(seg in ("", ".", "..") for seg in p.split("/")):
+        raise ValueError("a folder can't contain empty, '.' or '..' segments")
+    if len(p) > 1024:
+        raise ValueError("a folder is at most 1024 characters")
+    return p + "/"
+
+
+class StorageMatch(Wire):
+    """A file created in this booth-storage backend, under this folder ("" is the whole backend)."""
+
+    backend_id: str = Field(min_length=1, max_length=200)
+    prefix: str = Field("", max_length=1025)
+
+    @field_validator("prefix")
+    @classmethod
+    def _prefix(cls, v: str) -> str:
+        return clean_storage_prefix(v)
+
+
+class ApiMatch(Wire):
+    """A committed write through booth-api to one of these APIs, or any API whose slug starts so."""
+
+    slugs: list[str] = Field(default_factory=list, max_length=50)
+    slug_prefix: str = ""
+
+    @model_validator(mode="after")
+    def _one(self) -> ApiMatch:
+        if bool(self.slugs) == bool(self.slug_prefix):
+            raise ValueError("give either a list of API slugs or a slug prefix, not both and not neither")
+        for s in self.slugs:
+            if not API_SLUG_RE.match(s):
+                raise ValueError(f"{s!r} is not an API slug (lowercase letters, digits and '-')")
+        if self.slug_prefix and not _API_SLUG_PREFIX_RE.match(self.slug_prefix):
+            raise ValueError(f"{self.slug_prefix!r} is not the start of an API slug (lowercase letters, digits and '-')")
+        return self
+
+
+class EventMatch(Wire):
+    storage: StorageMatch | None = None
+    api: ApiMatch | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> EventMatch:
+        if (self.storage is None) == (self.api is None):
+            raise ValueError("each match is either {storage: …} or {api: …}")
+        return self
+
+
+class EventTrigger(Wire):
+    """Run when files are created in booth-storage or rows are written through booth-api (ADR 0123).
+    One run per burst: it fires ``debounce_seconds`` after the last matching event, or at most
+    ``max_wait_seconds`` after the first, and never sooner than ``min_gap_seconds`` after its last fire."""
+
+    type: Literal["event"] = "event"
+    enabled: bool = True
+    match: list[EventMatch] = Field(min_length=1, max_length=MAX_EVENT_MATCHES)
+    debounce_seconds: int = Field(10, ge=1, le=3600)
+    max_wait_seconds: int = Field(60, ge=1, le=86400)
+    # When this pipeline already has an active run (and doesn't allow concurrent runs): run once more
+    # after it ends, or drop the events that arrived during it.
+    when_running: Literal["queue_one", "skip"] = "queue_one"
+    min_gap_seconds: int = Field(MIN_INTERVAL_SECONDS, ge=MIN_INTERVAL_SECONDS, le=86400)
+
+    @model_validator(mode="after")
+    def _wait(self) -> EventTrigger:
+        if self.max_wait_seconds < self.debounce_seconds:
+            raise ValueError("maxWaitSeconds can't be shorter than debounceSeconds")
+        return self

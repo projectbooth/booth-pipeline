@@ -11,6 +11,7 @@ import threading
 from datetime import datetime
 from uuid import uuid4
 
+from .. import triggers
 from ..model import PipelineSpec, TaskConfig
 from ..records import (
     RUN_ACTIVE,
@@ -18,6 +19,7 @@ from ..records import (
     RUN_RUNNING,
     RUN_TERMINAL,
     TASK_PENDING,
+    EventTriggerState,
     LogLine,
     Page,
     Pipeline,
@@ -51,6 +53,10 @@ class MemoryStore:
         self._runs: dict[str, Run] = {}
         self._task_runs: dict[str, dict[str, TaskRun]] = {}
         self._logs: dict[str, list[LogLine]] = {}
+        # ADR 0123
+        self._trigger_state: dict[str, EventTriggerState] = {}
+        self._seen: dict[int, datetime] = {}
+        self._bus: tuple[datetime, datetime] | None = None  # (created_at, last_contact_at)
 
     # ---- pipelines ----
     def create_pipeline(self, workspace, name, description, by):
@@ -103,6 +109,7 @@ class MemoryStore:
                 return False
             del self._pipelines[p.id]
             self._versions.pop(p.id, None)
+            self._trigger_state.pop(p.id, None)
             self._pipeline_drafts.pop(p.id, None)
             # Pipeline now owns its run history directly (ADR 0071: no more Job to block or
             # survive this) — deleting it cascades, the same way pipeline_versions already did.
@@ -124,7 +131,11 @@ class MemoryStore:
             p.owner_name = pipeline.owner_name
             p.role_ceiling = pipeline.role_ceiling
             p.pinned_version = pipeline.pinned_version
+            p.event_trigger = pipeline.event_trigger
+            p.event_trigger_since = pipeline.event_trigger_since
             p.updated_at = _now()
+            if (p.event_trigger is None or not p.event_trigger.enabled) and p.id in self._trigger_state:
+                triggers.reset_pending(self._trigger_state[p.id])
             return self._with_latest(p)
 
     def add_version(self, workspace, pipeline_id, spec: PipelineSpec, notes, by):
@@ -291,6 +302,91 @@ class MemoryStore:
             due.sort(key=lambda p: (p.next_run_at, p.id))
             return copy.deepcopy(due[:limit])
 
+    # ---- event triggers (ADR 0123) ----
+    def _state(self, p: Pipeline) -> EventTriggerState:
+        return self._trigger_state.setdefault(p.id, EventTriggerState(p.id, p.workspace))
+
+    def _active(self, pipeline_id: str) -> bool:
+        return any(r.pipeline_id == pipeline_id and r.status in RUN_ACTIVE for r in self._runs.values())
+
+    def ingest_trigger_event(self, ev, seq, now):
+        with self._lock:
+            if seq is not None:
+                if seq in self._seen:
+                    return None
+                self._seen[seq] = now
+            run_id = triggers.own_run_id(ev.principal, ev.workspace)
+            own_pipeline = self._runs[run_id].pipeline_id if run_id and run_id in self._runs else None
+            out: dict[str, str] = {}
+            for p in sorted(self._pipelines.values(), key=lambda p: p.id):
+                t = p.event_trigger
+                if p.workspace != ev.workspace or t is None or not t.enabled or not triggers.concerns(t, p.event_trigger_since, ev):
+                    continue
+                out[p.id] = triggers.ingest(
+                    self._state(p), t, ev, now, own_run=own_pipeline == p.id, run_active=self._active(p.id), concurrent=p.allow_concurrent_runs
+                )
+            return out
+
+    def claim_due_event_triggers(self, now, limit):
+        with self._lock:
+            out = []
+            due = sorted((st for st in self._trigger_state.values() if st.fire_at is not None and st.fire_at <= now), key=lambda s: (s.fire_at, s.pipeline_id))
+            due += [st for st in self._trigger_state.values() if st.queued and st.fire_at is None and not self._active(st.pipeline_id)]
+            for st in due[:limit]:
+                p = self._pipelines.get(st.pipeline_id)
+                if p is None or p.event_trigger is None or not p.event_trigger.enabled:
+                    continue
+                if st.queued and st.fire_at is None:  # owed by a run that ended without releasing it
+                    triggers.on_run_finished(st, p.event_trigger, now)
+                    if st.fire_at is None or st.fire_at > now:
+                        continue
+                fired = triggers.on_due(st, p.event_trigger, now, run_active=self._active(p.id), concurrent=p.allow_concurrent_runs)
+                if fired is not None:
+                    out.append((self._with_latest(p), copy.deepcopy(fired)))
+            return out
+
+    def requeue_event_trigger(self, pipeline_id, fired, now):
+        with self._lock:
+            p, st = self._pipelines.get(pipeline_id), self._trigger_state.get(pipeline_id)
+            if p and st and p.event_trigger:
+                triggers.requeue(st, p.event_trigger, fired, now)
+                if not self._active(pipeline_id):
+                    triggers.on_run_finished(st, p.event_trigger, now)
+
+    def next_event_fire_at(self):
+        with self._lock:
+            times = [st.fire_at for st in self._trigger_state.values() if st.fire_at is not None]
+            return min(times) if times else None
+
+    def get_event_trigger_state(self, workspace, pipeline_id):
+        with self._lock:
+            st = self._trigger_state.get(pipeline_id)
+            return copy.deepcopy(st) if st and st.workspace == workspace else None
+
+    def event_triggers_missed_events(self, now):
+        with self._lock:
+            n = 0
+            for p in self._pipelines.values():
+                if p.event_trigger is not None and p.event_trigger.enabled:
+                    triggers.on_missed_events(self._state(p), p.event_trigger, now)
+                    n += 1
+            return n
+
+    def trigger_bus(self):
+        with self._lock:
+            return self._bus
+
+    def record_trigger_bus_contact(self, now):
+        with self._lock:
+            self._bus = (self._bus[0], max(self._bus[1], now)) if self._bus else (now, now)
+
+    def prune_seen_trigger_events(self, before):
+        with self._lock:
+            old = [s for s, at in self._seen.items() if at < before]
+            for s in old:
+                del self._seen[s]
+            return len(old)
+
     # ---- runs ----
     def create_run(self, run, task_keys, exclusive=False):
         with self._lock:
@@ -338,6 +434,10 @@ class MemoryStore:
             if not r or r.status in RUN_TERMINAL:
                 return False
             r.status, r.error, r.finished_at = status, error, now
+            # ADR 0123: a follow-up owed by queue_one is due now that the run has ended.
+            p, st = self._pipelines.get(r.pipeline_id), self._trigger_state.get(r.pipeline_id)
+            if p and st and p.event_trigger and p.event_trigger.enabled:
+                triggers.on_run_finished(st, p.event_trigger, now)
             return True
 
     def request_cancel(self, workspace, run_id):

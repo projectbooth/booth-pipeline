@@ -39,10 +39,15 @@ spec:
   workloadIdentity:
     mint: true
   {{- end }}
-  # No `events` on purpose (ADR 0050). v0 neither publishes nor subscribes to anything, and a
-  # module that declares no events is granted no bus credential at all — least privilege by
-  # default. (Run-lifecycle events for other modules to react to are a natural follow-up, and
-  # would be declared here then.)
+  {{- if .Values.eventTriggers.enabled }}
+  # ADR 0123: event triggers read these two event types (one shared durable consumer); this module
+  # publishes nothing. Core mints the bus credential from this (ADR 0050), delivered as the Secret
+  # booth-event-bus-credentials, which only the API/scheduler pod mounts. Without it, no credential.
+  events:
+    subscribe:
+      - storage.object.created
+      - api.write.committed
+  {{- end }}
   serviceRef:
     name: {{ include "booth-pipeline.fullname" . }}
     port: {{ .Values.service.port }}

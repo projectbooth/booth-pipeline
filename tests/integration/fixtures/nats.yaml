@@ -1,0 +1,40 @@
+# Stand-in for booth-core's bundled NATS with JetStream (ADR 0021), for event triggers (ADR 0123).
+# Unauthenticated: the deployed bus is core's, with a credential per module (ADR 0050), and what that
+# credential allows is checked in booth-core's own tests. Here the module gets only a URL (the
+# booth-event-bus-credentials Secret without nats.creds), and the driver creates the BOOTH_EVENTS stream
+# the way core does at startup (ADR 0026: one stream, booth.>, 7 days).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: nats}
+  template:
+    metadata:
+      labels: {app: nats}
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.11-alpine
+          args: ["-js", "-p", "4222", "-m", "8222", "-sd", "/data"]
+          ports:
+            - {name: client, containerPort: 4222}
+            - {name: monitor, containerPort: 8222}
+          readinessProbe:
+            httpGet: {path: "/healthz?js-enabled-only=true", port: monitor}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+spec:
+  selector: {app: nats}
+  ports:
+    - {name: client, port: 4222, targetPort: client}

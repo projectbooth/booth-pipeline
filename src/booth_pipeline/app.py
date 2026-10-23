@@ -21,6 +21,7 @@ from .api import router
 from .auth import OIDCVerifier, TokenVerifier
 from .catalog_client import CatalogClient
 from .config import Config
+from .event_bus import EventBus, TriggerIngest
 from .model import ModelError
 from .runners.base import Runner
 from .runners.kubejob import KubernetesJobRunner
@@ -166,12 +167,23 @@ def create_app(
     manager = RunManager(store, registry, cfg, worker_id, minter)
     service = PipelineService(store, registry, catalog, manager, storage, accounts or (ServiceAccountsClient(cfg.core_url) if cfg.core_url else None))
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
+    # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
+    manager.on_run_finished = scheduler.wake
+    event_bus = EventBus(cfg, store, TriggerIngest(store, scheduler.wake))
+    service.event_bus = lambda: event_bus.configured
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if start_scheduler:
             scheduler.start()
+            # Event triggers are optional (ADR 0123 revision 2026-10-22): the consumer starts on its own
+            # thread and can't keep the pod from starting or the scheduler from running.
+            try:
+                event_bus.start()
+            except Exception:  # noqa: BLE001
+                log.exception("event triggers: the consumer could not start; schedules are unaffected")
         yield
+        event_bus.stop()
         scheduler.stop()
         manager.shutdown()
         catalog.close()
@@ -189,6 +201,7 @@ def create_app(
     app.state.store = store
     app.state.service = service
     app.state.scheduler = scheduler
+    app.state.event_bus = event_bus
     app.state.verifier = verifier or OIDCVerifier(cfg.oidc_issuer_url, cfg.oidc_client_id, cfg.oidc_require_audience, cfg.oidc_groups_claim, cfg.oidc_jwks_url)
 
     @app.middleware("http")

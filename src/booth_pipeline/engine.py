@@ -117,6 +117,7 @@ def _make_op(
     cancel: Cancellation,
     access: AccessProvider | None,
     reasons: dict[str, str],
+    trigger: dict[str, Any] | None = None,
 ) -> OpDefinition:
     retry = config.retry
     max_retries = retry.max_retries if retry else 0
@@ -149,6 +150,7 @@ def _make_op(
                 language=code_language(config.code),
                 requirements=tuple(config.requirements),
                 spark=config.spark.model_dump(by_alias=True, mode="json") if config.spark is not None else None,
+                trigger=trigger,
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskCanceled:
@@ -205,6 +207,7 @@ def compile_job(
     name: str = "pipeline",
     access: AccessProvider | None = None,
     reasons: dict[str, str] | None = None,
+    trigger: dict[str, Any] | None = None,
 ) -> JobDefinition:
     """Compile the spec into a Dagster ``JobDefinition``.
 
@@ -219,7 +222,7 @@ def compile_job(
     order = topological_order(spec)
     by_key = spec.by_key()
     r = reasons if reasons is not None else {}
-    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r) for k in order]
+    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r, trigger) for k in order]
     deps: dict[str, dict[str, DependencyDefinition]] = {}
     for k in order:
         t = by_key[k]
@@ -243,13 +246,14 @@ def execute(
     recorder: RunRecorder,
     cancel: Cancellation,
     access: AccessProvider | None = None,
+    trigger: dict[str, Any] | None = None,
 ) -> EngineResult:
     """Run the pipeline to completion (blocking). Never raises for a task failure — that is a
     result, not an exception."""
     reasons: dict[str, str] = {}
     job = compile_job(
         spec, configs, run_id=run_id, registry=registry, recorder=recorder, cancel=cancel,
-        name=f"run_{run_id}", access=access, reasons=reasons,
+        name=f"run_{run_id}", access=access, reasons=reasons, trigger=trigger,
     )
     # A fresh in-memory instance per run: nothing is shared between runs, nothing persists in
     # Dagster (our store is the record). Dagster's own console logging is quieted to warnings —

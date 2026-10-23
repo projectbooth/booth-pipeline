@@ -150,7 +150,7 @@ export function RunsTab({ v, pipeline }: { v: ViewCtx; pipeline: Pipeline }) {
                   {formatStamp(runStart(r))}
                 </td>
                 <td className={`${tdClass} whitespace-nowrap font-mono text-xs`}>{r.finishedAt ? formatDuration(r.startedAt, r.finishedAt) : isActive(r) ? "running…" : "—"}</td>
-                <td className={`${tdClass} text-slate-600 dark:text-slate-300`}>{r.trigger === "schedule" ? "Scheduled" : `${r.triggeredBy} (manual)`}</td>
+                <td className={`${tdClass} text-slate-600 dark:text-slate-300`}>{r.trigger === "schedule" ? "Scheduled" : r.trigger === "event" ? `Event — ${r.triggeredBy}` : `${r.triggeredBy} (manual)`}</td>
               </tr>
             ))}
           </tbody>

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from .auth import Identity
@@ -19,6 +20,7 @@ from .export import export_pipeline_version
 from .model import (
     BASE_RUNNER,
     CatalogCode,
+    EventTrigger,
     InlineCode,
     ModelError,
     PipelineSpec,
@@ -34,6 +36,7 @@ from .owners import is_service_account, parse_service_account
 from .records import (
     RUN_ACTIVE,
     RUN_QUEUED,
+    TRIGGER_EVENT,
     TRIGGER_MANUAL,
     TRIGGER_SCHEDULE,
     LogLine,
@@ -96,6 +99,9 @@ class PipelineService:
     storage: StorageClient
     # ADR 0120: core's service accounts, read as the caller (checked when one is named as an owner).
     accounts: ServiceAccountsClient | None = None
+    # ADR 0123: whether this module holds an event-bus credential, without which no event trigger fires. A
+    # callable (the app's EventBus.configured, read each time: the Secret may arrive later) or a fixed bool.
+    event_bus: Any = False
 
     # ---- pipelines ----
     def create_pipeline(self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str) -> tuple[Pipeline, PipelineVersion | None]:
@@ -202,11 +208,30 @@ class PipelineService:
 
     # ---- pipeline scheduling (folded from the retired Job entity, ADR 0071) ----
     def update_schedule(
-        self, ident: Identity, pipeline_id: str, schedule: Trigger | None, allow_concurrent_runs: bool, role_ceiling: str, pinned_version: int | None
+        self,
+        ident: Identity,
+        pipeline_id: str,
+        schedule: Trigger | None,
+        allow_concurrent_runs: bool,
+        role_ceiling: str,
+        pinned_version: int | None,
+        event_trigger: EventTrigger | None = None,
+        keep_event_trigger: bool = False,
     ) -> Pipeline:
         p = self.get_pipeline(ident, pipeline_id)
+        if keep_event_trigger:
+            event_trigger = p.event_trigger
         if schedule is not None and schedule.enabled and p.latest_version == 0:
             raise ModelError("the pipeline has no saved version to run — save it in the builder first", "schedule")
+        if event_trigger is not None and event_trigger.enabled:
+            if p.latest_version == 0:
+                raise ModelError("the pipeline has no saved version to run — save it in the builder first", "eventTrigger")
+            if not (self.event_bus() if callable(self.event_bus) else self.event_bus):
+                raise ModelError(
+                    "event triggers need the platform's event bus, and this module has no bus credential (booth-core grants one from the module's manifest)",
+                    "eventTrigger",
+                )
+            self._check_event_backends(ident, p.event_trigger, event_trigger)
         if pinned_version is not None and self.store.get_version(ident.workspace, pipeline_id, pinned_version) is None:
             raise ModelError(f"version {pinned_version} does not exist", "pinnedVersion")
         p.schedule = schedule
@@ -214,11 +239,37 @@ class PipelineService:
         p.role_ceiling = role_ceiling
         p.pinned_version = pinned_version
         p.next_run_at = _next(schedule, datetime.now(UTC))
-        # The owner stays whoever first gave the pipeline a schedule; after that it changes only
-        # through set_owner (Take over, or a workspace owner choosing a service account).
+        # Events published before the trigger was turned on, or before its match last changed, are
+        # not its business (a turned-on trigger must not fire for a burst it was never watching).
+        if event_trigger is not None and event_trigger.enabled and (
+            p.event_trigger is None or not p.event_trigger.enabled or p.event_trigger.match != event_trigger.match
+        ):
+            p.event_trigger_since = datetime.now(UTC)
+        p.event_trigger = event_trigger
+        # The owner stays whoever first gave the pipeline a schedule or an event trigger; after that
+        # it changes only through set_owner (Take over, or a workspace owner choosing a service account).
         if not p.owner_sub:
             p.owner_sub, p.owner_name = ident.subject, ident.display_name
         return self._need(self.store.update_schedule(p), "pipeline")
+
+    def _check_event_backends(self, ident: Identity, before: EventTrigger | None, after: EventTrigger) -> None:
+        """Every Storage backend the trigger watches must exist, asked as the caller. Only backends new
+        to this save are asked about, so an unrelated edit still saves while booth-storage is down.
+        Reading needs no more than workspace membership today (ADR 0123 revision), which every
+        event-fired run's start-time authorization already checks for the owner."""
+        known = {m.storage.backend_id for m in (before.match if before else []) if m.storage}
+        for i, m in enumerate(after.match):
+            if m.storage is None or m.storage.backend_id in known:
+                continue
+            try:
+                exists = self.storage.backend_exists(ident.token, ident.workspace, m.storage.backend_id)
+            except StorageDenied as e:
+                raise Forbidden(f"booth-storage refused to say whether backend {m.storage.backend_id!r} exists: {e}") from None
+            except StorageUnavailable as e:
+                raise Unavailable(f"could not check backend {m.storage.backend_id!r} with booth-storage: {e}") from None
+            if not exists:
+                raise ModelError(f"this workspace has no Storage backend {m.storage.backend_id!r}", f"eventTrigger.match[{i}].storage.backendId")
+            known.add(m.storage.backend_id)
 
     def set_owner(self, ident: Identity, pipeline_id: str, owner: str) -> Pipeline:
         """Take over (``owner == "me"``) or give the pipeline to a service account (owners.py's rules)."""
@@ -404,7 +455,9 @@ class PipelineService:
         )
 
     # ---- runs ----
-    def start_run(self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str, owner_name: str = "") -> Run:
+    def start_run(
+        self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str, owner_name: str = "", trigger_events: dict | None = None
+    ) -> Run:
         """The single implementation of "start a run": used by Run-now and by the scheduler.
 
         Runs the pipeline's `pinned_version` if it has one, otherwise the latest saved version —
@@ -424,6 +477,7 @@ class PipelineService:
             created_at=datetime.now(UTC),
             owner_sub=owner_sub,
             owner_name=owner_name,
+            trigger_events=trigger_events,
         )
         try:
             self.store.create_run(run, [t.key for t in version.spec.tasks], exclusive=not pipeline.allow_concurrent_runs)
@@ -445,6 +499,24 @@ class PipelineService:
         except ModelError as e:
             log.warning("scheduled run of pipeline %s could not start: %s", pipeline.id, e.message)
         return None
+
+    def start_event_fired(self, pipeline: Pipeline, fired: dict) -> Run | None:
+        """A claimed event-trigger fire (ADR 0123). Acts as the owner, exactly as a scheduled run does."""
+        try:
+            return self.start_run(
+                pipeline.workspace, pipeline, TRIGGER_EVENT, describe_trigger_events(fired), pipeline.owner_sub, pipeline.owner_name, fired
+            )
+        except PipelineBusy:
+            # A run started between the claim and this: owe a follow-up (queue_one) or drop it (skip).
+            log.info("event-fired run of pipeline %s found it busy; %s", pipeline.id, "queued" if pipeline.event_trigger and pipeline.event_trigger.when_running == "queue_one" else "skipped")
+            self.store.requeue_event_trigger(pipeline.id, fired, datetime.now(UTC))
+        except ModelError as e:
+            log.warning("event-fired run of pipeline %s could not start: %s", pipeline.id, e.message)
+        return None
+
+    def event_trigger_state(self, ident: Identity, pipeline_id: str):
+        p = self.get_pipeline(ident, pipeline_id)
+        return p, self.store.get_event_trigger_state(ident.workspace, p.id)
 
     def get_run(self, ident: Identity, run_id: str) -> tuple[Run, list[TaskRun]]:
         run = self._need(self.store.get_run(ident.workspace, run_id), "run")
@@ -483,3 +555,16 @@ def _ref_key(code: CatalogCode | StorageCode) -> tuple[str, str, str]:
     if isinstance(code, CatalogCode):
         return ("catalog", code.entry_id, code.version)
     return ("storage", code.backend_id, code.path)
+
+
+def describe_trigger_events(fired: dict) -> str:
+    """An event-fired run's "triggered by": "3 files", "2 files, 1 write". Deliberately without paths or
+    API names, which only editors and owners see (ADR 0123 revision); the run's triggerEvents has them."""
+    events, count = fired.get("events") or [], int(fired.get("count") or 0)
+    if count == 0:
+        return "events may have been missed" if fired.get("missedEvents") else "event"
+    files = sum(1 for e in events if e.get("type") == "storage.object.created")
+    writes = sum(1 for e in events if e.get("type") == "api.write.committed")
+    parts = [f"{n} {word}{'s' if n != 1 else ''}" for n, word in ((files, "file"), (writes, "write")) if n]
+    more = count - len(events)
+    return ", ".join(parts) + (f" and {more} more" if more > 0 else "")

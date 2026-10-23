@@ -9,10 +9,11 @@ indistinguishable from a missing one (multi-workspace tenancy from v0, ADR 0008)
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..model import PipelineSpec, TaskConfig
 from ..records import (
+    EventTriggerState,
     LogLine,
     Page,
     Pipeline,
@@ -24,6 +25,7 @@ from ..records import (
     TaskRun,
     TaskVersionRecord,
 )
+from ..triggers import TriggerEvent
 
 
 class Conflict(Exception):
@@ -141,6 +143,42 @@ class Store(Protocol):
         """
         ...
 
+    # ---- event triggers (ADR 0123; the rules are triggers.py's, applied under the state row's lock) ----
+    def ingest_trigger_event(self, event: TriggerEvent, seq: int | None, now: datetime) -> dict[str, str] | None:
+        """One event off the bus, in one transaction. ``seq`` (its JetStream stream sequence) is
+        recorded; one already recorded is a redelivery and returns None, changing nothing. Otherwise
+        returns ``{pipeline_id: outcome}`` for every enabled event trigger in the event's workspace
+        that matches it (``triggers.ingest``'s outcomes)."""
+        ...
+
+    def claim_due_event_triggers(self, now: datetime, limit: int) -> list[tuple[Pipeline, dict[str, Any]]]:
+        """Across all workspaces: event triggers whose ``fire_at`` has come, claimed exactly once
+        across replicas (row locks, SKIP LOCKED). Returns those that should start a run now, each with
+        the run's ``trigger_events``; one whose pipeline is busy is queued or dropped instead."""
+        ...
+
+    def requeue_event_trigger(self, pipeline_id: str, fired: dict[str, Any], now: datetime) -> None:
+        """A claimed fire whose run couldn't be created (the pipeline became busy in between)."""
+        ...
+
+    def next_event_fire_at(self) -> datetime | None:
+        """The soonest pending event-trigger fire, for the scheduler's index. A plain read."""
+        ...
+
+    def get_event_trigger_state(self, workspace: str, pipeline_id: str) -> EventTriggerState | None: ...
+
+    def event_triggers_missed_events(self, now: datetime) -> int:
+        """The bus may have lost events: every enabled event trigger fires once. Returns how many."""
+        ...
+
+    def trigger_bus(self) -> tuple[datetime, datetime] | None:
+        """The shared consumer's record: ``(created_at, last_contact_at)``, or None before it exists."""
+        ...
+
+    def record_trigger_bus_contact(self, now: datetime) -> None: ...
+
+    def prune_seen_trigger_events(self, before: datetime) -> int: ...
+
     # ---- runs ----
     def create_run(self, run: Run, task_keys: list[str], exclusive: bool = False) -> Run:
         """Creates the run and one pending task run per key.
@@ -160,7 +198,8 @@ class Store(Protocol):
     def mark_running(self, run_id: str, worker_id: str, now: datetime) -> None: ...
     def heartbeat(self, run_id: str, now: datetime) -> None: ...
     def finish_run(self, run_id: str, status: str, error: str | None, now: datetime) -> bool:
-        """Set a terminal status. No-op (False) if the run is already terminal — first writer wins."""
+        """Set a terminal status. No-op (False) if the run is already terminal — first writer wins.
+        In the same step, releases a queue_one follow-up owed to the run's pipeline (ADR 0123)."""
         ...
 
     def request_cancel(self, workspace: str, run_id: str) -> Run | None: ...

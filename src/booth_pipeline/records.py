@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .model import PipelineSpec, TaskConfig, Trigger
+from .model import EventTrigger, PipelineSpec, TaskConfig, Trigger
 
 # Run and task-run lifecycle. Terminal states never change again.
 RUN_QUEUED, RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED = "queued", "running", "succeeded", "failed", "canceled"
@@ -27,7 +27,7 @@ TASK_PENDING, TASK_RUNNING, TASK_RETRYING, TASK_SUCCEEDED, TASK_FAILED, TASK_SKI
     "canceled",
 )
 
-TRIGGER_MANUAL, TRIGGER_SCHEDULE = "manual", "schedule"
+TRIGGER_MANUAL, TRIGGER_SCHEDULE, TRIGGER_EVENT = "manual", "schedule", "event"
 
 
 @dataclass
@@ -64,6 +64,33 @@ class Pipeline:
     # latest_version above, since a draft can exist without ever having been promoted to a version.
     has_draft: bool = False
     draft_updated_at: datetime | None = None
+    # ADR 0123: runs when files are created in booth-storage or rows written through booth-api, beside
+    # (not instead of) `schedule`. `event_trigger_since`: when it was last enabled or its match changed;
+    # events published before that are not its business.
+    event_trigger: EventTrigger | None = None
+    event_trigger_since: datetime | None = None
+
+
+@dataclass
+class EventTriggerState:
+    """Where a pipeline's event trigger stands (ADR 0123), kept in the database so a restart neither
+    loses a pending fire nor runs it twice. ``triggers.py`` holds the rules; the store applies them
+    under a row lock."""
+
+    pipeline_id: str
+    workspace: str
+    pending_since: datetime | None = None  # the first event of the burst not yet fired
+    last_event_at: datetime | None = None  # when the latest matching event was received
+    fire_at: datetime | None = None  # when the scheduler starts the run; None = nothing due
+    queued: bool = False  # queue_one: run once more when the active run ends
+    last_fired_at: datetime | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)  # the first MAX_RUN_EVENTS of the burst
+    event_count: int = 0  # every matching event of the burst
+    missed_events: bool = False  # set by a bus outage longer than the stream keeps events
+    ignored_own_runs: int = 0  # written by this pipeline's own runs (the loop guard), all time
+    skipped_while_running: int = 0  # dropped under `skip`, all time
+    last_event: dict[str, Any] | None = None
+    gap_detected_at: datetime | None = None
 
 
 @dataclass
@@ -156,6 +183,8 @@ class Run:
     # the person who pressed "Run now" for a manual one.
     owner_sub: str = ""
     owner_name: str = ""
+    # ADR 0123: for an event-fired run, what fired it: {events: [...first 100], count, missedEvents}.
+    trigger_events: dict[str, Any] | None = None
 
 
 @dataclass

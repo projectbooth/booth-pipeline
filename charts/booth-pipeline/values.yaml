@@ -177,6 +177,17 @@ runner:
 workloadIdentity:
   enabled: true
 
+# ADR 0123: pipelines triggered by events (a file created in booth-storage, a write through booth-api).
+# Declares `events.subscribe` on the manifest, so core grants a bus credential and the API pod reads
+# the shared JetStream consumer `booth-pipeline-triggers`. Disabled: no credential, and the Schedule
+# tab says event triggers aren't available.
+eventTriggers:
+  enabled: true
+  # A delivered event not acked within this many seconds is redelivered (it is recorded once).
+  ackWaitSeconds: 30
+  # How many delivered, unacked events the consumer may hold at once.
+  maxAckPending: 1000
+
 execution:
   # Runs execute in worker threads inside this pod; this bounds how many run at once. Further
   # runs wait in `queued`. Scale out with replicas rather than raising this without bound: every

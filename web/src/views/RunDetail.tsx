@@ -131,11 +131,26 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
               </Link>
             ),
           },
-          { label: "Triggered by", value: run.trigger === "schedule" ? "Schedule" : run.triggeredBy, mono: false },
+          { label: "Triggered by", value: run.trigger === "schedule" ? "Schedule" : run.trigger === "event" ? `Event — ${run.triggeredBy}` : run.triggeredBy, mono: false },
           ...(run.actsAs ? [{ label: "Ran as", value: ownerLabel(run.actsAs), mono: false }] : []),
           { label: "Tasks", value: `${doneCount}/${run.tasks.length} done` },
         ]}
       />
+
+      {run.triggerEvents?.events && run.triggerEvents.events.length > 0 && (
+        <details className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700">
+          <summary className="cursor-pointer text-slate-700 dark:text-slate-200">
+            What fired this run ({run.triggerEvents.count} event{run.triggerEvents.count === 1 ? "" : "s"}
+            {run.triggerEvents.count > run.triggerEvents.events.length ? `, the first ${run.triggerEvents.events.length} shown` : ""})
+          </summary>
+          <ul aria-label="Trigger events" className="mt-2 flex flex-col gap-0.5 font-mono text-xs text-slate-600 dark:text-slate-300">
+            {run.triggerEvents.events.map((e, i) => (
+              <li key={i}>{e.path !== undefined ? `${e.backendId}:${e.path}` : `${e.operation ?? "write"} ${e.apiSlug}${e.table ? ` (${e.table})` : ""}`}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {run.triggerEvents?.missedEvents && <Banner tone="warn">Fired because the event bus may have lost events; tasks should scan their inbox.</Banner>}
 
       {graphError ? (
         <Banner tone="warn">The pipeline graph could not be loaded ({graphError}); the task table below is still accurate.</Banner>

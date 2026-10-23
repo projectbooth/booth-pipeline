@@ -69,6 +69,9 @@ class TaskInvocation:
     # ADR 0119: for a Spark task, what the task pod's Spark client needs (the task's Spark options,
     # plus where booth-spark is and how to wait for it, added by runners/spark.py). None otherwise.
     spark: dict[str, Any] | None = None
+    # ADR 0123: how the run started, ``ctx.trigger`` ({type, events, count, missedEvents}); None is a
+    # caller from before it existed, seen by the task as a manual run with no events.
+    trigger: dict[str, Any] | None = None
 
 
 class TaskLog(Protocol):

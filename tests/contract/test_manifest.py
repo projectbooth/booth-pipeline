@@ -75,9 +75,9 @@ def test_manifest_declares_its_database_and_no_event_bus_access(module):
     s = module["spec"]
     # ADR 0053: persistence needs this, or core provisions nothing and there is no DSN to read.
     assert s["database"] == {"enabled": True}
-    # ADR 0050: v0 neither publishes nor subscribes, and undeclared means no credential — least
-    # privilege. If run events are added later this assertion should change WITH that decision.
-    assert "events" not in s
+    # ADR 0123: event triggers subscribe to exactly these two types and publish nothing (ADR 0050:
+    # what is declared is what core grants).
+    assert s["events"] == {"subscribe": ["storage.object.created", "api.write.committed"]}
 
 
 def test_required_scopes_are_declared(module):
