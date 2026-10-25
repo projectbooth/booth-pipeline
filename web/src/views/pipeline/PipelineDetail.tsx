@@ -32,6 +32,8 @@ import { RunsTab } from "./RunsTab";
 import { ScheduleTab } from "./ScheduleTab";
 import { VersionsTab } from "./VersionsTab";
 import { useResolved } from "../../dag/resolve";
+import { useProjects } from "../../projects";
+import { ProjectBadge, ProjectSelect } from "../ProjectSelect";
 
 // S2 — the pipeline detail page (docs/decisions/0016 §4): header, stat strip, Run now (on every
 // tab — the gap that started ADR 0074's last round), and the five tabs.
@@ -141,6 +143,7 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
         titleExtra={
           <>
             <StatusBadge status={latestRun.run ? latestRun.run.status : "never"} />
+            <ProjectBadge api={v.api} slug={p.project} />
             {d.draftDiffers && (
               <Badge tone="sky" title="Saved with plain Save; not yet a numbered version">
                 {d.latest ? `Draft ahead of v${d.latest.version}` : "Draft, never saved as a version"}
@@ -289,6 +292,9 @@ function RunNow({ v, d, unsaved }: { v: ViewCtx; d: PipelineData; unsaved: boole
 function DetailsCard({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (changed: boolean) => void }) {
   const [name, setName] = useState(d.pipeline.name);
   const [description, setDescription] = useState(d.pipeline.description);
+  const projectsState = useProjects(v.api);
+  const projects = projectsState.status === "ready" ? projectsState.projects : null;
+  const [project, setProject] = useState<string | null>(d.pipeline.project ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
@@ -297,7 +303,8 @@ function DetailsCard({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (c
     setBusy(true);
     setError(null);
     try {
-      await api.updatePipeline(v.api, d.pipeline.id, name.trim(), description.trim());
+      // The project only when the registry answered (the field was shown): otherwise it's left as it is.
+      await api.updatePipeline(v.api, d.pipeline.id, name.trim(), description.trim(), projects ? project : undefined);
       onDone(true);
     } catch (err) {
       setError({ message: errorMessage(err), field: (err as { field?: string }).field });
@@ -315,8 +322,11 @@ function DetailsCard({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (c
           <Field id="pipeline-description" label="Description">
             {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
+          {projects && (
+            <ProjectSelect id="pipeline-project" value={project} onChange={setProject} projects={projects} error={error?.field === "project" ? error.message : undefined} />
+          )}
         </div>
-        {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}
+        {error && error.field !== "name" && error.field !== "project" && <Banner tone="error">{error.message}</Banner>}
         <div className="flex gap-2">
           <Button type="submit" variant="primary" disabled={busy || name.trim() === ""}>
             {busy ? "Saving…" : "Save details"}

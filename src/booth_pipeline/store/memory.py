@@ -86,11 +86,23 @@ class MemoryStore:
             p = self._pipeline(workspace, pipeline_id)
             return self._with_latest(p) if p else None
 
-    def list_pipelines(self, workspace, q, limit, offset):
+    def list_pipelines(self, workspace, q, limit, offset, projects=None):
         with self._lock:
-            items = [p for p in self._pipelines.values() if p.workspace == workspace and _matches(q, p.name, p.description)]
+            items = [
+                p
+                for p in self._pipelines.values()
+                if p.workspace == workspace and _matches(q, p.name, p.description) and (projects is None or p.project in projects)
+            ]
             items.sort(key=lambda p: (p.name.lower(), p.id))
             return Page([self._with_latest(p) for p in items[offset : offset + limit]], len(items))
+
+    def set_pipeline_project(self, workspace, pipeline_id, project):
+        with self._lock:
+            p = self._pipeline(workspace, pipeline_id)
+            if not p:
+                return None
+            p.project, p.updated_at = project, _now()
+            return self._with_latest(p)
 
     def update_pipeline(self, workspace, pipeline_id, name, description):
         with self._lock:
@@ -211,11 +223,23 @@ class MemoryStore:
             t = self._task(workspace, task_id)
             return self._task_with_latest(t) if t else None
 
-    def list_tasks(self, workspace, q, limit, offset):
+    def list_tasks(self, workspace, q, limit, offset, projects=None):
         with self._lock:
-            items = [t for t in self._tasks.values() if t.workspace == workspace and _matches(q, t.name, t.description)]
+            items = [
+                t
+                for t in self._tasks.values()
+                if t.workspace == workspace and _matches(q, t.name, t.description) and (projects is None or t.project in projects)
+            ]
             items.sort(key=lambda t: (t.name.lower(), t.id))
             return Page([self._task_with_latest(t) for t in items[offset : offset + limit]], len(items))
+
+    def set_task_project(self, workspace, task_id, project):
+        with self._lock:
+            t = self._task(workspace, task_id)
+            if not t:
+                return None
+            t.project, t.updated_at = project, _now()
+            return self._task_with_latest(t)
 
     def update_task(self, workspace, task_id, name, description):
         with self._lock:

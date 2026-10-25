@@ -40,6 +40,9 @@ describe("mount contract", () => {
       expect(c.headers.get("X-Workspace")).toBe("acme");
       expect(c.headers.get("Authorization")).toBe("Bearer tok-test");
     }
-    expect((fetch as unknown as { mock: { calls: [string][] } }).mock.calls.every(([url]) => url.startsWith("/modules/pipeline/api/"))).toBe(true);
+    // Everything goes through the module's gateway path, except booth-core's own project registry (ADR
+    // 0124: modules read it from the browser, with the same token and workspace header, checked above).
+    const urls = (fetch as unknown as { mock: { calls: [string][] } }).mock.calls.map(([url]) => url);
+    expect(urls.filter((url) => !url.startsWith("/modules/pipeline/api/"))).toEqual(urls.filter((url) => url === "/api/projects"));
   });
 });

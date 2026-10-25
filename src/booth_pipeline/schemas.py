@@ -19,11 +19,15 @@ class PipelineCreate(Wire):
     # Optional first version. Omit it to create an empty pipeline and draw it in the builder.
     spec: PipelineSpec | None = None
     notes: str = Field("", max_length=MAX_NOTES)
+    # ADR 0124: a booth-core project slug, or none. A label only.
+    project: str | None = Field(None, max_length=63)
 
 
 class PipelineUpdate(Wire):
     name: str = Field(min_length=1, max_length=MAX_NAME)
     description: str = Field("", max_length=MAX_DESCRIPTION)
+    # ADR 0124. Left out of the body (an older UI), the saved one is kept; null clears it.
+    project: str | None = Field(None, max_length=63)
 
 
 class VersionCreate(Wire):
@@ -71,11 +75,13 @@ class TaskCreate(Wire):
     # Optional first version. Omit it to create an empty, unconfigured task and fill it in later.
     config: TaskConfig | None = None
     notes: str = Field("", max_length=MAX_NOTES)
+    project: str | None = Field(None, max_length=63)  # ADR 0124, as PipelineCreate
 
 
 class TaskUpdate(Wire):
     name: str = Field(min_length=1, max_length=MAX_NAME)
     description: str = Field("", max_length=MAX_DESCRIPTION)
+    project: str | None = Field(None, max_length=63)  # ADR 0124, as PipelineUpdate
 
 
 class TaskVersionCreate(Wire):
