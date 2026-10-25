@@ -70,7 +70,7 @@ describe("the rules", () => {
       ["Finance dev", 1, false, false, "a"],
       ["Finance prod", 1, false, false, "f"],
       ["Old stuff", 0, true, false, "d"],
-      ["ghost", 0, false, true, "e"],
+      ["Not in the registry", 0, false, true, "e"],
       ["No project", 0, false, false, "c"],
     ]);
     // A parent with nothing of its own still heads its children's items; empty projects don't appear.
@@ -80,12 +80,36 @@ describe("the rules", () => {
     ]);
   });
 
+  it("puts an archived parent with an active child among the active projects, open and still marked", () => {
+    const reg = [P("finance", "Finance", null, true), P("finance-dev", "Finance dev", "finance"), P("nfl", "NFL"), P("zz", "Zz", null, true)];
+    expect(orderedProjects(reg).map(({ project }) => project.slug)).toEqual(["finance", "finance-dev", "nfl", "zz"]);
+    const groups = groupByProject([{ p: "finance-dev" }, { p: "zz" }], (i) => i.p, reg);
+    expect(groups.map((g) => [g.label, g.archived, g.collapsed])).toEqual([
+      ["Finance", true, false],
+      ["Finance dev", false, false],
+      ["Zz", true, true],
+    ]);
+  });
+
+  it("treats null, an absent field and \"\" all as no parent", () => {
+    const reg = [P("a", "A"), { ...P("b", "B"), parent: "" }, { slug: "c", name: "C", archived: false } as unknown as Project, P("d", "D", "a")];
+    expect(orderedProjects(reg).map(({ project, depth }) => `${depth}:${project.slug}`)).toEqual(["0:a", "1:d", "0:b", "0:c"]);
+  });
+
+  it("shows no headings at all when nothing is assigned", () => {
+    expect(groupByProject([{ p: null }, { p: null }], (i) => i.p, REGISTRY)).toEqual([]);
+  });
+
   it("suggests the longest active project slug on a '-' boundary, never an archived one", () => {
     expect(suggestProject("finance-dev-silver", REGISTRY)?.slug).toBe("finance-dev");
     expect(suggestProject("finance-reports", REGISTRY)?.slug).toBe("finance");
     expect(suggestProject("nfl", REGISTRY)?.slug).toBe("nfl");
     expect(suggestProject("nflx-catchup", REGISTRY)).toBeNull();
     expect(suggestProject("old-thing", REGISTRY)).toBeNull();
+    // The SLUG, exactly: never the display name, never a different case.
+    expect(suggestProject("Finance-reports", REGISTRY)).toBeNull();
+    expect(suggestProject("NFL-catchup", REGISTRY)).toBeNull();
+    expect(suggestProject("finance dev-x", REGISTRY)).toBeNull();
   });
 
   it("keeps the shell's ?project= on the module's own navigation", () => {
@@ -138,10 +162,10 @@ describe("with the registry", () => {
     expect(screen.queryByRole("link", { name: "legacy" })).not.toBeInTheDocument();
     await userEvent.click(old);
     expect(screen.getByRole("link", { name: "legacy" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "ghost" }).closest("td")).toHaveTextContent("not in the registry");
+    expect(screen.getByRole("button", { name: "Not in the registry: ghost" })).toHaveAttribute("aria-expanded", "true");
     // Order down the table: parent, its children, NFL, archived, unknown, No project last.
     const order = [...document.querySelectorAll("td[colspan] button[aria-expanded]")].map((h) => h.textContent?.replace(/^[▾▸]/, ""));
-    expect(order).toEqual(["Finance", "Finance dev", "Finance prod", "NFL", "Old stuff", "ghost", "No project"]);
+    expect(order).toEqual(["Finance", "Finance dev", "Finance prod", "NFL", "Old stuff", "Not in the registry: ghost", "No project"]);
   });
 
   it("filters by the shell's ?project=, including the children, and keeps it on navigation", async () => {
@@ -156,6 +180,41 @@ describe("with the registry", () => {
     await userEvent.click(screen.getByRole("link", { name: "finance-dev-silver" }));
     expect(window.location.pathname).toBe(`/pipeline/pipelines/${dev.id}`);
     expect(window.location.search).toBe("?project=finance");
+  });
+
+  it("shows a selected sub-project under its parent's heading, with only its own items", async () => {
+    seed();
+    window.history.replaceState({}, "", "/pipeline/pipelines?project=finance-dev");
+    renderApp(b, { path: "/pipeline/pipelines?project=finance-dev" });
+    await screen.findByRole("link", { name: "finance-dev-silver" });
+    const order = [...document.querySelectorAll("td[colspan] button[aria-expanded]")].map((h) => h.textContent?.replace(/^[▾▸]/, ""));
+    expect(order).toEqual(["Finance", "Finance dev"]);
+    expect(screen.queryByRole("link", { name: "finance-shared" })).not.toBeInTheDocument();
+  });
+
+  it("shows no project headings when the registry answers but nothing is assigned", async () => {
+    b.addPipeline("one", [b.ref("x")]);
+    b.addPipeline("two", [b.ref("y")]);
+    renderApp(b, { path: "/pipeline/pipelines" });
+    await screen.findByRole("link", { name: "one" });
+    expect(screen.getByLabelText("Group by")).toHaveValue("project");
+    expect(document.querySelectorAll("td[colspan] button[aria-expanded]")).toHaveLength(0);
+  });
+
+  it.each([["nope"], ["Not A Slug"]])("says there is no project called %s, with an empty list", async (slug) => {
+    seed();
+    b.addTask("finance-dev-loader").project = "finance-dev";
+    const qs = `?project=${encodeURIComponent(slug)}`;
+    window.history.replaceState({}, "", `/pipeline/pipelines${qs}`);
+    const view = renderApp(b, { path: `/pipeline/pipelines${qs}` });
+    expect(await screen.findByText(`There is no project called "${slug}".`)).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByText("No pipelines yet")).not.toBeInTheDocument();
+    view.unmount();
+    window.history.replaceState({}, "", `/pipeline/tasks${qs}`);
+    renderApp(b, { path: `/pipeline/tasks${qs}` });
+    expect(await screen.findByText(`There is no project called "${slug}".`)).toBeInTheDocument();
+    expect(screen.queryByText("finance-dev-loader")).not.toBeInTheDocument();
   });
 
   it("offers active projects, children indented, on a new pipeline", async () => {

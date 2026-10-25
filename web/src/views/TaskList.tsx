@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import type { ViewCtx } from "../context";
 import { formatRelative, formatStamp, formatTime } from "../format";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
-import { useProjects, useSelectedProject } from "../projects";
+import { noSuchProject, useProjects, useSelectedProject } from "../projects";
 import type { TaskEntity } from "../types";
 import { ProjectSelect } from "./ProjectSelect";
 import {
@@ -49,6 +49,7 @@ export function TaskList({ v }: { v: ViewCtx }) {
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const selectedProject = useSelectedProject();
+  const missingProject = noSuchProject(selectedProject, useProjects(v.api));
   const load = useLoad(() => api.listTasks(v.api, q, selectedProject), [v.api, q, selectedProject]);
 
   async function remove(t: TaskEntity) {
@@ -85,8 +86,9 @@ export function TaskList({ v }: { v: ViewCtx }) {
       <input type="search" aria-label="Search tasks" placeholder="Search tasks…" className={`${inputClass} max-w-sm`} value={query} onChange={(e) => setQuery(e.target.value)} />
 
       {actionError && <Banner tone="error">{actionError}</Banner>}
+      {missingProject !== null && <Banner tone="warn">There is no project called "{missingProject}".</Banner>}
 
-      <Loaded
+      {missingProject === null && <Loaded
         state={load.state}
         retry={load.reload}
         skeleton={
@@ -169,7 +171,7 @@ export function TaskList({ v }: { v: ViewCtx }) {
             </div>
           )
         }
-      </Loaded>
+      </Loaded>}
     </div>
   );
 }

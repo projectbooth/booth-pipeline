@@ -4,7 +4,7 @@ import type { ViewCtx } from "../context";
 import { formatDuration, formatRelative, formatStamp, formatTime } from "../format";
 import { errorMessage, useDebounced, useInterval, useLoad } from "../hooks";
 import { isActive, latestRunsFor, runStart } from "../runs";
-import { groupByProject, projectName, useProjects, useSelectedProject } from "../projects";
+import { groupByProject, noSuchProject, projectName, useProjects, useSelectedProject } from "../projects";
 import type { Pipeline, Project, Run } from "../types";
 import {
   Badge,
@@ -79,26 +79,32 @@ interface Heading {
   mono: boolean;
   depth: number;
   archived: boolean;
+  collapsed: boolean;
   unknown: boolean;
   items: Pipeline[];
 }
 
 function headingsFor(groupBy: GroupBy, pipelines: Pipeline[], projects: Project[] | null): Heading[] {
   if (groupBy === "project" && projects) {
-    return groupByProject(pipelines, (p) => p.project, projects).map((g) => ({
-      key: g.slug === null ? "project:none" : `project:${g.slug}`,
-      label: g.label,
-      mono: g.unknown,
-      depth: g.depth,
-      archived: g.archived,
-      unknown: g.unknown,
-      items: g.items,
-    }));
+    const groups = groupByProject(pipelines, (p) => p.project, projects);
+    if (groups.length > 0)
+      return groups.map((g) => ({
+        key: g.slug === null ? "project:none" : `project:${g.slug}`,
+        label: g.unknownSlugs ? `${g.label}: ${g.unknownSlugs.join(", ")}` : g.label,
+        mono: false,
+        depth: g.depth,
+        archived: g.archived,
+        collapsed: g.collapsed,
+        unknown: g.unknown,
+        items: g.items,
+      }));
   }
   if (groupBy === "name") {
-    return groupByPrefix(pipelines).map(({ group, items }) => ({ key: `name:${group}`, label: group, mono: group !== NO_PREFIX, depth: 0, archived: false, unknown: false, items }));
+    return groupByPrefix(pipelines).map(({ group, items }) => ({
+      key: `name:${group}`, label: group, mono: group !== NO_PREFIX, depth: 0, archived: false, collapsed: false, unknown: false, items,
+    }));  // fmt
   }
-  return [{ key: "", label: "", mono: false, depth: 0, archived: false, unknown: false, items: pipelines }];
+  return [{ key: "", label: "", mono: false, depth: 0, archived: false, collapsed: false, unknown: false, items: pipelines }];
 }
 
 function readGroupBy(): GroupBy | null {
@@ -147,19 +153,20 @@ export function PipelineList({ v }: { v: ViewCtx }) {
   const projectsState = useProjects(v.api);
   const projects = projectsState.status === "ready" ? projectsState.projects : null;
   const selectedProject = useSelectedProject();
+  const missingProject = noSuchProject(selectedProject, projectsState);
   const [savedGroupBy, setSavedGroupBy] = useState<GroupBy | null>(() => readGroupBy());
   // By project only when the registry answers; otherwise the name stop-gap (never a dead option).
   const groupBy: GroupBy = savedGroupBy === "none" ? "none" : projects && (savedGroupBy ?? "project") === "project" ? "project" : "name";
-  // Which headings are open; a heading nobody has toggled is open unless its project is archived.
+  // Which headings are open; a heading nobody has toggled is open unless the rules collapse it (archived).
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [suggesting, setSuggesting] = useState(false);
   function setGroupBy(g: GroupBy) {
     setSavedGroupBy(g);
     writeGroupBy(g);
   }
-  const isOpen = (key: string, archived: boolean) => open[key] ?? !archived;
-  function toggleGroup(key: string, archived: boolean) {
-    setOpen((was) => ({ ...was, [key]: !(was[key] ?? !archived) }));
+  const isOpen = (key: string, collapsed: boolean) => open[key] ?? !collapsed;
+  function toggleGroup(key: string, collapsed: boolean) {
+    setOpen((was) => ({ ...was, [key]: !(was[key] ?? !collapsed) }));
   }
 
   const load = useLoad(async () => {
@@ -230,7 +237,9 @@ export function PipelineList({ v }: { v: ViewCtx }) {
           }}
         />
       )}
-      {selectedProject && (
+      {missingProject !== null ? (
+        <Banner tone="warn">There is no project called "{missingProject}".</Banner>
+      ) : selectedProject && (
         <p className="text-xs text-slate-500 dark:text-slate-400">
           Showing {projects ? <strong>{projectName(projects, selectedProject)}</strong> : <span className="font-mono">{selectedProject}</span>} and its sub-projects, as chosen in the
           project picker.
@@ -287,6 +296,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
 
       <Loaded state={load.state} retry={load.reload} skeleton={<TableSkeleton />}>
         {({ pipelines, latest }) => {
+          if (missingProject !== null) return null; // the message above says why the list is empty
           if (pipelines.length === 0) {
             return q ? (
               <EmptyState title={`No pipelines match "${q}"`} />
@@ -325,28 +335,23 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                   </tr>
                 </thead>
                 <tbody className={tbodyClass}>
-                  {headingsFor(groupBy, shown, projects).map(({ key, label, mono, depth, archived, unknown, items }) => (
+                  {headingsFor(groupBy, shown, projects).map(({ key, label, mono, depth, archived, collapsed, items }) => (
                     <Fragment key={key || "all"}>
                       {key && (
                         <tr className="bg-slate-50 dark:bg-slate-800/40">
                           <td colSpan={8} className={`py-1.5 pr-3 ${depth > 0 ? "pl-9" : "pl-3"}`}>
-                            <Button size="sm" variant="ghost" aria-expanded={isOpen(key, archived)} onClick={() => toggleGroup(key, archived)}>
-                              <span aria-hidden="true">{isOpen(key, archived) ? "▾" : "▸"}</span>
+                            <Button size="sm" variant="ghost" aria-expanded={isOpen(key, collapsed)} onClick={() => toggleGroup(key, collapsed)}>
+                              <span aria-hidden="true">{isOpen(key, collapsed) ? "▾" : "▸"}</span>
                               <span className={mono ? "font-mono" : ""}>{label}</span>
                             </Button>
                             {archived && <Badge tone="slate">archived</Badge>}
-                            {unknown && (
-                              <Badge tone="amber" title="Assigned to a slug booth-core's registry doesn't list">
-                                not in the registry
-                              </Badge>
-                            )}
                             <span className="ml-1 text-xs text-slate-500 dark:text-slate-400">
                               {items.length} pipeline{items.length === 1 ? "" : "s"}
                             </span>
                           </td>
                         </tr>
                       )}
-                      {isOpen(key, archived) &&
+                      {isOpen(key, collapsed) &&
                         items.map((p) => {
                           const run = latest[p.id] ?? null;
                           const href = v.href({ name: "pipeline", id: p.id });
