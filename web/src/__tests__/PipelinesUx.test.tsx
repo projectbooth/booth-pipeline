@@ -101,6 +101,22 @@ describe("the canvas", () => {
   });
 });
 
+describe("the run page's canvas", () => {
+  it("is compact by default too, and expands on its own, remembered separately", async () => {
+    const p = scheduled();
+    const r = b.addRun(p.id, "succeeded", "2026-10-25T09:00:00+00:00", {
+      tasks: [{ taskKey: "extract", status: "succeeded", attempts: 1, startedAt: null, finishedAt: null, error: null }],
+    });
+    renderApp(b, { path: `/pipeline/runs/${r.id}` });
+    const canvas = await screen.findByRole("region", { name: "Run DAG" });
+    expect(canvas.className).toContain("h-[280px] sm:h-[320px]");
+    await userEvent.click(screen.getByRole("button", { name: "Expand canvas" }));
+    expect(canvas.className).toContain("h-[420px]");
+    expect(localStorage.getItem("booth-pipeline.run-dag-expanded")).toBe("1");
+    expect(localStorage.getItem("booth-pipeline.dag-expanded")).toBeNull(); // the pipeline page's own choice is untouched
+  });
+});
+
 describe("the pipeline list, grouped by name", () => {
   it("groups by the part before the first '-', with 'No prefix' last", () => {
     expect(namePrefix("finance-dev-silver")).toBe("finance");

@@ -3,6 +3,7 @@ import type { ViewCtx } from "../../context";
 import { DagCanvas } from "../../dag/DagCanvas";
 import { NodeDetails } from "../../dag/NodeDetails";
 import { NodeEditor } from "../../dag/NodeEditor";
+import { useExpandedCanvas } from "../../dag/useExpandedCanvas";
 import type { Resolved } from "../../dag/resolve";
 import { formatRelative, formatStamp } from "../../format";
 import { TaskPicker } from "../../task/TaskPicker";
@@ -40,13 +41,7 @@ export function DagTab({
   const [versionNoteOpen, setVersionNoteOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [expanded, setExpanded] = useState(() => readExpanded());
-  function toggleExpanded() {
-    setExpanded((was) => {
-      writeExpanded(!was);
-      return !was;
-    });
-  }
+  const [expanded, toggleExpanded] = useExpandedCanvas("booth-pipeline.dag-expanded");
 
   const refs = ed.refs;
   const statuses = useMemo(() => latestRun.statusesFor(refs), [latestRun, refs]);
@@ -227,24 +222,3 @@ export function DagTab({
     </div>
   );
 }
-
-// Whether this viewer last left the canvas expanded: a per-browser convenience, so it must never
-// matter if storage is unavailable (a private window, blocked site data).
-const EXPANDED_KEY = "booth-pipeline.dag-expanded";
-
-function readExpanded(): boolean {
-  try {
-    return localStorage.getItem(EXPANDED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeExpanded(on: boolean): void {
-  try {
-    localStorage.setItem(EXPANDED_KEY, on ? "1" : "0");
-  } catch {
-    // nothing to do: the canvas just won't remember it
-  }
-}
-
