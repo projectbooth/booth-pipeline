@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api, type ApiContext } from "../api/client";
 import { errorMessage, useLoad } from "../hooks";
 import type { TaskConfig } from "../types";
-import { Banner, Button, inputClass } from "../ui/primitives";
+import { Badge, Banner, Button, inputClass } from "../ui/primitives";
 import { TaskConfigForm } from "./TaskConfigForm";
 import type { SparkLimits } from "./SparkOptionsForm";
 
@@ -102,23 +102,11 @@ export function TaskSettingsForm({
   return (
     <div className="flex flex-col gap-4">
       {runners.state.status === "error" && <Banner tone="warn">Runners could not be listed ({runners.state.error}).</Banner>}
-      <TaskConfigForm
-        config={config}
-        runners={runners.state.status === "ready" ? runners.state.data : []}
-        api={ctx}
-        readOnly={readOnly}
-        error={error ?? undefined}
-        pip={moduleConfig.state.status === "ready" ? moduleConfig.state.data.pip : null}
-        sparkLimits={sparkLimits.state.status === "ready" ? (sparkLimits.state.data as SparkLimits | null) : null}
-        sparkRetryFloorSeconds={moduleConfig.state.status === "ready" ? moduleConfig.state.data.spark?.retryMinDelaySeconds : null}
-        onChange={edit}
-      />
+      {/* The save actions first, so they're on screen above a long form, with whether anything is unsaved. */}
       {notice && <Banner tone="success">{notice}</Banner>}
       {!readOnly && (
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            {dirty && <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Unsaved task changes</span>}
-            <span className="flex-1" />
             {onCancel && (
               <Button onClick={onCancel} disabled={saving !== null}>
                 {dirty ? "Cancel" : "Close"}
@@ -130,6 +118,7 @@ export function TaskSettingsForm({
             <Button variant="primary" onClick={() => setNotesOpen(true)} disabled={saving !== null || notesOpen}>
               Save as new version…
             </Button>
+            {dirty ? <Badge tone="amber">Unsaved task changes</Badge> : <span className="text-xs text-slate-500 dark:text-slate-400">No unsaved task changes</span>}
           </div>
           {notesOpen && (
             <div role="group" aria-label="New task version" className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-800/50">
@@ -153,6 +142,17 @@ export function TaskSettingsForm({
           )}
         </div>
       )}
+      <TaskConfigForm
+        config={config}
+        runners={runners.state.status === "ready" ? runners.state.data : []}
+        api={ctx}
+        readOnly={readOnly}
+        error={error ?? undefined}
+        pip={moduleConfig.state.status === "ready" ? moduleConfig.state.data.pip : null}
+        sparkLimits={sparkLimits.state.status === "ready" ? (sparkLimits.state.data as SparkLimits | null) : null}
+        sparkRetryFloorSeconds={moduleConfig.state.status === "ready" ? moduleConfig.state.data.spark?.retryMinDelaySeconds : null}
+        onChange={edit}
+      />
     </div>
   );
 }

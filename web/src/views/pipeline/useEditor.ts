@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "../../api/client";
 import type { ViewCtx } from "../../context";
-import { autoLayout, duplicateRef, hasOverlappingPositions, newRef, parseTaskField, removeRef, renameKey } from "../../graph";
+import { autoLayout, duplicateRef, hasOverlappingPositions, keyFromName, newRef, parseTaskField, removeRef, renameKey } from "../../graph";
 import { errorMessage, useDebounced } from "../../hooks";
 import type { TaskEntity, TaskRef, ValidateResult } from "../../types";
 import { currentSpec, type PipelineData } from "./data";
@@ -86,7 +86,7 @@ export function useEditor(v: ViewCtx, d: PipelineData, reload: () => void) {
   }
 
   function addTask(task: TaskEntity) {
-    const r = newRef(task.id, refs);
+    const r = newRef(task.id, refs, undefined, keyFromName(task.name, p.name, refs.map((x) => x.key)));
     change([...refs, r]);
     setAdding(false);
     setSelected(r.key);

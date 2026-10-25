@@ -6,12 +6,15 @@ import {
   disconnect,
   edgeId,
   hasOverlappingPositions,
+  defaultTaskName,
+  keyFromName,
   newRef,
   parseTaskField,
   removeRef,
   renameKey,
   toFlow,
   uniqueKey,
+  KEY_RE,
 } from "../graph";
 import type { TaskRef } from "../types";
 
@@ -137,6 +140,20 @@ describe("new references", () => {
     expect(ref.taskVersion).toBe("latest");
     expect(ref.dependsOn).toEqual([]);
     expect(ref.key).toMatch(/^task_\d+$/);
+  });
+
+  it("take a meaningful key from the task's name, without this pipeline's prefix", () => {
+    expect(keyFromName("silver-load", "silver", [])).toBe("load");
+    expect(keyFromName("Silver-Load Orders", "silver", [])).toBe("load_orders");
+    expect(keyFromName("shared-loader", "silver", [])).toBe("shared_loader"); // another pipeline's prefix stays
+    expect(keyFromName("silver-", "silver", [])).toBe("silver"); // nothing after the prefix: keep it all
+    expect(keyFromName("2024 import", "x", [])).toBe("t_2024_import"); // a key starts with a letter
+    expect(keyFromName("!!!", "x", [])).toBe("task");
+    expect(keyFromName("load", "silver", ["load", "load_2"])).toBe("load_3");
+    expect(keyFromName("a".repeat(100), "x", []).length).toBeLessThanOrEqual(63);
+    for (const k of [keyFromName("silver-load", "silver", []), keyFromName("2024 import", "x", []), keyFromName("a".repeat(100), "x", ["a".repeat(58)])]) expect(k).toMatch(KEY_RE);
+    expect(defaultTaskName("finance-dev-silver", "load")).toBe("finance-dev-silver-load");
+    expect(newRef("t1", [], undefined, "load").key).toBe("load");
   });
 
   it("are placed below what is already on the canvas", () => {

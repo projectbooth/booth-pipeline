@@ -243,9 +243,9 @@ export function StatStrip({ stats, label }: { stats: Stat[]; label: string }) {
       className="grid grid-cols-2 overflow-hidden rounded-lg border border-slate-200 bg-white sm:grid-cols-3 lg:grid-cols-6 dark:border-slate-700 dark:bg-slate-900"
     >
       {stats.map((s) => (
-        <div key={s.label} className="min-w-0 border-b border-r border-slate-200 px-4 py-3 dark:border-slate-700">
+        <div key={s.label} className="min-w-0 border-b border-r border-slate-200 px-3 py-2 dark:border-slate-700">
           <dt className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{s.label}</dt>
-          <dd title={s.title} className={`mt-1 truncate text-sm text-slate-900 dark:text-slate-100 ${s.mono === false ? "" : "font-mono"}`}>
+          <dd title={s.title} className={`mt-0.5 truncate text-sm text-slate-900 dark:text-slate-100 ${s.mono === false ? "" : "font-mono"}`}>
             {s.value}
           </dd>
         </div>

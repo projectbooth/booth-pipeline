@@ -40,6 +40,13 @@ export function DagTab({
   const [versionNoteOpen, setVersionNoteOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [expanded, setExpanded] = useState(() => readExpanded());
+  function toggleExpanded() {
+    setExpanded((was) => {
+      writeExpanded(!was);
+      return !was;
+    });
+  }
 
   const refs = ed.refs;
   const statuses = useMemo(() => latestRun.statusesFor(refs), [latestRun, refs]);
@@ -75,15 +82,20 @@ export function DagTab({
             ))}
           </select>
         </label>
-        {run && (
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Status from{" "}
-            <Link href={v.href({ name: "run", id: run.id })} onNavigate={v.goPath} className={`${linkClass} font-mono`}>
-              run {run.id.slice(0, 8)}
-            </Link>{" "}
-            (v{run.pipelineVersion}, {formatRelative(run.startedAt ?? run.createdAt)})
-          </p>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          {run && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Status from{" "}
+              <Link href={v.href({ name: "run", id: run.id })} onNavigate={v.goPath} className={`${linkClass} font-mono`}>
+                run {run.id.slice(0, 8)}
+              </Link>{" "}
+              (v{run.pipelineVersion}, {formatRelative(run.startedAt ?? run.createdAt)})
+            </p>
+          )}
+          <Button size="sm" variant="ghost" aria-pressed={expanded} onClick={toggleExpanded}>
+            {expanded ? "Shrink canvas" : "Expand canvas"}
+          </Button>
+        </div>
       </div>
 
       {/* Row 2: the builder toolbar (writers only). */}
@@ -163,6 +175,7 @@ export function DagTab({
         statuses={statuses}
         errors={ed.nodeErrors}
         theme={v.theme}
+        size={expanded ? "dag" : "dagCompact"}
         empty={
           <div className="pointer-events-auto max-w-sm rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center dark:border-slate-600 dark:bg-slate-900">
             <p className="text-sm font-medium text-slate-800 dark:text-slate-100">This pipeline has no tasks yet</p>
@@ -179,7 +192,7 @@ export function DagTab({
 
       {/* The one panel, below the canvas. */}
       {canEdit && ed.adding ? (
-        <TaskPicker api={v.api} title="Add a task" onPick={ed.addTask} onCancel={ed.stopAdding} />
+        <TaskPicker api={v.api} title="Add a task" pipelineName={p.name} onPick={ed.addTask} onCancel={ed.stopAdding} />
       ) : selectedRef ? (
         canEdit ? (
           <NodeEditor
@@ -198,6 +211,7 @@ export function DagTab({
             onDuplicate={ed.duplicate}
             onTaskSaved={onTaskSaved}
             onTaskDirty={onTaskDirty}
+            pipelineName={p.name}
           />
         ) : (
           <NodeDetails v={v} taskRef={selectedRef} node={resolved[selectedRef.key]} lastRun={run} runCounts={selectedRef.key in statuses} />
@@ -213,3 +227,24 @@ export function DagTab({
     </div>
   );
 }
+
+// Whether this viewer last left the canvas expanded: a per-browser convenience, so it must never
+// matter if storage is unavailable (a private window, blocked site data).
+const EXPANDED_KEY = "booth-pipeline.dag-expanded";
+
+function readExpanded(): boolean {
+  try {
+    return localStorage.getItem(EXPANDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeExpanded(on: boolean): void {
+  try {
+    localStorage.setItem(EXPANDED_KEY, on ? "1" : "0");
+  } catch {
+    // nothing to do: the canvas just won't remember it
+  }
+}
+

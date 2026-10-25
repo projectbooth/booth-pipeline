@@ -81,11 +81,39 @@ export function uniqueKey(prefix: string, existing: Iterable<string>): string {
   }
 }
 
+/** A node key that says what the node is, from its task's name, instead of `task_N`. This
+ *  pipeline's own `<pipeline>-` prefix is dropped (a task named by the default below, `silver-load`
+ *  in pipeline `silver`, gives `load`), the rest is folded into the key grammar (`KEY_RE`), and a
+ *  taken key gets `_2`, `_3`, …. Only the default: a key can be renamed on the node. */
+export function keyFromName(taskName: string, pipelineName: string, existing: Iterable<string>): string {
+  let base = taskName.trim();
+  const prefix = `${pipelineName.trim()}-`.toLowerCase();
+  if (pipelineName.trim() && base.toLowerCase().startsWith(prefix) && base.length > prefix.length) base = base.slice(prefix.length);
+  let key = base
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  if (!key) key = "task";
+  else if (!/^[a-z]/.test(key)) key = `t_${key}`;
+  key = key.slice(0, 58).replace(/_$/, "");
+  const taken = new Set(existing);
+  if (!taken.has(key)) return key;
+  for (let i = 2; ; i++) if (!taken.has(`${key}_${i}`)) return `${key}_${i}`;
+}
+
+/** What a new task is called by default when it's made for a node: `<pipeline>-<node>`. Tasks are
+ *  reusable across pipelines, so this is a default the person can change, not a rule. */
+export function defaultTaskName(pipelineName: string, node: string): string {
+  return `${pipelineName.trim()}-${node.trim()}`;
+}
+
 /** A new DAG node referencing `taskId` at its latest version (ADR 0071: a reference, never an
- *  embedded task definition — the task's own config lives and is edited separately). */
-export function newRef(taskId: string, existing: TaskRef[], position?: { x: number; y: number }): TaskRef {
+ *  embedded task definition — the task's own config lives and is edited separately). `key` is
+ *  normally `keyFromName(...)`; without one it falls back to `task_N`. */
+export function newRef(taskId: string, existing: TaskRef[], position?: { x: number; y: number }, key?: string): TaskRef {
   return {
-    key: uniqueKey("task", existing.map((r) => r.key)),
+    key: key ?? uniqueKey("task", existing.map((r) => r.key)),
     taskId,
     taskVersion: "latest",
     dependsOn: [],
