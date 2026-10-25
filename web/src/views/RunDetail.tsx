@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { ViewCtx } from "../context";
 import { DagCanvas } from "../dag/DagCanvas";
+import { useExpandedCanvas } from "../dag/useExpandedCanvas";
 import { useResolved } from "../dag/resolve";
 import { formatDuration, formatRelative, formatStamp, formatTime } from "../format";
 import { autoLayout, hasOverlappingPositions } from "../graph";
@@ -43,6 +44,8 @@ export function RunDetail({ v, runId, initialTask }: { v: ViewCtx; runId: string
 
 function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload: () => void; initialTask?: string }) {
   const [selected, setSelected] = useState<string | null>(initialTask ?? null);
+  // Compact by default, as on the pipeline page; remembered separately, per browser.
+  const [canvasExpanded, toggleCanvas] = useExpandedCanvas("booth-pipeline.run-dag-expanded");
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const active = isActive(run);
@@ -155,7 +158,23 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
       {graphError ? (
         <Banner tone="warn">The pipeline graph could not be loaded ({graphError}); the task table below is still accurate.</Banner>
       ) : (
-        <DagCanvas label="Run DAG" refs={refs} resolved={resolved} selected={selected} onSelect={setSelected} statuses={statuses} theme={v.theme} size="run" />
+        <div className="flex flex-col gap-1.5">
+          <div className="flex justify-end">
+            <Button size="sm" variant="ghost" aria-pressed={canvasExpanded} onClick={toggleCanvas}>
+              {canvasExpanded ? "Shrink canvas" : "Expand canvas"}
+            </Button>
+          </div>
+          <DagCanvas
+            label="Run DAG"
+            refs={refs}
+            resolved={resolved}
+            selected={selected}
+            onSelect={setSelected}
+            statuses={statuses}
+            theme={v.theme}
+            size={canvasExpanded ? "run" : "runCompact"}
+          />
+        </div>
       )}
 
       <div className="relative overflow-x-auto">
