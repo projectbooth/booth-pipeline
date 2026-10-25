@@ -33,6 +33,7 @@ from .model import (
     validate_task_config,
 )
 from .owners import is_service_account, parse_service_account
+from .projects import SLUG_RE, ProjectsClient, ProjectsUnavailable, with_children
 from .records import (
     RUN_ACTIVE,
     RUN_QUEUED,
@@ -99,16 +100,24 @@ class PipelineService:
     storage: StorageClient
     # ADR 0120: core's service accounts, read as the caller (checked when one is named as an owner).
     accounts: ServiceAccountsClient | None = None
+    # ADR 0124: booth-core's project registry, read as the caller to check an assigned slug and to widen
+    # a ?project= filter to its children. Nothing else here reads a project.
+    projects: ProjectsClient | None = None
     # ADR 0123: whether this module holds an event-bus credential, without which no event trigger fires. A
     # callable (the app's EventBus.configured, read each time: the Secret may arrive later) or a fixed bool.
     event_bus: Any = False
 
     # ---- pipelines ----
-    def create_pipeline(self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str) -> tuple[Pipeline, PipelineVersion | None]:
+    def create_pipeline(
+        self, ident: Identity, name: str, description: str, spec: PipelineSpec | None, notes: str, project: str | None = None
+    ) -> tuple[Pipeline, PipelineVersion | None]:
         if spec is not None:
             # Validate BEFORE creating anything, so a bad first version does not leave an empty pipeline behind.
             spec = self._prepare(ident, spec)
+        self._check_project(ident, project, None)
         p = self.store.create_pipeline(ident.workspace, name.strip(), description.strip(), ident.display_name)
+        if project is not None:
+            self.store.set_pipeline_project(ident.workspace, p.id, project)
         v = self.store.add_version(ident.workspace, p.id, spec, notes, ident.display_name) if spec is not None else None
         if spec is not None:
             self.store.save_pipeline_draft(ident.workspace, p.id, spec, ident.display_name)
@@ -117,11 +126,50 @@ class PipelineService:
     def get_pipeline(self, ident: Identity, pipeline_id: str) -> Pipeline:
         return self._need(self.store.get_pipeline(ident.workspace, pipeline_id), "pipeline")
 
-    def list_pipelines(self, ident: Identity, q: str, limit: int, offset: int) -> Page:
-        return self.store.list_pipelines(ident.workspace, q, limit, offset)
+    def list_pipelines(self, ident: Identity, q: str, limit: int, offset: int, project: str | None = None) -> Page:
+        return self.store.list_pipelines(ident.workspace, q, limit, offset, self._project_filter(ident, project))
 
-    def update_pipeline(self, ident: Identity, pipeline_id: str, name: str, description: str) -> Pipeline:
-        return self._need(self.store.update_pipeline(ident.workspace, pipeline_id, name.strip(), description.strip()), "pipeline")
+    def update_pipeline(self, ident: Identity, pipeline_id: str, name: str, description: str, project: str | None = None, set_project: bool = False) -> Pipeline:
+        """``set_project``: the body named a project (null clears it); otherwise the saved one is kept."""
+        if set_project:
+            self._check_project(ident, project, self.get_pipeline(ident, pipeline_id).project)
+        p = self._need(self.store.update_pipeline(ident.workspace, pipeline_id, name.strip(), description.strip()), "pipeline")
+        if set_project and project != p.project:
+            p = self._need(self.store.set_pipeline_project(ident.workspace, pipeline_id, project), "pipeline")
+        return p
+
+    # ---- projects (ADR 0124): a label only ----
+    def _check_project(self, ident: Identity, slug: str | None, current: str | None) -> None:
+        """A newly assigned project must be one of the workspace's active projects. Clearing one, or
+        keeping the one already there (even if it has since been archived), needs no registry."""
+        if slug is None or slug == current:
+            return
+        if not SLUG_RE.match(slug):
+            raise ModelError(f"{slug!r} is not a project slug (lowercase letters, digits and '-')", "project")
+        if self.projects is None:
+            raise Unavailable("projects are booth-core's, and this module has no core.url, so a project can't be assigned")
+        try:
+            known = {p.slug: p for p in self.projects.list(ident.token, ident.workspace)}
+        except ProjectsUnavailable as e:
+            raise Unavailable(f"booth-core's project registry isn't available ({e}), so a project can't be assigned now; everything else works as before") from None
+        if slug not in known:
+            raise ModelError(f"this workspace has no project {slug!r}", "project")
+        if known[slug].archived:
+            raise ModelError(f"project {slug!r} is archived; choose an active project", "project")
+
+    def _project_filter(self, ident: Identity, slug: str | None) -> frozenset[str] | None:
+        """``?project=<slug>``: that project and its children. With no registry to ask, the slug alone,
+        so a list is never blocked."""
+        if not slug:
+            return None
+        if not SLUG_RE.match(slug):
+            return frozenset()
+        if self.projects is None:
+            return frozenset({slug})
+        try:
+            return frozenset(with_children(self.projects.list(ident.token, ident.workspace), slug))
+        except ProjectsUnavailable:
+            return frozenset({slug})
 
     def delete_pipeline(self, ident: Identity, pipeline_id: str) -> None:
         self.get_pipeline(ident, pipeline_id)
@@ -322,10 +370,15 @@ class PipelineService:
         return sorted(uses.items())
 
     # ---- tasks (ADR 0071: standalone, versioned, reusable — the direct counterpart of pipelines) ----
-    def create_task(self, ident: Identity, name: str, description: str, config: TaskConfig | None, notes: str) -> tuple[TaskEntity, TaskVersionRecord | None]:
+    def create_task(
+        self, ident: Identity, name: str, description: str, config: TaskConfig | None, notes: str, project: str | None = None
+    ) -> tuple[TaskEntity, TaskVersionRecord | None]:
         if config is not None:
             config = self._prepare_task_config(ident, config, previous=None)
+        self._check_project(ident, project, None)
         t = self.store.create_task(ident.workspace, name.strip(), description.strip(), ident.display_name)
+        if project is not None:
+            self.store.set_task_project(ident.workspace, t.id, project)
         v = self.store.add_task_version(ident.workspace, t.id, config, notes, ident.display_name) if config is not None else None
         if config is not None:
             self.store.save_task_draft(ident.workspace, t.id, config, ident.display_name)
@@ -334,11 +387,16 @@ class PipelineService:
     def get_task(self, ident: Identity, task_id: str) -> TaskEntity:
         return self._need(self.store.get_task(ident.workspace, task_id), "task")
 
-    def list_tasks(self, ident: Identity, q: str, limit: int, offset: int) -> Page:
-        return self.store.list_tasks(ident.workspace, q, limit, offset)
+    def list_tasks(self, ident: Identity, q: str, limit: int, offset: int, project: str | None = None) -> Page:
+        return self.store.list_tasks(ident.workspace, q, limit, offset, self._project_filter(ident, project))
 
-    def update_task(self, ident: Identity, task_id: str, name: str, description: str) -> TaskEntity:
-        return self._need(self.store.update_task(ident.workspace, task_id, name.strip(), description.strip()), "task")
+    def update_task(self, ident: Identity, task_id: str, name: str, description: str, project: str | None = None, set_project: bool = False) -> TaskEntity:
+        if set_project:
+            self._check_project(ident, project, self.get_task(ident, task_id).project)
+        t = self._need(self.store.update_task(ident.workspace, task_id, name.strip(), description.strip()), "task")
+        if set_project and project != t.project:
+            t = self._need(self.store.set_task_project(ident.workspace, task_id, project), "task")
+        return t
 
     def delete_task(self, ident: Identity, task_id: str) -> None:
         if not self.store.delete_task(ident.workspace, task_id):

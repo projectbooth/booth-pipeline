@@ -23,6 +23,7 @@ from .catalog_client import CatalogClient
 from .config import Config
 from .event_bus import EventBus, TriggerIngest
 from .model import ModelError
+from .projects import ProjectsClient
 from .runners.base import Runner
 from .runners.kubejob import KubernetesJobRunner
 from .runners.registry import RunnerRegistry
@@ -132,6 +133,7 @@ def create_app(
     minter: WorkloadMinter | None = None,
     runner: Runner | None = None,
     accounts: ServiceAccountsClient | None = None,
+    projects: ProjectsClient | None = None,
 ) -> FastAPI:
     store = store or build_store(cfg)
     if runner is None:
@@ -166,6 +168,7 @@ def create_app(
     worker_id = f"{platform.node()}-{uuid4().hex[:8]}"
     manager = RunManager(store, registry, cfg, worker_id, minter)
     service = PipelineService(store, registry, catalog, manager, storage, accounts or (ServiceAccountsClient(cfg.core_url) if cfg.core_url else None))
+    service.projects = projects or (ProjectsClient(cfg.core_url) if cfg.core_url else None)
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
     # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
     manager.on_run_finished = scheduler.wake

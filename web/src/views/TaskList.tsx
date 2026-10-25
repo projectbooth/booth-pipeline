@@ -3,7 +3,9 @@ import { api } from "../api/client";
 import type { ViewCtx } from "../context";
 import { formatRelative, formatStamp, formatTime } from "../format";
 import { errorMessage, useDebounced, useLoad } from "../hooks";
+import { noSuchProject, useProjects, useSelectedProject } from "../projects";
 import type { TaskEntity } from "../types";
+import { ProjectSelect } from "./ProjectSelect";
 import {
   Badge,
   Banner,
@@ -46,7 +48,9 @@ export function TaskList({ v }: { v: ViewCtx }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const load = useLoad(() => api.listTasks(v.api, q), [v.api, q]);
+  const selectedProject = useSelectedProject();
+  const missingProject = noSuchProject(selectedProject, useProjects(v.api));
+  const load = useLoad(() => api.listTasks(v.api, q, selectedProject), [v.api, q, selectedProject]);
 
   async function remove(t: TaskEntity) {
     setDeleting(true);
@@ -82,8 +86,9 @@ export function TaskList({ v }: { v: ViewCtx }) {
       <input type="search" aria-label="Search tasks" placeholder="Search tasks…" className={`${inputClass} max-w-sm`} value={query} onChange={(e) => setQuery(e.target.value)} />
 
       {actionError && <Banner tone="error">{actionError}</Banner>}
+      {missingProject !== null && <Banner tone="warn">There is no project called "{missingProject}".</Banner>}
 
-      <Loaded
+      {missingProject === null && <Loaded
         state={load.state}
         retry={load.reload}
         skeleton={
@@ -166,7 +171,7 @@ export function TaskList({ v }: { v: ViewCtx }) {
             </div>
           )
         }
-      </Loaded>
+      </Loaded>}
     </div>
   );
 }
@@ -174,6 +179,9 @@ export function TaskList({ v }: { v: ViewCtx }) {
 function NewTaskCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const projectsState = useProjects(v.api);
+  const projects = projectsState.status === "ready" ? projectsState.projects : null;
+  const [project, setProject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
@@ -182,7 +190,7 @@ function NewTaskCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const t = await api.createTask(v.api, name.trim(), description.trim());
+      const t = await api.createTask(v.api, name.trim(), description.trim(), undefined, projects && project ? project : undefined);
       v.go({ name: "task", id: t.id });
     } catch (err) {
       setError({ message: errorMessage(err), field: (err as { field?: string }).field });
@@ -200,8 +208,11 @@ function NewTaskCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) {
           <Field id="new-task-description" label="Description">
             {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
+          {projects && (
+            <ProjectSelect id="new-task-project" value={project} onChange={setProject} projects={projects} error={error?.field === "project" ? error.message : undefined} />
+          )}
         </div>
-        {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}
+        {error && error.field !== "name" && error.field !== "project" && <Banner tone="error">{error.message}</Banner>}
         <div className="flex gap-2">
           <Button type="submit" variant="primary" disabled={busy || name.trim() === ""}>
             {busy ? "Creating…" : "Create and configure"}

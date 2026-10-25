@@ -92,6 +92,8 @@ def pipeline_json(p: Pipeline, ident: Identity | None = None) -> dict[str, Any]:
         "pinnedVersion": p.pinned_version,
         # ADR 0123: beside `schedule`. Its live state is GET /pipelines/{id}/event-trigger.
         "eventTrigger": p.event_trigger.model_dump(by_alias=True, exclude_none=True) if p.event_trigger else None,
+        # ADR 0124: a booth-core project slug, or null. A navigation label only.
+        "project": p.project,
         # ADR 0073: whether a mutable draft has ever been saved (plain Save, or "Save as new
         # version", which also refreshes it) — separate from latestVersion above.
         "hasDraft": p.has_draft,
@@ -122,6 +124,7 @@ def task_json(t: TaskEntity) -> dict[str, Any]:
         "createdAt": _iso(t.created_at),
         "updatedAt": _iso(t.updated_at),
         "latestVersion": t.latest_version,
+        "project": t.project,  # ADR 0124
         # ADR 0073: see pipeline_json's own hasDraft/draftUpdatedAt.
         "hasDraft": t.has_draft,
         "draftUpdatedAt": _iso(t.draft_updated_at),
@@ -264,14 +267,15 @@ def runners(request: Request, ident: Identity = Depends(require_read)) -> dict[s
 
 
 @router.get("/pipelines")
-def list_pipelines(request: Request, q: str = "", limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
-    page = svc(request).list_pipelines(ident, q, limit, offset)
+def list_pipelines(request: Request, q: str = "", project: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
+    """``project``: only that project's pipelines and its children's (ADR 0124)."""
+    page = svc(request).list_pipelines(ident, q, limit, offset, project)
     return page_json(page.items, page.total, lambda p: pipeline_json(p, ident))
 
 
 @router.post("/pipelines", status_code=201)
 def create_pipeline(request: Request, body: PipelineCreate, ident: Identity = Depends(require_write)):
-    p, v = svc(request).create_pipeline(ident, body.name, body.description, body.spec, body.notes)
+    p, v = svc(request).create_pipeline(ident, body.name, body.description, body.spec, body.notes, body.project)
     return {**pipeline_json(p, ident), "version": version_json(v) if v else None}
 
 
@@ -294,7 +298,8 @@ def get_pipeline(request: Request, pipeline_id: str, ident: Identity = Depends(r
 
 @router.put("/pipelines/{pipeline_id}")
 def update_pipeline(request: Request, pipeline_id: str, body: PipelineUpdate, ident: Identity = Depends(require_write)):
-    return pipeline_json(svc(request).update_pipeline(ident, pipeline_id, body.name, body.description), ident)
+    p = svc(request).update_pipeline(ident, pipeline_id, body.name, body.description, body.project, set_project="project" in body.model_fields_set)
+    return pipeline_json(p, ident)
 
 
 @router.delete("/pipelines/{pipeline_id}", status_code=204)
@@ -406,14 +411,14 @@ def export_version(request: Request, pipeline_id: str, version: str, ident: Iden
 
 
 @router.get("/tasks")
-def list_tasks(request: Request, q: str = "", limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
-    page = svc(request).list_tasks(ident, q, limit, offset)
+def list_tasks(request: Request, q: str = "", project: str | None = None, limit: int = Limit, offset: int = Offset, ident: Identity = Depends(require_read)):
+    page = svc(request).list_tasks(ident, q, limit, offset, project)
     return page_json(page.items, page.total, task_json)
 
 
 @router.post("/tasks", status_code=201)
 def create_task(request: Request, body: TaskCreate, ident: Identity = Depends(require_write)):
-    t, v = svc(request).create_task(ident, body.name, body.description, body.config, body.notes)
+    t, v = svc(request).create_task(ident, body.name, body.description, body.config, body.notes, body.project)
     return {**task_json(t), "version": task_version_json(v) if v else None}
 
 
@@ -424,7 +429,7 @@ def get_task(request: Request, task_id: str, ident: Identity = Depends(require_r
 
 @router.put("/tasks/{task_id}")
 def update_task(request: Request, task_id: str, body: TaskUpdate, ident: Identity = Depends(require_write)):
-    return task_json(svc(request).update_task(ident, task_id, body.name, body.description))
+    return task_json(svc(request).update_task(ident, task_id, body.name, body.description, body.project, set_project="project" in body.model_fields_set))
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

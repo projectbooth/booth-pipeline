@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApiContext, GetAccessToken } from "./api/client";
 import type { LeaveGuard, ViewCtx } from "./context";
-import { DEFAULT_BASE_PATH, defaultNavigate, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
+import { DEFAULT_BASE_PATH, defaultNavigate, keepProject, parseRoute, routePath, sectionOf, useLocation, type Route, type Section } from "./navigation";
 import type { WorkspaceRole } from "./types";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { InlineConfirm, Link } from "./ui/primitives";
@@ -90,8 +90,8 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
       canWrite: role === "owner" || role === "editor",
       role,
       theme,
-      href: (r) => routePath(r, basePath),
-      go: (r) => goPath(routePath(r, basePath)),
+      href: (r) => keepProject(routePath(r, basePath)),
+      go: (r) => goPath(keepProject(routePath(r, basePath))),
       goPath,
       setLeaveGuard,
     }),

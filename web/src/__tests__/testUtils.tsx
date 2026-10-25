@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { CoreServiceAccount, Page, Pipeline, PipelineDraft, PipelineVersion, PipStatus, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
+import type { CoreServiceAccount, Page, Pipeline, PipelineDraft, PipelineVersion, PipStatus, Project, RunDetail, TaskConfig, TaskDraft, TaskEntity, TaskRef, TaskVersion } from "../types";
 
 // A tiny in-memory stand-in for the pipeline backend + the catalog behind booth-core's gateway,
 // installed as the global `fetch`. Views are exercised against it exactly as against the real
@@ -50,6 +50,8 @@ export class FakeBackend {
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
+  /** booth-core's project registry (ADR 0124): GET /api/projects. null: a core without it (404). */
+  projects: Project[] | null = null;
   /** booth-core's service accounts (ADR 0120): GET /api/service-accounts (owners) and /{name} (members). */
   serviceAccounts: CoreServiceAccount[] = [];
   /** Set to make the owner-only list fail (a non-owner, or a core older than 0.3.7). */
@@ -160,6 +162,13 @@ export class FakeBackend {
     return this.calls.filter((c) => c.method === method && c.path.startsWith(pathPrefix));
   }
 
+  /** The backend's ?project= rule: the slug and its children (from the registry, if there is one). */
+  private projectFilter(slug: string | null): (project: string | null | undefined) => boolean {
+    if (!slug) return () => true;
+    const wanted = new Set([slug, ...(this.projects ?? []).filter((p) => p.parent === slug).map((p) => p.slug)]);
+    return (project) => !!project && wanted.has(project);
+  }
+
   private handle(url: string, init: RequestInit): Response {
     const u = new URL(url, "http://shell");
     const method = (init.method ?? "GET").toUpperCase();
@@ -178,6 +187,9 @@ export class FakeBackend {
       return this.json({ error: fail.error, ...(fail.field ? { field: fail.field } : {}) }, fail.status);
     }
 
+    if (method === "GET" && path === "/api/projects") {
+      return this.projects ? this.json(this.projects) : new Response("404 page not found", { status: 404 });
+    }
     if (method === "GET" && path === "/api/service-accounts") {
       const err = this.serviceAccountsListError;
       return err ? new Response(err.error, { status: err.status }) : this.json(this.serviceAccounts);
@@ -234,11 +246,13 @@ export class FakeBackend {
     }
     if (method === "GET" && path === "/pipelines") {
       const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
-      return this.json(this.page(q ? this.pipelines.filter((p) => p.name.toLowerCase().includes(q)) : this.pipelines));
+      const inProject = this.projectFilter(u.searchParams.get("project"));
+      return this.json(this.page(this.pipelines.filter((p) => (!q || p.name.toLowerCase().includes(q)) && inProject(p.project))));
     }
     if (method === "POST" && path === "/pipelines") {
       const p = this.addPipeline(body.name);
       p.description = body.description ?? "";
+      if (body.project !== undefined) p.project = body.project;
       return this.json(p, 201);
     }
     if (method === "POST" && path === "/pipelines/validate") return this.json(this.validation);
@@ -246,7 +260,7 @@ export class FakeBackend {
       const p = this.pipelines.find((x) => x.id === m![1]);
       if (!p) return this.json({ error: "pipeline not found" }, 404);
       if (method === "GET") return this.json(p);
-      if (method === "PUT") return this.json(Object.assign(p, { name: body.name, description: body.description }));
+      if (method === "PUT") return this.json(Object.assign(p, { name: body.name, description: body.description }, "project" in body ? { project: body.project } : {}));
       if (method === "DELETE") {
         this.pipelines = this.pipelines.filter((x) => x.id !== p.id);
         return this.json(undefined, 204);
@@ -301,11 +315,13 @@ export class FakeBackend {
     }
     if (method === "GET" && path === "/tasks") {
       const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
-      const items = q ? this.tasks.filter((t) => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)) : this.tasks;
+      const inProject = this.projectFilter(u.searchParams.get("project"));
+      const items = this.tasks.filter((t) => (!q || t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)) && inProject(t.project));
       return this.json(this.page(items));
     }
     if (method === "POST" && path === "/tasks") {
       const t = this.addTask(body.name, body.config, body.description ?? "");
+      if (body.project !== undefined) t.project = body.project;
       const version = t.latestVersion > 0 ? this.taskVersions.get(t.id)!.at(-1) : null;
       return this.json({ ...t, version }, 201);
     }
@@ -313,7 +329,7 @@ export class FakeBackend {
       const t = this.tasks.find((x) => x.id === m![1]);
       if (!t) return this.json({ error: "task not found" }, 404);
       if (method === "GET") return this.json(t);
-      if (method === "PUT") return this.json(Object.assign(t, { name: body.name, description: body.description }));
+      if (method === "PUT") return this.json(Object.assign(t, { name: body.name, description: body.description }, "project" in body ? { project: body.project } : {}));
       if (method === "DELETE") {
         this.tasks = this.tasks.filter((x) => x.id !== t.id);
         return this.json(undefined, 204);

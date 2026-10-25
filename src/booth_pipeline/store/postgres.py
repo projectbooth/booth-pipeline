@@ -110,6 +110,7 @@ class PostgresStore:
             draft_updated_at=r["draft_updated_at"],
             event_trigger=EventTrigger.model_validate(r["event_trigger"]) if r["event_trigger"] else None,
             event_trigger_since=r["event_trigger_since"],
+            project=r["project"],
         )  # fmt: skip
 
     @staticmethod
@@ -121,6 +122,7 @@ class PostgresStore:
         return TaskEntity(
             r["id"], r["workspace"], r["name"], r["description"], r["created_by"], r["created_at"], r["updated_at"],
             r.get("latest_version") or 0, has_draft=r["draft_config"] is not None, draft_updated_at=r["draft_updated_at"],
+            project=r["project"],
         )  # fmt: skip
 
     @staticmethod
@@ -173,17 +175,29 @@ class PostgresStore:
             r = conn.execute(self._PIPELINE_SELECT + " WHERE p.workspace = %s AND p.id = %s", (workspace, pipeline_id)).fetchone()
         return self._pipeline(r) if r else None
 
-    def list_pipelines(self, workspace, q, limit, offset):
+    def list_pipelines(self, workspace, q, limit, offset, projects=None):
         where, args = "p.workspace = %s", [workspace]
         if q.strip():
             where += " AND (lower(p.name) LIKE %s ESCAPE '\\' OR lower(p.description) LIKE %s ESCAPE '\\')"
             args += [_like(q), _like(q)]
+        if projects is not None:
+            where += " AND p.project = ANY(%s)"
+            args.append(sorted(projects))
         with self._pool.connection() as conn:
             total = conn.execute(f"SELECT count(*) AS n FROM pipelines p WHERE {where}", args).fetchone()["n"]
             rows = conn.execute(
                 f"{self._PIPELINE_SELECT} WHERE {where} ORDER BY lower(p.name), p.id LIMIT %s OFFSET %s", [*args, limit, offset]
             ).fetchall()
         return Page([self._pipeline(r) for r in rows], total)
+
+    def set_pipeline_project(self, workspace, pipeline_id, project):
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE pipelines SET project=%s, updated_at=%s WHERE workspace=%s AND id=%s", (project, datetime.now(UTC), workspace, pipeline_id)
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_pipeline(workspace, pipeline_id)
 
     def update_pipeline(self, workspace, pipeline_id, name, description):
         try:
@@ -306,17 +320,27 @@ class PostgresStore:
             r = conn.execute(self._TASK_SELECT + " WHERE t.workspace = %s AND t.id = %s", (workspace, task_id)).fetchone()
         return self._task(r) if r else None
 
-    def list_tasks(self, workspace, q, limit, offset):
+    def list_tasks(self, workspace, q, limit, offset, projects=None):
         where, args = "t.workspace = %s", [workspace]
         if q.strip():
             where += " AND (lower(t.name) LIKE %s ESCAPE '\\' OR lower(t.description) LIKE %s ESCAPE '\\')"
             args += [_like(q), _like(q)]
+        if projects is not None:
+            where += " AND t.project = ANY(%s)"
+            args.append(sorted(projects))
         with self._pool.connection() as conn:
             total = conn.execute(f"SELECT count(*) AS n FROM tasks t WHERE {where}", args).fetchone()["n"]
             rows = conn.execute(
                 f"{self._TASK_SELECT} WHERE {where} ORDER BY lower(t.name), t.id LIMIT %s OFFSET %s", [*args, limit, offset]
             ).fetchall()
         return Page([self._task(r) for r in rows], total)
+
+    def set_task_project(self, workspace, task_id, project):
+        with self._pool.connection() as conn:
+            cur = conn.execute("UPDATE tasks SET project=%s, updated_at=%s WHERE workspace=%s AND id=%s", (project, datetime.now(UTC), workspace, task_id))
+            if cur.rowcount == 0:
+                return None
+        return self.get_task(workspace, task_id)
 
     def update_task(self, workspace, task_id, name, description):
         with self._pool.connection() as conn:

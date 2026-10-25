@@ -4,8 +4,10 @@ import type { ViewCtx } from "../context";
 import { formatDuration, formatRelative, formatStamp, formatTime } from "../format";
 import { errorMessage, useDebounced, useInterval, useLoad } from "../hooks";
 import { isActive, latestRunsFor, runStart } from "../runs";
-import type { Pipeline, Run } from "../types";
+import { groupByProject, noSuchProject, projectName, useProjects, useSelectedProject } from "../projects";
+import type { Pipeline, Project, Run } from "../types";
 import {
+  Badge,
   Banner,
   Button,
   Card,
@@ -31,6 +33,8 @@ import {
   type AnyStatus,
 } from "../ui/primitives";
 import { OwnerBadge, ownerLabel } from "./pipeline/RunsAs";
+import { ProjectSelect } from "./ProjectSelect";
+import { SuggestProjects } from "./SuggestProjects";
 import { TriggerSummary } from "./pipeline/TriggerSummary";
 
 // S1 — the Pipelines list (docs/decisions/0016 §4, Figma screen 1). One row per pipeline entity;
@@ -46,9 +50,10 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "never", label: "Never run" },
 ];
 
-// A stop-gap until projects (ADR 0124) come from booth-core's registry: the list is grouped by the
-// part of each name before its first "-", client-side only, and labelled as grouping by name.
-type GroupBy = "name" | "none";
+// Grouping (ADR 0124): by project when booth-core's registry answers, following contracts/projects.md's
+// display rules; otherwise by the part of each name before its first "-" (the earlier stop-gap,
+// labelled as grouping by name); or not at all.
+type GroupBy = "project" | "name" | "none";
 const GROUP_BY_KEY = "booth-pipeline.list-group-by";
 export const NO_PREFIX = "No prefix";
 
@@ -66,11 +71,48 @@ export function groupByPrefix(pipelines: Pipeline[]): { group: string; items: Pi
     .map(([group, items]) => ({ group, items }));
 }
 
-function readGroupBy(): GroupBy {
+/** The viewer's saved choice, or null for none yet (then: by project when the registry answers). */
+interface Heading {
+  /** "" for an ungrouped list (no heading row). */
+  key: string;
+  label: string;
+  mono: boolean;
+  depth: number;
+  archived: boolean;
+  collapsed: boolean;
+  unknown: boolean;
+  items: Pipeline[];
+}
+
+function headingsFor(groupBy: GroupBy, pipelines: Pipeline[], projects: Project[] | null): Heading[] {
+  if (groupBy === "project" && projects) {
+    const groups = groupByProject(pipelines, (p) => p.project, projects);
+    if (groups.length > 0)
+      return groups.map((g) => ({
+        key: g.slug === null ? "project:none" : `project:${g.slug}`,
+        label: g.unknownSlugs ? `${g.label}: ${g.unknownSlugs.join(", ")}` : g.label,
+        mono: false,
+        depth: g.depth,
+        archived: g.archived,
+        collapsed: g.collapsed,
+        unknown: g.unknown,
+        items: g.items,
+      }));
+  }
+  if (groupBy === "name") {
+    return groupByPrefix(pipelines).map(({ group, items }) => ({
+      key: `name:${group}`, label: group, mono: group !== NO_PREFIX, depth: 0, archived: false, collapsed: false, unknown: false, items,
+    }));  // fmt
+  }
+  return [{ key: "", label: "", mono: false, depth: 0, archived: false, collapsed: false, unknown: false, items: pipelines }];
+}
+
+function readGroupBy(): GroupBy | null {
   try {
-    return localStorage.getItem(GROUP_BY_KEY) === "none" ? "none" : "name";
+    const g = localStorage.getItem(GROUP_BY_KEY);
+    return g === "project" || g === "name" || g === "none" ? g : null;
   } catch {
-    return "name";
+    return null;
   }
 }
 
@@ -108,26 +150,30 @@ export function PipelineList({ v }: { v: ViewCtx }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
-  const [groupBy, setGroupByState] = useState<GroupBy>(() => readGroupBy());
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const projectsState = useProjects(v.api);
+  const projects = projectsState.status === "ready" ? projectsState.projects : null;
+  const selectedProject = useSelectedProject();
+  const missingProject = noSuchProject(selectedProject, projectsState);
+  const [savedGroupBy, setSavedGroupBy] = useState<GroupBy | null>(() => readGroupBy());
+  // By project only when the registry answers; otherwise the name stop-gap (never a dead option).
+  const groupBy: GroupBy = savedGroupBy === "none" ? "none" : projects && (savedGroupBy ?? "project") === "project" ? "project" : "name";
+  // Which headings are open; a heading nobody has toggled is open unless the rules collapse it (archived).
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [suggesting, setSuggesting] = useState(false);
   function setGroupBy(g: GroupBy) {
-    setGroupByState(g);
+    setSavedGroupBy(g);
     writeGroupBy(g);
   }
-  function toggleGroup(group: string) {
-    setCollapsed((was) => {
-      const next = new Set(was);
-      if (next.has(group)) next.delete(group);
-      else next.add(group);
-      return next;
-    });
+  const isOpen = (key: string, collapsed: boolean) => open[key] ?? !collapsed;
+  function toggleGroup(key: string, collapsed: boolean) {
+    setOpen((was) => ({ ...was, [key]: !(was[key] ?? !collapsed) }));
   }
 
   const load = useLoad(async () => {
-    const page = await api.listPipelines(v.api, q);
+    const page = await api.listPipelines(v.api, q, selectedProject);
     const latest = await latestRunsFor(v.api, page.items.map((p) => p.id));
     return { pipelines: page.items, latest };
-  }, [v.api, q]);
+  }, [v.api, q, selectedProject]);
 
   const data = load.state.status === "ready" ? load.state.data : null;
   const anyActive = !!data && Object.values(data.latest).some(isActive);
@@ -180,7 +226,25 @@ export function PipelineList({ v }: { v: ViewCtx }) {
         }
       />
 
-      {creating && <NewPipelineCard v={v} onCancel={() => setCreating(false)} />}
+      {creating && <NewPipelineCard v={v} projects={projects} onCancel={() => setCreating(false)} />}
+      {suggesting && projects && (
+        <SuggestProjects
+          v={v}
+          projects={projects}
+          onDone={(changed) => {
+            setSuggesting(false);
+            if (changed) load.reload();
+          }}
+        />
+      )}
+      {missingProject !== null ? (
+        <Banner tone="warn">There is no project called "{missingProject}".</Banner>
+      ) : selectedProject && (
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          Showing {projects ? <strong>{projectName(projects, selectedProject)}</strong> : <span className="font-mono">{selectedProject}</span>} and its sub-projects, as chosen in the
+          project picker.
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <input
@@ -211,17 +275,28 @@ export function PipelineList({ v }: { v: ViewCtx }) {
         <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
           Group by
           <select aria-label="Group by" className={inputInlineClass} value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
+            {projects && <option value="project">Project</option>}
             <option value="name">Name (before the first "-")</option>
             <option value="none">Nothing (one list)</option>
           </select>
         </label>
-        {groupBy === "name" && <span className="text-xs text-slate-500 dark:text-slate-400">Grouped by name only; projects will replace this.</span>}
+        {groupBy === "name" && (
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {projects ? "Grouped by name, not by project." : "Grouped by name only; projects will replace this."}
+          </span>
+        )}
+        {projects && v.canWrite && !suggesting && (
+          <Button size="sm" variant="ghost" onClick={() => setSuggesting(true)}>
+            Suggest projects from names…
+          </Button>
+        )}
       </div>
 
       {actionError && <Banner tone="error">{actionError}</Banner>}
 
       <Loaded state={load.state} retry={load.reload} skeleton={<TableSkeleton />}>
         {({ pipelines, latest }) => {
+          if (missingProject !== null) return null; // the message above says why the list is empty
           if (pipelines.length === 0) {
             return q ? (
               <EmptyState title={`No pipelines match "${q}"`} />
@@ -260,22 +335,23 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                   </tr>
                 </thead>
                 <tbody className={tbodyClass}>
-                  {(groupBy === "name" ? groupByPrefix(shown) : [{ group: "", items: shown }]).map(({ group, items }) => (
-                    <Fragment key={group || "all"}>
-                      {group && (
+                  {headingsFor(groupBy, shown, projects).map(({ key, label, mono, depth, archived, collapsed, items }) => (
+                    <Fragment key={key || "all"}>
+                      {key && (
                         <tr className="bg-slate-50 dark:bg-slate-800/40">
-                          <td colSpan={8} className="px-3 py-1.5">
-                            <Button size="sm" variant="ghost" aria-expanded={!collapsed.has(group)} onClick={() => toggleGroup(group)}>
-                              <span aria-hidden="true">{collapsed.has(group) ? "▸" : "▾"}</span>
-                              <span className={group === NO_PREFIX ? "" : "font-mono"}>{group}</span>
+                          <td colSpan={8} className={`py-1.5 pr-3 ${depth > 0 ? "pl-9" : "pl-3"}`}>
+                            <Button size="sm" variant="ghost" aria-expanded={isOpen(key, collapsed)} onClick={() => toggleGroup(key, collapsed)}>
+                              <span aria-hidden="true">{isOpen(key, collapsed) ? "▾" : "▸"}</span>
+                              <span className={mono ? "font-mono" : ""}>{label}</span>
                             </Button>
+                            {archived && <Badge tone="slate">archived</Badge>}
                             <span className="ml-1 text-xs text-slate-500 dark:text-slate-400">
                               {items.length} pipeline{items.length === 1 ? "" : "s"}
                             </span>
                           </td>
                         </tr>
                       )}
-                      {!collapsed.has(group) &&
+                      {isOpen(key, collapsed) &&
                         items.map((p) => {
                           const run = latest[p.id] ?? null;
                           const href = v.href({ name: "pipeline", id: p.id });
@@ -447,9 +523,10 @@ function PipelineRow({
   );
 }
 
-function NewPipelineCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) {
+function NewPipelineCard({ v, projects, onCancel }: { v: ViewCtx; projects: Project[] | null; onCancel: () => void }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [project, setProject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
@@ -458,7 +535,7 @@ function NewPipelineCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) 
     setBusy(true);
     setError(null);
     try {
-      const p = await api.createPipeline(v.api, name.trim(), description.trim());
+      const p = await api.createPipeline(v.api, name.trim(), description.trim(), projects && project ? project : undefined);
       v.go({ name: "pipeline", id: p.id });
     } catch (err) {
       setError({ message: errorMessage(err), field: (err as { field?: string }).field });
@@ -476,8 +553,11 @@ function NewPipelineCard({ v, onCancel }: { v: ViewCtx; onCancel: () => void }) 
           <Field id="new-pipeline-description" label="Description">
             {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
+          {projects && (
+            <ProjectSelect id="new-pipeline-project" value={project} onChange={setProject} projects={projects} error={error?.field === "project" ? error.message : undefined} />
+          )}
         </div>
-        {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}
+        {error && error.field !== "name" && error.field !== "project" && <Banner tone="error">{error.message}</Banner>}
         <div className="flex gap-2">
           <Button type="submit" variant="primary" disabled={busy || name.trim() === ""}>
             {busy ? "Creating…" : "Create and open"}

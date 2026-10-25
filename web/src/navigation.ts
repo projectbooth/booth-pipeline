@@ -87,6 +87,17 @@ export function routePath(route: Route, basePath: string = DEFAULT_BASE_PATH): s
   }
 }
 
+/** Keeps the shell's project picker (ADR 0124's `?project=<slug>`) on a path this module navigates to:
+ *  the selection lives in the URL, and a path built from a route has no query of its own for it. */
+export function keepProject(path: string, search: string = typeof window === "undefined" ? "" : window.location.search): string {
+  const project = new URLSearchParams(search).get("project");
+  if (!project) return path;
+  const [pathname, query = ""] = path.split("?", 2);
+  const params = new URLSearchParams(query);
+  if (!params.has("project")) params.set("project", project);
+  return `${pathname}?${params.toString()}`;
+}
+
 const NAVIGATE_EVENT = "booth-pipeline:navigate";
 
 function subscribe(onChange: () => void): () => void {

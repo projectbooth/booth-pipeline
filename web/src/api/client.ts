@@ -6,6 +6,7 @@ import type {
   Page,
   Pipeline,
   PipelineDraft,
+  Project,
   PipelineScheduleUpdate,
   PipelineSpec,
   PipelineVersion,
@@ -125,12 +126,13 @@ export const api = {
   serviceAccount: (c: ApiContext, name: string) => request<CoreServiceAccountState>(c, CORE, `/api/service-accounts/${e(name)}`),
   serviceAccountUses: (c: ApiContext) => request<{ items: ServiceAccountUse[] }>(c, PIPELINE, "/service-accounts/uses").then((r) => r.items),
 
-  listPipelines: (c: ApiContext, q = "") => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, limit: 200 })}`),
+  listPipelines: (c: ApiContext, q = "", project?: string | null) => request<Page<Pipeline>>(c, PIPELINE, `/pipelines${qs({ q, project: project ?? undefined, limit: 200 })}`),
   getPipeline: (c: ApiContext, id: string) => request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}`),
-  createPipeline: (c: ApiContext, name: string, description: string) =>
-    request<Pipeline>(c, PIPELINE, "/pipelines", json("POST", { name, description })),
-  updatePipeline: (c: ApiContext, id: string, name: string, description: string) =>
-    request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}`, json("PUT", { name, description })),
+  // `project`: undefined leaves it out of the body (kept as it is, or none); null clears it (ADR 0124).
+  createPipeline: (c: ApiContext, name: string, description: string, project?: string | null) =>
+    request<Pipeline>(c, PIPELINE, "/pipelines", json("POST", { name, description, ...(project !== undefined ? { project } : {}) })),
+  updatePipeline: (c: ApiContext, id: string, name: string, description: string, project?: string | null) =>
+    request<Pipeline>(c, PIPELINE, `/pipelines/${e(id)}`, json("PUT", { name, description, ...(project !== undefined ? { project } : {}) })),
   deletePipeline: (c: ApiContext, id: string) => request<void>(c, PIPELINE, `/pipelines/${e(id)}`, { method: "DELETE" }),
   listVersions: (c: ApiContext, id: string) => request<Page<PipelineVersionSummary>>(c, PIPELINE, `/pipelines/${e(id)}/versions?limit=200`),
   getVersion: (c: ApiContext, id: string, version: number | "latest") =>
@@ -148,12 +150,14 @@ export const api = {
   eventTriggerStatus: (c: ApiContext, id: string) => request<EventTriggerStatus>(c, PIPELINE, `/pipelines/${e(id)}/event-trigger`),
   runPipeline: (c: ApiContext, id: string) => request<Run>(c, PIPELINE, `/pipelines/${e(id)}/run`, { method: "POST" }),
 
-  listTasks: (c: ApiContext, q = "") => request<Page<TaskEntity>>(c, PIPELINE, `/tasks${qs({ q, limit: 200 })}`),
+  listTasks: (c: ApiContext, q = "", project?: string | null) => request<Page<TaskEntity>>(c, PIPELINE, `/tasks${qs({ q, project: project ?? undefined, limit: 200 })}`),
   getTask: (c: ApiContext, id: string) => request<TaskEntity>(c, PIPELINE, `/tasks/${e(id)}`),
-  createTask: (c: ApiContext, name: string, description: string, config?: TaskConfig) =>
-    request<TaskEntity & { version: TaskVersion | null }>(c, PIPELINE, "/tasks", json("POST", { name, description, config })),
-  updateTask: (c: ApiContext, id: string, name: string, description: string) =>
-    request<TaskEntity>(c, PIPELINE, `/tasks/${e(id)}`, json("PUT", { name, description })),
+  createTask: (c: ApiContext, name: string, description: string, config?: TaskConfig, project?: string | null) =>
+    request<TaskEntity & { version: TaskVersion | null }>(c, PIPELINE, "/tasks", json("POST", { name, description, config, ...(project !== undefined ? { project } : {}) })),
+  updateTask: (c: ApiContext, id: string, name: string, description: string, project?: string | null) =>
+    request<TaskEntity>(c, PIPELINE, `/tasks/${e(id)}`, json("PUT", { name, description, ...(project !== undefined ? { project } : {}) })),
+  /** booth-core's project registry (ADR 0124), read as the user. An array, or an `items` page. */
+  projects: (c: ApiContext) => request<Project[] | { items: Project[] }>(c, CORE, "/api/projects").then((r) => (Array.isArray(r) ? r : r.items)),
   deleteTask: (c: ApiContext, id: string) => request<void>(c, PIPELINE, `/tasks/${e(id)}`, { method: "DELETE" }),
   listTaskVersions: (c: ApiContext, id: string) => request<Page<TaskVersionSummary>>(c, PIPELINE, `/tasks/${e(id)}/versions?limit=200`),
   getTaskVersion: (c: ApiContext, id: string, version: number | "latest") =>

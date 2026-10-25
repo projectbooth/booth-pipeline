@@ -6,7 +6,9 @@ import { formatRelative, formatStamp, formatTime } from "../../format";
 import { errorMessage, useLoad } from "../../hooks";
 import { TASK_TABS, type TaskTab } from "../../navigation";
 import { DEFAULT_CONFIG, TaskSettingsForm } from "../../task/TaskSettingsForm";
+import { useProjects } from "../../projects";
 import type { TaskConfig, TaskDraft, TaskEntity, TaskVersion, TaskVersionSummary } from "../../types";
+import { ProjectBadge, ProjectSelect } from "../ProjectSelect";
 import {
   Badge,
   Banner,
@@ -132,6 +134,7 @@ function TaskPage({ v, d, tab, reload }: { v: ViewCtx; d: TaskData; tab: TaskTab
               </Badge>
             )}
             <VersionState d={d} />
+            <ProjectBadge api={v.api} slug={t.project} />
           </>
         }
         subtitle={t.description || undefined}
@@ -425,6 +428,9 @@ function VersionsTab({ v, d }: { v: ViewCtx; d: TaskData }) {
 function DetailsCard({ v, t, onDone }: { v: ViewCtx; t: TaskEntity; onDone: (changed: boolean) => void }) {
   const [name, setName] = useState(t.name);
   const [description, setDescription] = useState(t.description);
+  const projectsState = useProjects(v.api);
+  const projects = projectsState.status === "ready" ? projectsState.projects : null;
+  const [project, setProject] = useState<string | null>(t.project ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
@@ -433,7 +439,8 @@ function DetailsCard({ v, t, onDone }: { v: ViewCtx; t: TaskEntity; onDone: (cha
     setBusy(true);
     setError(null);
     try {
-      await api.updateTask(v.api, t.id, name.trim(), description.trim());
+      // The project only when the registry answered (the field was shown): otherwise it's left as it is.
+      await api.updateTask(v.api, t.id, name.trim(), description.trim(), projects ? project : undefined);
       onDone(true);
     } catch (err) {
       setError({ message: errorMessage(err), field: (err as { field?: string }).field });
@@ -451,8 +458,11 @@ function DetailsCard({ v, t, onDone }: { v: ViewCtx; t: TaskEntity; onDone: (cha
           <Field id="task-description" label="Description">
             {(p) => <input {...p} className={inputClass} value={description} maxLength={4000} onChange={(e) => setDescription(e.target.value)} />}
           </Field>
+          {projects && (
+            <ProjectSelect id="task-project" value={project} onChange={setProject} projects={projects} error={error?.field === "project" ? error.message : undefined} />
+          )}
         </div>
-        {error && error.field !== "name" && <Banner tone="error">{error.message}</Banner>}
+        {error && error.field !== "name" && error.field !== "project" && <Banner tone="error">{error.message}</Banner>}
         <div className="flex gap-2">
           <Button type="submit" variant="primary" disabled={busy || name.trim() === ""}>
             {busy ? "Saving…" : "Save details"}

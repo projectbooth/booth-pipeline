@@ -69,6 +69,9 @@ class Pipeline:
     # events published before that are not its business.
     event_trigger: EventTrigger | None = None
     event_trigger_since: datetime | None = None
+    # ADR 0124: a navigation label from booth-core's project registry, or None. Grants nothing; nothing
+    # that decides access, schedules, triggers or run-as reads it.
+    project: str | None = None
 
 
 @dataclass
@@ -134,6 +137,8 @@ class TaskEntity:
     # "configured" (have real, runnable code) via its draft alone, without any saved version.
     has_draft: bool = False
     draft_updated_at: datetime | None = None
+    # ADR 0124: as Pipeline.project.
+    project: str | None = None
 
 
 @dataclass

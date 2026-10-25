@@ -86,6 +86,20 @@ export interface TaskEntity {
    *  latestVersion: a task can be "configured" via its draft alone, never promoted to a version. */
   hasDraft: boolean;
   draftUpdatedAt: string | null;
+  /** ADR 0124: a booth-core project slug, or null. Absent from a backend before projects. */
+  project?: string | null;
+}
+
+/** A booth-core project (ADR 0124; contracts/projects.md): a navigation label, never a permission. */
+export interface Project {
+  slug: string;
+  name: string;
+  /** Two levels: a project's parent has no parent of its own. */
+  parent: string | null;
+  description?: string;
+  color?: string | null;
+  icon?: string | null;
+  archived: boolean;
 }
 
 /** A task's mutable, unversioned "current" state (ADR 0073) — what plain "Save" writes to,
@@ -229,6 +243,8 @@ export interface Pipeline {
   draftUpdatedAt: string | null;
   /** ADR 0123. Absent from a backend without event triggers. */
   eventTrigger?: EventTrigger | null;
+  /** ADR 0124: a booth-core project slug, or null. Absent from a backend before projects. */
+  project?: string | null;
 }
 
 /** A pipeline's mutable, unversioned "current" state (ADR 0073) — the direct counterpart of

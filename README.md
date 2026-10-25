@@ -98,6 +98,15 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   `eventTriggers.enabled` (default on), which declares `events.subscribe` so core grants a bus credential. The bus is
   optional: without it (or with it down) the pod starts, schedules and Run now work, and the Schedule tab says
   "Event bus unavailable" with the reason.
+- **Projects** (ADR 0124; booth-architecture `contracts/projects.md`). A pipeline or task can carry one of booth-core's
+  projects: a navigation label that grants nothing, and that nothing deciding access, schedules, triggers or run-as reads
+  (a unit test holds that line). The slug is checked against core's `GET /api/projects` (cached for a minute) when it is
+  assigned or changed; an item keeps a project archived later. Lists take `?project=<slug>`, which includes the
+  project's children. If core's registry can't be read, assigning is refused with the reason and nothing else changes:
+  lists filter by the exact slug, runs and schedules carry on, and the UI shows nothing about projects. With the
+  registry, the pipeline list groups by project (parents, then children; archived projects marked and collapsed; "No
+  project" last), honours the shell picker's `?project=`, and offers "Suggest projects from names" (a slug that prefixes
+  a name on a `-` boundary; assigned only when confirmed).
 - **Spark tasks** (ADR 0119; [design](docs/design-spark-runner.md)). A Python task can run on booth-spark: "Runs on:
   Spark" in its settings, with driver and executor sizes, a few Spark settings, arguments, and the data it may use
   (the workspace's database, its lakehouse, up to 4 storage locations). Its saved code runs as PySpark with the same

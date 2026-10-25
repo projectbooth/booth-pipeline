@@ -154,14 +154,14 @@ class Env:
         raise AssertionError(f"run {run_id} did not finish within {timeout}s: {r}")
 
 
-def make_env(start_scheduler: bool = False, **cfg_overrides: Any) -> Env:
+def make_env(start_scheduler: bool = False, projects: Any = None, **cfg_overrides: Any) -> Env:
     cfg = Config(dev_memory=True, oidc_issuer_url="https://idp.test/realms/booth", oidc_client_id="booth-pipeline", **cfg_overrides)
     store = MemoryStore()
     catalog = FakeCatalog()
     storage = FakeStorage()
     client_catalog = CatalogClient("http://core.test", transport=httpx.MockTransport(catalog.handler))
     client_storage = StorageClient("http://core.test", transport=httpx.MockTransport(storage.handler))
-    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, storage=client_storage, start_scheduler=start_scheduler)
+    app = create_app(cfg, store=store, verifier=FakeVerifier(), catalog=client_catalog, storage=client_storage, start_scheduler=start_scheduler, projects=projects)
     return Env(TestClient(app), store, catalog, storage, app)
 
 
