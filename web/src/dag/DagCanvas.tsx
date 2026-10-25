@@ -43,10 +43,12 @@ import { languageOf, versionRefLabel, type Resolved } from "./resolve";
 // from it every render, and every gesture is translated back into a new `refs` array via the pure
 // functions in graph.ts. Passing no `onChange` makes it read-only.
 
-/** Fixed canvas heights (docs/decisions/0016 §6): the pipeline DAG is 560px, or 480px below 640px
- *  wide; a run's DAG is 420px at every width (already under 480). Static classes, so Tailwind
- *  keeps them, and each resolves to one definite pixel height — nothing to derive or race. */
+/** Fixed canvas heights (docs/decisions/0016 §6): the pipeline DAG is 320px by default (280px below
+ *  640px wide), and 560px (480px) when expanded; a run's DAG is 420px at every width. Static
+ *  classes, so Tailwind keeps them, and each resolves to one definite pixel height — nothing to
+ *  derive or race. Expanding swaps one fixed height for another; FitOnResize refits the view. */
 export const CANVAS_SIZES = {
+  dagCompact: "h-[280px] sm:h-[320px]",
   dag: "h-[480px] sm:h-[560px]",
   run: "h-[420px]",
 } as const;

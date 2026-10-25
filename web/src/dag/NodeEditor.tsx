@@ -36,6 +36,7 @@ export function NodeEditor({
   onDuplicate,
   onTaskSaved,
   onTaskDirty,
+  pipelineName,
 }: {
   v: ViewCtx;
   taskRef: TaskRef;
@@ -52,6 +53,8 @@ export function NodeEditor({
   onDuplicate: (key: string) => void;
   onTaskSaved: () => void;
   onTaskDirty: (dirty: boolean) => void;
+  /** For a new task's default name, `<pipeline>-<node>`. */
+  pipelineName?: string;
 }) {
   const [keyDraft, setKeyDraft] = useState(taskRef.key);
   const [changing, setChanging] = useState(false);
@@ -156,6 +159,8 @@ export function NodeEditor({
             <TaskPicker
               api={v.api}
               title="Point this node at a different task"
+              pipelineName={pipelineName}
+              nodeKey={taskRef.key}
               onPick={(t) => {
                 setChanging(false);
                 onChangeRef({ ...taskRef, taskId: t.id, taskVersion: "latest" });

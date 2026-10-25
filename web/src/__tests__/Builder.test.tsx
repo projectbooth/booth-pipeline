@@ -36,8 +36,8 @@ describe("adding a task", () => {
     const picker = screen.getByRole("region", { name: "Add a task" });
     const canvas = screen.getByRole("region", { name: "Pipeline DAG" });
     expect(canvas.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // jsdom computes no Tailwind, so assert the fixed-size classes (0016 §6): 480px below 640px, else 560px.
-    expect(canvas.className).toContain("h-[480px] sm:h-[560px]");
+    // jsdom computes no Tailwind, so assert the fixed-size classes (0016 §6): compact by default.
+    expect(canvas.className).toContain("h-[280px] sm:h-[320px]");
 
     const list = within(picker).getByRole("list", { name: "Matching tasks" });
     await within(list).findByText("spare");
@@ -46,24 +46,54 @@ describe("adding a task", () => {
     expect(within(list).getByText("orphan")).toBeInTheDocument();
 
     await userEvent.click(within(list).getByText("spare"));
-    expect(await screen.findByTestId("task-node-task_1")).toBeInTheDocument();
+    // The node's key says what it is: the task's name, not task_1.
+    expect(await screen.findByTestId("task-node-spare")).toBeInTheDocument();
     expect(b.called("POST", "/tasks")).toHaveLength(0);
     expect(within(toolbar()).getByText("Unsaved changes")).toBeInTheDocument();
     // The new node is selected, and its editor opens in the same place below the canvas.
-    expect(await screen.findByRole("region", { name: "Node task_1" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Node spare" })).toBeInTheDocument();
     expect(b.tasks.find((t) => t.id === spare.id)).toBeDefined();
-    expect(canvas.className).toContain("h-[480px] sm:h-[560px]");
+    expect(canvas.className).toContain("h-[280px] sm:h-[320px]");
   });
 
-  it("creates a task only when asked to, by typing a new name", async () => {
+  it("creates a task only when asked to, named <pipeline>-<node> by default", async () => {
     const { p } = etl();
     renderApp(b, { path: path(p.id) });
     await userEvent.click(await within(await screen.findByRole("toolbar", { name: "Pipeline builder" })).findByRole("button", { name: "+ Add task" }));
-    await userEvent.type(screen.getByRole("searchbox", { name: "Search tasks" }), "brand_new");
-    await userEvent.click(await screen.findByRole("button", { name: '+ Create task "brand_new"' }));
-    await screen.findByTestId("task-node-task_1");
+    const picker = screen.getByRole("region", { name: "Add a task" });
+    const newName = within(picker).getByLabelText("Or create a new task");
+    expect(newName).toHaveValue("daily-etl-task");
+    await userEvent.type(within(picker).getByRole("searchbox", { name: "Search tasks" }), "brand_new");
+    expect(newName).toHaveValue("daily-etl-brand_new");
+    expect(b.called("POST", "/tasks")).toHaveLength(0); // typing creates nothing
+    await userEvent.click(within(picker).getByRole("button", { name: "+ Create task" }));
+    // The node's key drops the pipeline's own prefix: brand_new, not task_1.
+    await screen.findByTestId("task-node-brand_new");
     expect(b.called("POST", "/tasks")).toHaveLength(1);
-    expect(b.called("POST", "/tasks")[0].body).toMatchObject({ name: "brand_new" });
+    expect(b.called("POST", "/tasks")[0].body).toMatchObject({ name: "daily-etl-brand_new" });
+  });
+
+  it("lets the default name be changed, for a task meant for other pipelines too", async () => {
+    const { p } = etl();
+    renderApp(b, { path: path(p.id) });
+    await userEvent.click(await within(await screen.findByRole("toolbar", { name: "Pipeline builder" })).findByRole("button", { name: "+ Add task" }));
+    const picker = screen.getByRole("region", { name: "Add a task" });
+    const newName = within(picker).getByLabelText("Or create a new task");
+    await userEvent.clear(newName);
+    await userEvent.type(newName, "Shared Loader");
+    await userEvent.click(within(picker).getByRole("button", { name: "+ Create task" }));
+    await screen.findByTestId("task-node-shared_loader");
+    expect(b.called("POST", "/tasks")[0].body).toMatchObject({ name: "Shared Loader" });
+  });
+
+  it("won't create a second task with a name that's taken: pick it instead", async () => {
+    const { p } = etl();
+    b.addTask("daily-etl-task", b.taskVersions.get(b.tasks[0].id)![0].config);
+    renderApp(b, { path: path(p.id) });
+    await userEvent.click(await within(await screen.findByRole("toolbar", { name: "Pipeline builder" })).findByRole("button", { name: "+ Add task" }));
+    const picker = screen.getByRole("region", { name: "Add a task" });
+    await within(within(picker).getByRole("list", { name: "Matching tasks" })).findByText("daily-etl-task");
+    expect(within(picker).getByRole("button", { name: "+ Create task" })).toBeDisabled();
   });
 });
 

@@ -1,11 +1,11 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import type { ViewCtx } from "../../context";
 import { describeInterval, describeSchedule, formatRelative, formatStamp, formatTime, localTimezone } from "../../format";
 import { errorMessage, useLoad } from "../../hooks";
 import { ScheduleEditor, type TriggerShape } from "../../task/ScheduleEditor";
 import type { EventTrigger, PipelineScheduleUpdate, Trigger } from "../../types";
-import { Banner, Button, Card, Field, KVRows, inputClass, type KV } from "../../ui/primitives";
+import { Badge, Banner, Button, Card, Field, KVRows, inputClass, type KV } from "../../ui/primitives";
 import type { PipelineData } from "./data";
 import { DEFAULT_EVENT_TRIGGER, EventTriggerEditor, EventTriggerHelp, EventTriggerStatusLine, describeMatch, describeTiming } from "./EventTrigger";
 import { OwnerBadge, OwnerPicker, ownerLabel, TakeOver } from "./RunsAs";
@@ -15,7 +15,7 @@ import { OwnerBadge, OwnerPicker, ownerLabel, TakeOver } from "./RunsAs";
 // ADR 0071's pinnedVersion with each version's creation time). ADR 0123's event trigger sits beside
 // the schedule, in its own card, on a backend that has it.
 
-export function ScheduleTab({ v, d, reload }: { v: ViewCtx; d: PipelineData; reload: () => void }) {
+export function ScheduleTab({ v, d, reload, onDirty }: { v: ViewCtx; d: PipelineData; reload: () => void; onDirty?: (dirty: boolean) => void }) {
   const [editing, setEditing] = useState(false);
   const [saved, setSaved] = useState(false);
   if (editing) {
@@ -23,7 +23,9 @@ export function ScheduleTab({ v, d, reload }: { v: ViewCtx; d: PipelineData; rel
       <ScheduleForm
         v={v}
         d={d}
+        onDirty={onDirty}
         onDone={(didSave) => {
+          onDirty?.(false);
           setEditing(false);
           setSaved(didSave);
           if (didSave) reload();
@@ -148,7 +150,7 @@ function EventTriggerCard({ v, d }: { v: ViewCtx; d: PipelineData }) {
   );
 }
 
-function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (saved: boolean) => void }) {
+function ScheduleForm({ v, d, onDone, onDirty }: { v: ViewCtx; d: PipelineData; onDone: (saved: boolean) => void; onDirty?: (dirty: boolean) => void }) {
   const p = d.pipeline;
   const [scheduled, setScheduled] = useState(p.schedule != null);
   const [shape, setShape] = useState<TriggerShape>(() =>
@@ -169,10 +171,7 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
-  async function submit(ev: FormEvent) {
-    ev.preventDefault();
-    setBusy(true);
-    setError(null);
+  function bodyOf(): PipelineScheduleUpdate {
     const schedule: Trigger | null = scheduled
       ? shape.type === "interval"
         ? { type: "interval", seconds: shape.seconds, enabled }
@@ -180,6 +179,20 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
       : null;
     const body: PipelineScheduleUpdate = { schedule, allowConcurrentRuns: concurrent, roleCeiling: ceiling, pinnedVersion: pinned };
     if (hasEvents) body.eventTrigger = onEvents ? eventTrigger : null;
+    return body;
+  }
+  // Unsaved: what Save would send differs from what the form opened with. Reported to the page, which
+  // then asks before leaving this tab (switching tabs would drop the form).
+  const [opened] = useState(() => JSON.stringify(bodyOf()));
+  const dirty = JSON.stringify(bodyOf()) !== opened;
+  useEffect(() => onDirty?.(dirty), [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
+
+  async function submit(ev: FormEvent) {
+    ev.preventDefault();
+    setBusy(true);
+    setError(null);
+    const body = bodyOf();
     try {
       await api.updateSchedule(v.api, p.id, body);
       onDone(true);
@@ -194,7 +207,19 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
   const routedHere = (f?: string) => !!f && (routed.includes(f) || /^eventTrigger\.match\[\d+\]\.storage\.backendId$/.test(f));
 
   return (
-    <form onSubmit={submit} aria-label="Pipeline schedule" className="flex max-w-3xl flex-col gap-4">
+    <form onSubmit={submit} aria-label="Pipeline schedule" className="flex max-w-3xl flex-col gap-3">
+      {/* The save actions first, so they're on screen without scrolling, with whether anything is unsaved. */}
+      <div role="group" aria-label="Schedule actions" className="flex flex-wrap items-center gap-2">
+        {/* Still enabled unchanged for a pipeline with no owner: saving is how it gets one. */}
+        <Button type="submit" variant="primary" disabled={busy || (!dirty && p.hasOwner)}>
+          {busy ? "Saving…" : "Save schedule"}
+        </Button>
+        <Button onClick={() => onDone(false)} disabled={busy}>
+          {dirty ? "Discard changes" : "Close"}
+        </Button>
+        {dirty ? <Badge tone="amber">Unsaved changes</Badge> : <span className="text-xs text-slate-500 dark:text-slate-400">No changes yet</span>}
+      </div>
+      {error && !routedHere(error.field) && <Banner tone="error">{error.message}</Banner>}
       <Card title="Trigger">
         <fieldset disabled={busy} className="flex flex-col gap-4 p-4">
           <label className="flex items-center gap-2 text-sm font-medium text-slate-800 dark:text-slate-100">
@@ -274,15 +299,6 @@ function ScheduleForm({ v, d, onDone }: { v: ViewCtx; d: PipelineData; onDone: (
         </fieldset>
       </Card>
 
-      {error && !routedHere(error.field) && <Banner tone="error">{error.message}</Banner>}
-      <div className="flex gap-2">
-        <Button type="submit" variant="primary" disabled={busy}>
-          {busy ? "Saving…" : "Save schedule"}
-        </Button>
-        <Button onClick={() => onDone(false)} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
     </form>
   );
 }

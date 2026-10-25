@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { Fragment, useMemo, useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { ViewCtx } from "../context";
 import { formatDuration, formatRelative, formatStamp, formatTime } from "../format";
@@ -20,6 +20,7 @@ import {
   Skeleton,
   StatusBadge,
   inputClass,
+  inputInlineClass,
   linkClass,
   rowHoverClass,
   tableClass,
@@ -44,6 +45,42 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "succeeded", label: "Succeeded" },
   { key: "never", label: "Never run" },
 ];
+
+// A stop-gap until projects (ADR 0124) come from booth-core's registry: the list is grouped by the
+// part of each name before its first "-", client-side only, and labelled as grouping by name.
+type GroupBy = "name" | "none";
+const GROUP_BY_KEY = "booth-pipeline.list-group-by";
+export const NO_PREFIX = "No prefix";
+
+export function namePrefix(name: string): string {
+  const i = name.indexOf("-");
+  return i > 0 ? name.slice(0, i).toLowerCase() : NO_PREFIX;
+}
+
+/** Pipelines grouped by name prefix, groups in name order with "No prefix" last; rows keep their order. */
+export function groupByPrefix(pipelines: Pipeline[]): { group: string; items: Pipeline[] }[] {
+  const groups = new Map<string, Pipeline[]>();
+  for (const p of pipelines) groups.set(namePrefix(p.name), [...(groups.get(namePrefix(p.name)) ?? []), p]);
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === NO_PREFIX ? 1 : b === NO_PREFIX ? -1 : a.localeCompare(b)))
+    .map(([group, items]) => ({ group, items }));
+}
+
+function readGroupBy(): GroupBy {
+  try {
+    return localStorage.getItem(GROUP_BY_KEY) === "none" ? "none" : "name";
+  } catch {
+    return "name";
+  }
+}
+
+function writeGroupBy(g: GroupBy): void {
+  try {
+    localStorage.setItem(GROUP_BY_KEY, g);
+  } catch {
+    // a per-viewer convenience only
+  }
+}
 
 function statusOf(run: Run | null): AnyStatus {
   return run ? run.status : "never";
@@ -71,6 +108,20 @@ export function PipelineList({ v }: { v: ViewCtx }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
+  const [groupBy, setGroupByState] = useState<GroupBy>(() => readGroupBy());
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  function setGroupBy(g: GroupBy) {
+    setGroupByState(g);
+    writeGroupBy(g);
+  }
+  function toggleGroup(group: string) {
+    setCollapsed((was) => {
+      const next = new Set(was);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  }
 
   const load = useLoad(async () => {
     const page = await api.listPipelines(v.api, q);
@@ -157,6 +208,14 @@ export function PipelineList({ v }: { v: ViewCtx }) {
             </button>
           ))}
         </div>
+        <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+          Group by
+          <select aria-label="Group by" className={inputInlineClass} value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
+            <option value="name">Name (before the first "-")</option>
+            <option value="none">Nothing (one list)</option>
+          </select>
+        </label>
+        {groupBy === "name" && <span className="text-xs text-slate-500 dark:text-slate-400">Grouped by name only; projects will replace this.</span>}
       </div>
 
       {actionError && <Banner tone="error">{actionError}</Banner>}
@@ -201,28 +260,46 @@ export function PipelineList({ v }: { v: ViewCtx }) {
                   </tr>
                 </thead>
                 <tbody className={tbodyClass}>
-                  {shown.map((p) => {
-                    const run = latest[p.id] ?? null;
-                    const href = v.href({ name: "pipeline", id: p.id });
-                    const neverSaved = p.latestVersion === 0;
-                    return (
-                      <PipelineRow
-                        key={p.id}
-                        p={p}
-                        run={run}
-                        href={href}
-                        v={v}
-                        neverSaved={neverSaved}
-                        starting={starting === p.id}
-                        confirming={confirmDelete === p.id}
-                        deleting={deleting}
-                        onRun={() => runNow(p)}
-                        onAskDelete={() => setConfirmDelete(p.id)}
-                        onCancelDelete={() => setConfirmDelete(null)}
-                        onDelete={() => remove(p)}
-                      />
-                    );
-                  })}
+                  {(groupBy === "name" ? groupByPrefix(shown) : [{ group: "", items: shown }]).map(({ group, items }) => (
+                    <Fragment key={group || "all"}>
+                      {group && (
+                        <tr className="bg-slate-50 dark:bg-slate-800/40">
+                          <td colSpan={8} className="px-3 py-1.5">
+                            <Button size="sm" variant="ghost" aria-expanded={!collapsed.has(group)} onClick={() => toggleGroup(group)}>
+                              <span aria-hidden="true">{collapsed.has(group) ? "▸" : "▾"}</span>
+                              <span className={group === NO_PREFIX ? "" : "font-mono"}>{group}</span>
+                            </Button>
+                            <span className="ml-1 text-xs text-slate-500 dark:text-slate-400">
+                              {items.length} pipeline{items.length === 1 ? "" : "s"}
+                            </span>
+                          </td>
+                        </tr>
+                      )}
+                      {!collapsed.has(group) &&
+                        items.map((p) => {
+                          const run = latest[p.id] ?? null;
+                          const href = v.href({ name: "pipeline", id: p.id });
+                          const neverSaved = p.latestVersion === 0;
+                          return (
+                            <PipelineRow
+                              key={p.id}
+                              p={p}
+                              run={run}
+                              href={href}
+                              v={v}
+                              neverSaved={neverSaved}
+                              starting={starting === p.id}
+                              confirming={confirmDelete === p.id}
+                              deleting={deleting}
+                              onRun={() => runNow(p)}
+                              onAskDelete={() => setConfirmDelete(p.id)}
+                              onCancelDelete={() => setConfirmDelete(null)}
+                              onDelete={() => remove(p)}
+                            />
+                          );
+                        })}
+                    </Fragment>
+                  ))}
                 </tbody>
               </table>
             </div>

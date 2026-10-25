@@ -68,19 +68,27 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
   const savedRefs = currentSpec(d);
   const [taskDirty, setTaskDirty] = useState(false);
   const onTaskDirty = useCallback((dirty: boolean) => setTaskDirty(dirty), []);
+  const [scheduleDirty, setScheduleDirty] = useState(false);
+  const onScheduleDirty = useCallback((dirty: boolean) => setScheduleDirty(dirty), []);
 
   // Unsaved work → guard every in-app navigation except this pipeline's own tabs (which keep the
   // page, and so the edits, mounted). An old version's view keeps only its own URL: its tabs
   // drop the version from the path, which reloads the page.
-  const unsaved = editor.dirty || taskDirty;
+  // An open, changed schedule form is the exception: it lives only on the Schedule tab, so leaving that
+  // tab would drop it, and the guard then allows nothing else.
+  const unsaved = editor.dirty || taskDirty || scheduleDirty;
   useEffect(() => {
     if (!unsaved) return v.setLeaveGuard(null);
-    const allowed = new Set(d.viewed ? [v.href({ name: "pipeline", id: p.id, version: d.viewed.version })] : TABS.map((t) => v.href({ name: "pipeline", id: p.id, tab: t.key })));
-    v.setLeaveGuard({
-      allows: (path) => allowed.has(path),
-      what: editor.dirty && taskDirty ? "unsaved changes to this pipeline's DAG and to a task" : editor.dirty ? "unsaved changes to this pipeline's DAG" : "unsaved changes to a task's settings",
-    });
-  }, [unsaved, editor.dirty, taskDirty, d.viewed, p.id, v]);
+    const allowed = new Set(
+      scheduleDirty
+        ? [v.href({ name: "pipeline", id: p.id, tab: "schedule" })]
+        : d.viewed
+          ? [v.href({ name: "pipeline", id: p.id, version: d.viewed.version })]
+          : TABS.map((t) => v.href({ name: "pipeline", id: p.id, tab: t.key })),
+    );
+    const what = [editor.dirty && "this pipeline's DAG", taskDirty && "a task's settings", scheduleDirty && "the schedule"].filter(Boolean).join(", ");
+    v.setLeaveGuard({ allows: (path) => allowed.has(path), what: `unsaved changes to ${what}` });
+  }, [unsaved, editor.dirty, taskDirty, scheduleDirty, d.viewed, p.id, v]);
   useEffect(() => () => v.setLeaveGuard(null), [v]);
 
   const exportVersion = d.viewed?.version ?? d.latest?.version ?? null;
@@ -118,7 +126,7 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
   ];
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-4">
       <PageHeader
         crumbs={
           <>
@@ -177,13 +185,13 @@ function PipelinePage({ v, d, tab, latestRun, reload }: { v: ViewCtx; d: Pipelin
 
       <StatStrip label="Pipeline summary" stats={summaryStats(v, d, latestRun, savedRefs.length)} />
 
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
         <Tabs label="Pipeline views" tabs={TABS} active={tab} hrefFor={(t) => v.href({ name: "pipeline", id: p.id, tab: t })} onNavigate={v.goPath} />
         {tab === "dag" && (
           <DagTab v={v} d={d} editor={editor} resolved={resolved} latestRun={latestRun} onTaskSaved={() => setResolveToken((n) => n + 1)} onTaskDirty={onTaskDirty} />
         )}
         {tab === "runs" && <RunsTab v={v} pipeline={p} />}
-        {tab === "schedule" && <ScheduleTab v={v} d={d} reload={reload} />}
+        {tab === "schedule" && <ScheduleTab v={v} d={d} reload={reload} onDirty={onScheduleDirty} />}
         {tab === "config" && <ConfigTab v={v} d={d} refs={savedRefs} resolved={resolved} />}
         {tab === "versions" && <VersionsTab v={v} d={d} />}
       </div>
