@@ -278,7 +278,8 @@ export interface PipelineScheduleUpdate {
   eventTrigger?: EventTrigger | null;
 }
 
-export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+/** `skipped`: a task called ctx.skip, or a scheduled fire found the previous run still active. Not a failure. */
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled" | "skipped";
 export type TaskStatus = "pending" | "running" | "retrying" | "succeeded" | "failed" | "skipped" | "canceled";
 
 export interface Run {
@@ -297,6 +298,8 @@ export interface Run {
   actsAs?: OwnerInfo | null;
   /** ADR 0123: what fired an event-fired run. `events` (the first 100) only for editors and owners. */
   triggerEvents?: { count: number; missedEvents: boolean; events?: TriggerEventRecord[] } | null;
+  /** A scheduled run's slot, however late it started (ctx.trigger.scheduledFor). Absent from an older backend. */
+  scheduledFor?: string | null;
 }
 
 /** A pipeline's owner or a run's identity (ADR 0120). A service account's id is shown; a person's

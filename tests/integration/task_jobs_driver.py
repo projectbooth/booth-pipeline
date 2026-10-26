@@ -679,7 +679,7 @@ def spark_e2e() -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             run, tasks = svc.get_run(owner, run_id)
-            if run.status in ("succeeded", "failed", "canceled"):
+            if run.status in ("succeeded", "failed", "canceled", "skipped"):
                 return run, {t.task_key: t for t in tasks}
             time.sleep(1)
         raise AssertionError(f"run {run_id} did not finish in {timeout}s")
@@ -862,7 +862,7 @@ def spark_real() -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             run, tasks = svc.get_run(owner, run_id)
-            if run.status in ("succeeded", "failed", "canceled"):
+            if run.status in ("succeeded", "failed", "canceled", "skipped"):
                 return run, {t.task_key: t for t in tasks}
             time.sleep(2)
         raise AssertionError(f"run {run_id} did not finish in {timeout}s")
@@ -991,7 +991,7 @@ def _wait_runs(store, pid: str, n: int, timeout: float, settle: float = 0.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         runs = _runs_of(store, pid)
-        if len(runs) >= n and all(r.status in ("succeeded", "failed", "canceled") for r in runs):
+        if len(runs) >= n and all(r.status in ("succeeded", "failed", "canceled", "skipped") for r in runs):
             break
         time.sleep(1)
     if settle:

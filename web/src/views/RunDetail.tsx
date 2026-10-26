@@ -118,7 +118,7 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
       </div>
 
       {cancelError && <Banner tone="error">{cancelError}</Banner>}
-      {run.error && <Banner tone={run.status === "canceled" ? "warn" : "error"}>{run.error}</Banner>}
+      {run.error && <Banner tone={run.status === "canceled" || run.status === "skipped" ? "warn" : "error"}>{run.status === "skipped" ? `Skipped: ${run.error}` : run.error}</Banner>}
 
       <StatStrip
         label="Run summary"
@@ -135,6 +135,9 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
             ),
           },
           { label: "Triggered by", value: run.trigger === "schedule" ? "Schedule" : run.trigger === "event" ? `Event — ${run.triggeredBy}` : run.triggeredBy, mono: false },
+          ...(run.scheduledFor
+            ? [{ label: "Scheduled for", value: formatStamp(run.scheduledFor), title: `${formatTime(run.scheduledFor)}: the slot this run is for, however late it started` }]
+            : []),
           ...(run.actsAs ? [{ label: "Ran as", value: ownerLabel(run.actsAs), mono: false }] : []),
           { label: "Tasks", value: `${doneCount}/${run.tasks.length} done` },
         ]}

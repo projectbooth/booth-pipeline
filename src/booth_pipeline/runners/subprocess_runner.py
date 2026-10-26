@@ -30,7 +30,7 @@ from typing import Any
 
 from .. import pip_install
 from . import languages
-from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
+from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog, TaskSkipped
 
 TOKEN_FILE = ".booth-platform-token"
 # A harness may write the task's failure reason here before exiting non-zero, so the task fails with
@@ -220,9 +220,12 @@ class SubprocessRunner:
             raise TaskFailed(reason or f"task exited with code {proc.returncode}")
         try:
             with open(result_path, encoding="utf-8") as f:
-                return json.load(f)["output"]
+                result = json.load(f)
         except FileNotFoundError:
             raise TaskFailed("task finished without producing a result") from None
+        if "skipped" in result:
+            raise TaskSkipped(str(result["skipped"]))
+        return result["output"]
 
 
     def _report_install(self, log: TaskLog) -> None:

@@ -18,7 +18,6 @@ from ..records import (
     RUN_QUEUED,
     RUN_RUNNING,
     RUN_TERMINAL,
-    TASK_PENDING,
     EventTriggerState,
     LogLine,
     Page,
@@ -33,6 +32,7 @@ from ..records import (
 )
 from ..schedule import next_fire_trigger
 from .base import Busy, Conflict, InUse
+from .base import initial_task_status as _initial_task_status
 
 
 def _now() -> datetime:
@@ -417,7 +417,7 @@ class MemoryStore:
             if exclusive and self.count_active_runs(run.workspace, run.pipeline_id) > 0:
                 raise Busy("this pipeline already has an active run")
             self._runs[run.id] = copy.deepcopy(run)
-            self._task_runs[run.id] = {k: TaskRun(run.id, k, TASK_PENDING) for k in task_keys}
+            self._task_runs[run.id] = {k: TaskRun(run.id, k, _initial_task_status(run)) for k in task_keys}
             self._logs[run.id] = []
             return copy.deepcopy(run)
 

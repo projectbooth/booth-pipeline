@@ -325,3 +325,24 @@ own override; that's fine for one capture task per pipeline. No change needed.
 - But it needs a publishing pipeline and an index service the homelab doesn't run, and it brings back install
   time per attempt.
 - It could come later for multi-file packages.
+
+## Deltas while building
+
+Changes from the note above, found while building it. Each PR adds its own.
+
+**PR 1, skip and scheduled time:**
+- **A coalesced fire's slot.** The note said the claimed `next_run_at` is the most recent missed slot. It's the
+  oldest: the claim advances `next_run_at` from now, so after downtime the stored value is still the first missed
+  slot. The service computes the most recent slot due at the claim (`schedule.latest_slot`, croniter's `get_prev`
+  for cron, arithmetic for intervals), so `scheduledFor` is what the note promised. Earlier missed slots never run
+  and aren't recorded.
+- **Names and format.** In Python it's `ctx.trigger.scheduled_for`, like `missed_events`, with `scheduledFor` as an
+  alias. Times are written as the API writes every time, `2026-10-28T13:15:00+00:00`, not with `Z`.
+- **A dropped fire's run** is created already finished (`skipped`, "previous run still active", that slot), with
+  its tasks `skipped` and one system log line. It never queues, and it doesn't count as active.
+- **Mixed outcomes.** A skip and an independent branch that succeeds: the run is `skipped`. A skip and a failure:
+  `failed`.
+- **The skip can't be swallowed.** In the task's process, `ctx.skip` raises a `BaseException`, so a task's own
+  `except Exception` doesn't catch it.
+- **`execution.maxWorkers`** goes to 12, not the note's 8, for StockScanner's dozen quarter-hour pipelines. The
+  database pool now grows with it (maxWorkers + 8 per replica, at least 10).

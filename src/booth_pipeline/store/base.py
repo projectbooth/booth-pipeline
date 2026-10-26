@@ -13,6 +13,9 @@ from typing import Any, Protocol
 
 from ..model import PipelineSpec, TaskConfig
 from ..records import (
+    RUN_TERMINAL,
+    TASK_PENDING,
+    TASK_SKIPPED,
     EventTriggerState,
     LogLine,
     Page,
@@ -26,6 +29,12 @@ from ..records import (
     TaskVersionRecord,
 )
 from ..triggers import TriggerEvent
+
+
+def initial_task_status(run: Run) -> str:
+    """A run created already finished (a dropped scheduled fire, recorded as skipped) has tasks that
+    will never run: they start skipped, not pending."""
+    return TASK_SKIPPED if run.status in RUN_TERMINAL else TASK_PENDING
 
 
 class Conflict(Exception):
@@ -186,7 +195,7 @@ class Store(Protocol):
 
     # ---- runs ----
     def create_run(self, run: Run, task_keys: list[str], exclusive: bool = False) -> Run:
-        """Creates the run and one pending task run per key.
+        """Creates the run and one pending task run per key (skipped, for a run created finished).
 
         ``exclusive``: atomically refuse (``Busy``) if the pipeline already has an active run. The
         check and the insert happen under one lock on the pipeline, so two simultaneous triggers

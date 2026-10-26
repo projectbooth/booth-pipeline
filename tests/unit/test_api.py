@@ -737,3 +737,30 @@ def test_pinning_a_version_that_does_not_exist_is_422(env):
     p = new_pipeline(env)
     r = env.call("PUT", f"/pipelines/{p['id']}/schedule", json={"pinnedVersion": 9})
     assert r.status_code == 422 and r.json()["field"] == "pinnedVersion"
+
+
+# ---- skipped runs -----------------------------------------------------------------------------
+
+
+def test_a_task_that_calls_ctx_skip_ends_the_run_skipped_with_its_reason(env):
+    from .harness import task
+
+    spec = {
+        "tasks": [
+            task("check", source="def run(ctx):\n    ctx.skip('market closed')\n"),
+            task("capture", ["check"]),
+        ]
+    }
+    p = new_pipeline(env, spec=spec)
+    run = env.wait_run(env.call("POST", f"/pipelines/{p['id']}/run").json()["id"])
+    assert run["status"] == "skipped" and run["error"] == "skipped by check: market closed"
+    assert run["scheduledFor"] is None  # a manual run has no slot
+    assert {t["taskKey"]: (t["status"], t["error"]) for t in run["tasks"]} == {
+        "check": ("skipped", "market closed"),
+        "capture": ("skipped", None),
+    }
+    logs = [ln["message"] for ln in env.call("GET", f"/runs/{run['id']}/logs").json()["items"]]
+    assert "task 'check' skipped: market closed" in logs
+    assert any(m.startswith("run skipped after") for m in logs)
+    assert [r["id"] for r in env.call("GET", "/runs?status=skipped").json()["items"]] == [run["id"]]
+    assert env.call("GET", "/runs?status=failed").json()["total"] == 0

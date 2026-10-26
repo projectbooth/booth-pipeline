@@ -24,7 +24,6 @@ from ..records import (
     RUN_QUEUED,
     RUN_RUNNING,
     RUN_TERMINAL,
-    TASK_PENDING,
     EventTriggerState,
     LogLine,
     Page,
@@ -39,6 +38,7 @@ from ..records import (
 )
 from ..schedule import next_fire_trigger
 from .base import Busy, Conflict, InUse
+from .base import initial_task_status as _initial_task_status
 
 # Arbitrary constant: the advisory lock that serialises schema migration across replicas that
 # start at the same moment.
@@ -150,6 +150,7 @@ class PostgresStore:
             finished_at=r["finished_at"], error=r["error"], worker_id=r["worker_id"],
             heartbeat_at=r["heartbeat_at"], cancel_requested=r["cancel_requested"],
             owner_sub=r["owner_sub"], owner_name=r["owner_name"], trigger_events=r["trigger_events"],
+            scheduled_for=r["scheduled_for"],
         )  # fmt: skip
 
     # ---- pipelines ----
@@ -615,16 +616,18 @@ class PostgresStore:
                 if n:
                     raise Busy("this pipeline already has an active run")
             conn.execute(
-                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub, owner_name, trigger_events)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO runs (id, workspace, pipeline_id, pipeline_version, status, trigger, triggered_by, created_at, owner_sub, owner_name,"
+                " trigger_events, scheduled_for, started_at, finished_at, error) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     run.id, run.workspace, run.pipeline_id, run.pipeline_version, run.status, run.trigger, run.triggered_by, run.created_at,
                     run.owner_sub, run.owner_name, Jsonb(run.trigger_events) if run.trigger_events is not None else None,
+                    run.scheduled_for, run.started_at, run.finished_at, run.error,
                 ),  # fmt: skip
             )
+            task_status = _initial_task_status(run)
             with conn.cursor() as cur:
                 cur.executemany(
-                    "INSERT INTO task_runs (run_id, task_key, status) VALUES (%s,%s,%s)", [(run.id, k, TASK_PENDING) for k in task_keys]
+                    "INSERT INTO task_runs (run_id, task_key, status) VALUES (%s,%s,%s)", [(run.id, k, task_status) for k in task_keys]
                 )
         return run
 

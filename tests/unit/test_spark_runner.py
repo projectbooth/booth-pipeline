@@ -342,3 +342,13 @@ def test_the_standins_limits_have_booth_sparks_shape():
         return _td(hours=h, minutes=m, seconds=s)
 
     assert go(got["maxDuration"]) == _td(hours=6)  # the chart's runs.maxDuration, in booth-spark's own format
+
+
+def test_a_spark_task_can_skip_and_its_downstream_never_runs(spark):
+    standin, url = spark
+    src = "def run(ctx):\n    print('scheduled for', ctx.trigger.scheduled_for)\n    ctx.skip('no games today')\n"
+    result, rec = run(runner(url), spark_node("agg", src), node("use", ["agg"]))
+    assert result.skipped and result.error == "skipped by agg: no games today"
+    assert rec.statuses("agg") == ["started", "skipped"] and rec.statuses("use") == []
+    (app,) = standin.apps.values()
+    assert app.state == "succeeded"  # a skip is a normal end of the application, not a failure

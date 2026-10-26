@@ -189,10 +189,13 @@ eventTriggers:
   maxAckPending: 1000
 
 execution:
-  # Runs execute in worker threads inside this pod; this bounds how many run at once. Further
-  # runs wait in `queued`. Scale out with replicas rather than raising this without bound: every
-  # running task is a subprocess in this pod's memory budget.
-  maxWorkers: 4
+  # How many runs execute at once per replica (one worker thread each; tasks within a run are serial).
+  # Further runs wait in `queued` and fail after 15 minutes. A worker mostly waits on its task's own Job
+  # pod, so this is cheap in this pod; keep it at or below runner.maxConcurrent, and make sure the
+  # cluster can hold that many task pods at once. 12 covers about a dozen pipelines firing on the same
+  # quarter hour; size it to the most runs you expect at one moment, plus headroom. The database pool
+  # grows with it (maxWorkers + 8 connections per replica, at least 10).
+  maxWorkers: 12
   schedulerIntervalSeconds: 15
   maxLogLinesPerRun: 50000
   # Environment variable NAMES a task's subprocess may inherit from this pod (e.g. HTTPS_PROXY).

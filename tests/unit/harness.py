@@ -148,7 +148,7 @@ class Env:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             r = self.call("GET", f"/runs/{run_id}", token).json()
-            if r["status"] in ("succeeded", "failed", "canceled"):
+            if r["status"] in ("succeeded", "failed", "canceled", "skipped"):
                 return r
             time.sleep(0.1)
         raise AssertionError(f"run {run_id} did not finish within {timeout}s: {r}")

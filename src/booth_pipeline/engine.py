@@ -6,7 +6,7 @@ This module owns the translation and nothing else — it deliberately does not r
 that. What a Task actually *executes* is delegated to its ``Runner`` (``runners/``), which is how
 "base runner by default, Spark only when selected" (ADR 0006) stays a per-task choice.
 
-Three integration facts worth knowing, each pinned by a test in ``tests/unit/test_engine.py``
+Four integration facts worth knowing, each pinned by a test in ``tests/unit/test_engine.py``
 because Dagster's own suite will not catch us getting them wrong:
 
 1. **Compute functions must be generators.** Dagster applies a retry policy only while it
@@ -15,7 +15,10 @@ because Dagster's own suite will not catch us getting them wrong:
    nothing says why. Ours ``yield Output(...)``.
 2. **Op and input names are prefixed** (``task_<key>`` / ``in_<key>``) so no user-chosen key can
    collide with a name Dagster reserves.
-3. **Execution is serial in v0** (Dagster's in-process executor): independent branches run one
+3. **A skipped task yields no output.** Its output is declared optional (``is_required=False``), so a
+   task that calls ``ctx.skip`` returns without yielding and Dagster skips everything downstream of
+   it, rather than failing them.
+4. **Execution is serial in v0** (Dagster's in-process executor): independent branches run one
    after another in dependency order, not in parallel. Correct, just not maximally fast. Parallel
    execution needs the multiprocess executor and a persistent Dagster instance — deliberately
    left out of v0 (docs/decisions/0003).
@@ -50,7 +53,7 @@ from dagster import (
 
 from .model import PipelineSpec, TaskConfig, TaskRef, code_language, topological_order
 from .model import RetryPolicy as SpecRetry
-from .runners.base import Cancellation, TaskCanceled, TaskInvocation
+from .runners.base import Cancellation, TaskCanceled, TaskInvocation, TaskSkipped
 from .runners.registry import RunnerRegistry
 from .workload import AccessProvider, MintNotConfigured, MintRefused
 
@@ -80,7 +83,8 @@ class RunRecorder(Protocol):
     def task_started(self, key: str, attempt: int) -> None: ...
 
     def task_attempt_finished(self, key: str, attempt: int, status: str, error: str | None) -> None:
-        """``status`` is succeeded, failed (final), retrying (will run again) or canceled."""
+        """``status`` is succeeded, failed (final), retrying (will run again), canceled or skipped
+        (the task called ``ctx.skip``; ``error`` is its reason)."""
         ...
 
     def task_output(self, key: str, attempt: int, output: Any) -> None:
@@ -99,6 +103,8 @@ class EngineResult:
     success: bool
     canceled: bool
     error: str | None
+    # Nothing failed, but a task called ctx.skip: the run ends skipped. ``error`` then says which and why.
+    skipped: bool = False
 
 
 def _dagster_retry(policy: SpecRetry | None) -> RetryPolicy | None:
@@ -118,6 +124,7 @@ def _make_op(
     access: AccessProvider | None,
     reasons: dict[str, str],
     trigger: dict[str, Any] | None = None,
+    skips: dict[str, str] | None = None,
 ) -> OpDefinition:
     retry = config.retry
     max_retries = retry.max_retries if retry else 0
@@ -153,6 +160,12 @@ def _make_op(
                 trigger=trigger,
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
+        except TaskSkipped as e:
+            # Not a failure: no retry, and no Output, so Dagster skips everything downstream (fact 3).
+            if skips is not None:
+                skips[ref.key] = e.reason
+            recorder.task_attempt_finished(ref.key, attempt, "skipped", e.reason)
+            return
         except TaskCanceled:
             recorder.task_attempt_finished(ref.key, attempt, "canceled", "canceled")
             # allow_retries=False: a canceled task must not be re-run by its retry policy.
@@ -190,7 +203,7 @@ def _make_op(
         compute_fn=compute,
         name=op_name(ref.key),
         ins={input_name(dep): In(dagster_type=DagsterAny) for dep in ref.depends_on},
-        outs={RESULT: Out(dagster_type=DagsterAny)},
+        outs={RESULT: Out(dagster_type=DagsterAny, is_required=False)},
         retry_policy=_dagster_retry(retry),
         description=ref.key,
     )
@@ -208,6 +221,7 @@ def compile_job(
     access: AccessProvider | None = None,
     reasons: dict[str, str] | None = None,
     trigger: dict[str, Any] | None = None,
+    skips: dict[str, str] | None = None,
 ) -> JobDefinition:
     """Compile the spec into a Dagster ``JobDefinition``.
 
@@ -222,7 +236,7 @@ def compile_job(
     order = topological_order(spec)
     by_key = spec.by_key()
     r = reasons if reasons is not None else {}
-    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r, trigger) for k in order]
+    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r, trigger, skips) for k in order]
     deps: dict[str, dict[str, DependencyDefinition]] = {}
     for k in order:
         t = by_key[k]
@@ -251,9 +265,10 @@ def execute(
     """Run the pipeline to completion (blocking). Never raises for a task failure — that is a
     result, not an exception."""
     reasons: dict[str, str] = {}
+    skips: dict[str, str] = {}
     job = compile_job(
         spec, configs, run_id=run_id, registry=registry, recorder=recorder, cancel=cancel,
-        name=f"run_{run_id}", access=access, reasons=reasons, trigger=trigger,
+        name=f"run_{run_id}", access=access, reasons=reasons, trigger=trigger, skips=skips,
     )
     # A fresh in-memory instance per run: nothing is shared between runs, nothing persists in
     # Dagster (our store is the record). Dagster's own console logging is quieted to warnings —
@@ -267,6 +282,9 @@ def execute(
             raise_on_error=False,
             run_config={"loggers": {"console": {"config": {"log_level": "WARNING"}}}},
         )
+    if result.success and skips:
+        detail = "; ".join(f"{k}: {why}" for k, why in sorted(skips.items()))
+        return EngineResult(success=False, canceled=False, error=f"skipped by {detail}", skipped=True)
     if result.success:
         return EngineResult(success=True, canceled=False, error=None)
     if cancel.canceled:

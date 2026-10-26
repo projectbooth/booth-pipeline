@@ -137,4 +137,19 @@ describe("Pipelines list", () => {
     expect(await screen.findByText("No pipelines yet")).toBeInTheDocument();
     expect(screen.getByText(/Someone with edit access/)).toBeInTheDocument();
   });
+
+  it("shows a skipped last run in amber and filters by it", async () => {
+    seed();
+    const minute = b.addPipeline("nfl-capture", [b.ref("capture")]);
+    b.addRun(minute.id, "skipped", "2026-09-25T07:00:00+00:00", { error: "previous run still active" });
+    renderApp(b);
+    await screen.findByRole("link", { name: "nfl-capture" });
+    const badge = within(row("nfl-capture")).getByText("Skipped");
+    expect(badge.closest("[class*='amber']")).not.toBeNull();
+    const filters = screen.getByRole("group", { name: "Filter by last run status" });
+    expect(within(filters).getByRole("button", { name: /Failed 1/ })).toBeInTheDocument(); // a skip isn't a failure
+    await userEvent.click(within(filters).getByRole("button", { name: /Skipped 1/ }));
+    expect(screen.getByRole("link", { name: "nfl-capture" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "daily-etl" })).not.toBeInTheDocument();
+  });
 });

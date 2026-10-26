@@ -40,13 +40,14 @@ import { TriggerSummary } from "./pipeline/TriggerSummary";
 // S1 — the Pipelines list (docs/decisions/0016 §4, Figma screen 1). One row per pipeline entity;
 // version history lives on the pipeline itself (S2f), never here.
 
-type Filter = "all" | "running" | "failed" | "succeeded" | "never";
+type Filter = "all" | "running" | "failed" | "succeeded" | "skipped" | "never";
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "running", label: "Running" },
   { key: "failed", label: "Failed" },
   { key: "succeeded", label: "Succeeded" },
+  { key: "skipped", label: "Skipped" },
   { key: "never", label: "Never run" },
 ];
 
@@ -180,7 +181,7 @@ export function PipelineList({ v }: { v: ViewCtx }) {
   useInterval(load.reload, 10_000, anyActive);
 
   const counts = useMemo(() => {
-    const c: Record<Filter, number> = { all: 0, running: 0, failed: 0, succeeded: 0, never: 0 };
+    const c: Record<Filter, number> = { all: 0, running: 0, failed: 0, succeeded: 0, skipped: 0, never: 0 };
     if (!data) return c;
     for (const p of data.pipelines) for (const f of FILTERS) if (matches(f.key, data.latest[p.id] ?? null)) c[f.key]++;
     return c;

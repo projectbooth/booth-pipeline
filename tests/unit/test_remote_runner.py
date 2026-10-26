@@ -10,7 +10,14 @@ import httpx
 import pytest
 
 from booth_pipeline.runner_service import create_runner_app
-from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskCanceled, TaskFailed, TaskInvocation
+from booth_pipeline.runners.base import (
+    Cancellation,
+    TaskAccess,
+    TaskCanceled,
+    TaskFailed,
+    TaskInvocation,
+    TaskSkipped,
+)
 from booth_pipeline.runners.remote import RemoteRunner
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
 
@@ -198,3 +205,10 @@ def test_an_unknown_language_is_refused_by_the_runner_service_not_run_as_python(
     bad = TaskInvocation("r1", "q", "transform", 1, "SELECT 1", {}, {}, 60, None, language="cobol")
     with pytest.raises(TaskFailed):
         remote(runner_url).run(bad, Lines(), Cancellation())
+
+
+def test_a_skip_crosses_the_wire_as_a_skip_not_a_failure(runner_url):
+    lines = Lines()
+    with pytest.raises(TaskSkipped) as e:
+        remote(runner_url).run(inv("def run(ctx):\n    print('checked')\n    ctx.skip('no new rows')\n"), lines, Cancellation())
+    assert e.value.reason == "no new rows" and lines.stdout == ["checked"]

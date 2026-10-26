@@ -98,7 +98,7 @@ export function RunsTab({ v, pipeline }: { v: ViewCtx; pipeline: Pipeline }) {
       {error && <Banner tone="error">{error}</Banner>}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-[repeat(3,minmax(9rem,11rem))_1fr]">
         <StatCard label="Success rate" value={rate === null ? "—" : `${rate}%`} tone={rate === null ? "slate" : rate >= 90 ? "emerald" : rate >= 50 ? "amber" : "red"}>
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400" title="Succeeded ÷ (succeeded + failed). Canceled and in-flight runs are left out.">
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400" title="Succeeded ÷ (succeeded + failed). Canceled, skipped and in-flight runs are left out.">
             of {finished} finished
           </p>
         </StatCard>

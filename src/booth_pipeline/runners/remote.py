@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
+from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog, TaskSkipped
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +136,8 @@ class RemoteRunner:
                     if kind == "log":
                         log_.line(str(ev.get("stream", "stdout")), str(ev.get("message", "")))
                     elif kind == "result":
+                        if "skipped" in ev:
+                            raise TaskSkipped(str(ev.get("skipped") or "skipped by the task"))
                         return ev.get("output")
                     elif kind == "error":
                         if ev.get("kind") == "canceled":

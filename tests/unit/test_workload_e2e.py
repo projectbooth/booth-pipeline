@@ -61,7 +61,7 @@ class World:
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             r = self.call("GET", f"/runs/{run_id}").json()
-            if r["status"] in ("succeeded", "failed", "canceled"):
+            if r["status"] in ("succeeded", "failed", "canceled", "skipped"):
                 return r
             time.sleep(0.1)
         raise AssertionError("run did not finish")

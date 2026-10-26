@@ -75,7 +75,7 @@ def wait_run(c, tok, run_id, timeout=90):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         r = call(c, tok, "GET", f"/runs/{run_id}").json()
-        if r["status"] in ("succeeded", "failed", "canceled"):
+        if r["status"] in ("succeeded", "failed", "canceled", "skipped"):
             return r
         time.sleep(0.2)
     raise AssertionError(f"run did not finish: {r}")

@@ -23,6 +23,7 @@ from .records import (
     RUN_CANCELED,
     RUN_FAILED,
     RUN_QUEUED,
+    RUN_SKIPPED,
     RUN_SUCCEEDED,
     TASK_CANCELED,
     TASK_FAILED,
@@ -166,7 +167,7 @@ class StoreRecorder:
         self._emit(key, attempt, "system", f"task {key!r} started (attempt {attempt})")
 
     def task_attempt_finished(self, key: str, attempt: int, status: str, error: str | None) -> None:
-        state = {"succeeded": TASK_SUCCEEDED, "failed": TASK_FAILED, "retrying": TASK_RETRYING, "canceled": TASK_CANCELED}[status]
+        state = {"succeeded": TASK_SUCCEEDED, "failed": TASK_FAILED, "retrying": TASK_RETRYING, "canceled": TASK_CANCELED, "skipped": TASK_SKIPPED}[status]
         with self._lock:
             t = self._tasks[key]
             t.status, t.error = state, error
@@ -176,7 +177,7 @@ class StoreRecorder:
         self._emit(key, attempt, "system", f"task {key!r} {status}" + (f": {error}" if error else ""))
 
     def settle_unfinished(self, run_status: str) -> None:
-        """Called when the run ends: tasks that never ran are *skipped* (an upstream failed) or
+        """Called when the run ends: tasks that never ran are *skipped* (an upstream failed or skipped) or
         *canceled*; a task caught mid-flight (worker lost) is failed. Nothing stays "pending"."""
         with self._lock:
             todo = [t for t in self._tasks.values() if t.status in (TASK_PENDING, TASK_RUNNING, TASK_RETRYING)]
@@ -298,7 +299,7 @@ class RunManager:
                     version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access,
                     trigger=run_trigger(run),
                 )
-                status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_FAILED)
+                status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_SKIPPED if result.skipped else RUN_FAILED)
                 error = None if result.success else result.error
         except Exception as e:  # noqa: BLE001 - engine/compile failure is a failed run, not a crashed worker
             log.exception("run %s: engine error", run.id)
@@ -390,12 +391,18 @@ def _next_seq(store: Store, run_id: str) -> int:
 def run_trigger(run: Run) -> dict:
     """What a task sees as ``ctx.trigger`` (ADR 0123): how its run started and, for an event-fired run,
     the events that fired it (the first 100) and their count. A hint, not a work list: delivery is
-    at least once and best effort, so a task still scans its own inbox."""
+    at least once and best effort, so a task still scans its own inbox. ``scheduledFor`` is a scheduled
+    run's slot (ISO 8601 UTC), so a late start still knows which slot it is for; None otherwise."""
     fired = run.trigger_events or {}
     return {
         "type": run.trigger,
         "events": list(fired.get("events") or []),
         "count": int(fired.get("count") or 0),
         "missedEvents": bool(fired.get("missedEvents")),
+        "scheduledFor": _iso(run.scheduled_for),
     }
+
+
+def _iso(at: datetime | None) -> str | None:
+    return at.astimezone(UTC).isoformat() if at else None  # as the API writes times
 

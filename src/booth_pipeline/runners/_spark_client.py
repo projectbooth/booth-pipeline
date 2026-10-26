@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 
 EVENT = "BOOTH-SPARK-EVENT "  # stderr: one JSON event per line, read by runners/spark.py
-OUTPUT = "BOOTH-PIPELINE-OUTPUT "  # the driver log's line carrying run(ctx)'s return value
+OUTPUT = "BOOTH-PIPELINE-OUTPUT "  # the driver log's line carrying run(ctx)'s return value, or its ctx.skip
 MAX_INLINE = 256 * 1024  # booth-spark's main.inlinePython limit
 MAX_OUTPUT = 64 * 1024
 TERMINAL = ("succeeded", "failed", "stopped")
@@ -49,6 +49,12 @@ class _Trigger:
         self.events = list(t.get("events") or [])
         self.count = int(t.get("count") or 0)
         self.missed_events = bool(t.get("missedEvents"))
+        self.scheduled_for = t.get("scheduledFor")
+        self.scheduledFor = self.scheduled_for
+
+
+class _Skipped(BaseException):
+    pass
 
 
 class _Ctx:
@@ -63,14 +69,20 @@ class _Ctx:
         _logging.basicConfig(stream=_sys.stderr, level=_logging.INFO, format="%%(levelname)s %%(message)s")
         self.log = _logging.getLogger("task." + self.task_key)
 
+    def skip(self, reason=""):
+        raise _Skipped(str(reason or "skipped by the task"))
+
 
 spark = _SparkSession.builder.getOrCreate()
 ctx = _Ctx(spark)
 _sys.argv = ["task.py", *_BOOTH["args"]]
 _ns = {"__name__": "__booth_task__", "spark": spark, "ctx": ctx}
 exec(compile(_SOURCE, "task.py", "exec"), _ns)
-_out = _ns["run"](ctx) if callable(_ns.get("run")) else None
-_enc = _json.dumps({"output": _out})
+try:
+    _res = {"output": _ns["run"](ctx) if callable(_ns.get("run")) else None}
+except _Skipped as _e:
+    _res = {"output": None, "skipped": str(_e)[:1000]}
+_enc = _json.dumps(_res)
 if len(_enc.encode("utf-8")) > %(max_output)d:
     raise SystemExit("task output exceeds %(max_output)d bytes; pass data through the lakehouse, not through ctx")
 print(%(marker)r + _b64.b64encode(_enc.encode("utf-8")).decode("ascii"), flush=True)
@@ -215,11 +227,12 @@ class LogCopy:
             self._line(self.partial)
             self.partial = ""
 
-    def output(self) -> tuple[bool, object]:
+    def output(self) -> dict | None:
+        """The marker line's ``{"output": ...}`` (with ``"skipped"`` if the task called ctx.skip), or None."""
         for line in reversed(self.tail):
             if line.startswith(OUTPUT):
-                return True, json.loads(base64.b64decode(line[len(OUTPUT) :]))["output"]
-        return False, None
+                return json.loads(base64.b64decode(line[len(OUTPUT) :]))
+        return None
 
 
 def run(workdir: str, result_path: str, sleep=time.sleep) -> None:
@@ -272,11 +285,11 @@ def run(workdir: str, result_path: str, sleep=time.sleep) -> None:
         raise Failed(f"spark application {app_id} failed" + (f": {reason}" if reason else ""))
     if state == "stopped":
         raise Failed(f"spark application {app_id} was stopped" + (f": {reason}" if reason else ""))
-    found, output = logs.output()
-    if not found:
+    result = logs.output()
+    if result is None:
         raise Failed(f"spark application {app_id} succeeded, but its output line wasn't found in its log")
     with open(result_path, "w", encoding="utf-8") as f:
-        json.dump({"output": output}, f)
+        json.dump(result, f)
 
 
 def _drop_empty(d: dict) -> dict:

@@ -170,6 +170,8 @@ def run_json(r: Run, ident: Identity | None = None) -> dict[str, Any]:
         # ADR 0123: an event-fired run's events (the first 100) and count. Paths and API names are for
         # editors and owners; viewers get the count.
         "triggerEvents": _trigger_events(r.trigger_events, ident),
+        # A scheduled run's slot, however late it started (ctx.trigger.scheduledFor); null otherwise.
+        "scheduledFor": _iso(r.scheduled_for),
     }
 
 

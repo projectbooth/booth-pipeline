@@ -37,6 +37,7 @@ from .projects import SLUG_RE, ProjectsClient, ProjectsUnavailable, with_childre
 from .records import (
     RUN_ACTIVE,
     RUN_QUEUED,
+    RUN_SKIPPED,
     TRIGGER_EVENT,
     TRIGGER_MANUAL,
     TRIGGER_SCHEDULE,
@@ -57,7 +58,7 @@ from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .runners.spark import SPARK_STREAM
 from .runs import RunManager
-from .schedule import next_fire_trigger
+from .schedule import latest_slot, next_fire_trigger
 from .service_accounts import ServiceAccountsClient, ServiceAccountsUnavailable
 from .storage_client import StorageClient, StorageDenied, StorageNotFound, StorageUnavailable
 from .store.base import Busy, Store
@@ -514,12 +515,21 @@ class PipelineService:
 
     # ---- runs ----
     def start_run(
-        self, workspace: str, pipeline: Pipeline, trigger: str, by: str, owner_sub: str, owner_name: str = "", trigger_events: dict | None = None
+        self,
+        workspace: str,
+        pipeline: Pipeline,
+        trigger: str,
+        by: str,
+        owner_sub: str,
+        owner_name: str = "",
+        trigger_events: dict | None = None,
+        scheduled_for: datetime | None = None,
     ) -> Run:
         """The single implementation of "start a run": used by Run-now and by the scheduler.
 
         Runs the pipeline's `pinned_version` if it has one, otherwise the latest saved version —
         mirrors the old Job's `pipeline_version` pin, now living on Pipeline directly (ADR 0071).
+        ``scheduled_for``: a scheduled run's slot (``ctx.trigger.scheduledFor``).
         """
         version = self.store.get_version(workspace, pipeline.id, pipeline.pinned_version)
         if version is None:
@@ -536,6 +546,7 @@ class PipelineService:
             owner_sub=owner_sub,
             owner_name=owner_name,
             trigger_events=trigger_events,
+            scheduled_for=scheduled_for,
         )
         try:
             self.store.create_run(run, [t.key for t in version.spec.tasks], exclusive=not pipeline.allow_concurrent_runs)
@@ -549,14 +560,53 @@ class PipelineService:
         # authenticated, so their live role (not a possibly-lapsed owner) is what caps it.
         return self.start_run(ident.workspace, self.get_pipeline(ident, pipeline_id), TRIGGER_MANUAL, ident.display_name, ident.subject, ident.display_name)
 
-    def start_scheduled(self, pipeline: Pipeline) -> Run | None:
+    def start_scheduled(self, pipeline: Pipeline, now: datetime | None = None) -> Run | None:
+        """``pipeline`` is as claimed at ``now``: its ``next_run_at`` is the oldest slot not yet run.
+        Missed slots coalesce (ADR 0065): after downtime one run starts, its ``scheduled_for`` is the
+        most recent slot due by ``now``, and the slots before it never run and aren't recorded."""
+        now = now or datetime.now(UTC)
+        first = pipeline.next_run_at
+        slot = latest_slot(pipeline.schedule, first, now) if first and pipeline.schedule else first
         try:
-            return self.start_run(pipeline.workspace, pipeline, TRIGGER_SCHEDULE, "schedule", pipeline.owner_sub, pipeline.owner_name)
+            return self.start_run(
+                pipeline.workspace, pipeline, TRIGGER_SCHEDULE, "schedule", pipeline.owner_sub, pipeline.owner_name, scheduled_for=slot
+            )
         except PipelineBusy:
             log.info("scheduled run of pipeline %s skipped: previous run still active", pipeline.id)
+            self._record_dropped_fire(pipeline, slot)
         except ModelError as e:
             log.warning("scheduled run of pipeline %s could not start: %s", pipeline.id, e.message)
         return None
+
+    def _record_dropped_fire(self, pipeline: Pipeline, slot: datetime | None) -> None:
+        """A scheduled fire that found the previous run still active doesn't run, but is kept as a
+        ``skipped`` run, so a dropped slot shows in the run list. It never queues and never retries."""
+        try:
+            version = self.store.get_version(pipeline.workspace, pipeline.id, pipeline.pinned_version)
+            if version is None:
+                return
+            now = datetime.now(UTC)
+            reason = "previous run still active"
+            run = Run(
+                id=str(uuid4()),
+                workspace=pipeline.workspace,
+                pipeline_id=pipeline.id,
+                pipeline_version=version.version,
+                status=RUN_SKIPPED,
+                trigger=TRIGGER_SCHEDULE,
+                triggered_by="schedule",
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+                error=reason,
+                owner_sub=pipeline.owner_sub,
+                owner_name=pipeline.owner_name,
+                scheduled_for=slot,
+            )
+            self.store.create_run(run, [t.key for t in version.spec.tasks])
+            self.store.append_logs([LogLine(run.id, 1, now, None, 0, "system", f"run skipped: {reason} (allow concurrent runs to run it anyway)")])
+        except Exception:  # noqa: BLE001 - only the record of a dropped fire; never stop the scheduler
+            log.exception("could not record the dropped scheduled fire of pipeline %s", pipeline.id)
 
     def start_event_fired(self, pipeline: Pipeline, fired: dict) -> Run | None:
         """A claimed event-trigger fire (ADR 0123). Acts as the owner, exactly as a scheduled run does."""

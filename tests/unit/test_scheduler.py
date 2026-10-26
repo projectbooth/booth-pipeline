@@ -69,8 +69,16 @@ def test_a_scheduled_fire_is_skipped_while_the_previous_run_is_still_active(env)
     (first,) = sched.tick(T0)
     make_due(env, p["id"], T0 + timedelta(minutes=1))
     assert sched.tick(T0 + timedelta(minutes=1)) == []  # skipped, not queued up behind it
-    assert env.call("GET", f"/runs?pipelineId={p['id']}").json()["total"] == 1
+    runs = env.call("GET", f"/runs?pipelineId={p['id']}").json()
+    assert runs["total"] == 2  # ...but recorded, so the dropped slot is visible
+    dropped = runs["items"][0]
+    assert dropped["status"] == "skipped" and dropped["error"] == "previous run still active"
+    assert dropped["scheduledFor"] == "2026-03-01T09:01:00+00:00" and dropped["trigger"] == "schedule"
+    detail = env.call("GET", f"/runs/{dropped['id']}").json()
+    assert [t["status"] for t in detail["tasks"]] == ["skipped"]
+    assert env.call("GET", f"/runs?pipelineId={p['id']}&status=skipped").json()["total"] == 1
     env.wait_run(first)
+    assert env.call("GET", f"/runs/{first}").json()["scheduledFor"] == "2026-03-01T09:00:00+00:00"
 
 
 def test_two_schedulers_polling_at_once_start_a_due_fire_exactly_once(env):
