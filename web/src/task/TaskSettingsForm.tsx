@@ -149,6 +149,7 @@ export function TaskSettingsForm({
         readOnly={readOnly}
         error={error ?? undefined}
         pip={moduleConfig.state.status === "ready" ? moduleConfig.state.data.pip : null}
+        runnerImages={moduleConfig.state.status === "ready" ? (moduleConfig.state.data.runnerImages ?? []) : []}
         sparkLimits={sparkLimits.state.status === "ready" ? (sparkLimits.state.data as SparkLimits | null) : null}
         sparkRetryFloorSeconds={moduleConfig.state.status === "ready" ? moduleConfig.state.data.spark?.retryMinDelaySeconds : null}
         onChange={edit}

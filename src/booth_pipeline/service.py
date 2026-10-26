@@ -111,6 +111,8 @@ class PipelineService:
     event_bus: Any = False
     # ADR 0128: seals task secrets; None when no key is mounted (task secrets are then off).
     secret_box: Any = None
+    # The names in the chart's runner.images a task may choose.
+    runner_images: frozenset[str] = frozenset()
 
     # ---- pipelines ----
     def create_pipeline(
@@ -447,13 +449,13 @@ class PipelineService:
 
     # ---- the save task version: validate -> resolve code -> validate again ----
     def _prepare_task_config(self, ident: Identity, config: TaskConfig, previous: TaskConfig | None) -> TaskConfig:
-        validate_task_config(config, self.registry.available_ids())
+        validate_task_config(config, self.registry.available_ids(), self.runner_images)
         if config.runner != BASE_RUNNER:
             reason = self.registry.availability(config.runner, ident.token, ident.workspace)
             if reason:
                 raise ModelError(f"{config.runner} is not available in this workspace: {reason}", "runner")
         resolved = self._resolve_task_code(ident, config, previous)
-        validate_task_config(resolved, self.registry.available_ids())  # re-check: the byte budget now includes catalog/storage source
+        validate_task_config(resolved, self.registry.available_ids(), self.runner_images)  # re-check: the byte budget now includes catalog/storage source
         return resolved
 
     def _resolve_task_code(self, ident: Identity, config: TaskConfig, previous: TaskConfig | None) -> TaskConfig:

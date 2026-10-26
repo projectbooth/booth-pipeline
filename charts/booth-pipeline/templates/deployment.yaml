@@ -82,6 +82,19 @@ spec:
             # empty for no route at all.
             - name: BOOTH_PIPELINE_PIP_ROUTE
               value: {{ include "booth-pipeline.pipRoute" . | quote }}
+            {{- with .Values.runner.images }}
+            {{- range $name, $image := . }}
+            {{- if not (regexMatch `^[a-z0-9][a-z0-9-]{0,62}$` $name) }}
+            {{- fail (printf "runner.images: %q is not a usable name (lower-case letters, digits and '-')" $name) }}
+            {{- end }}
+            {{- if not (regexMatch `^[^ ]+@sha256:[0-9a-f]{64}$` $image) }}
+            {{- fail (printf "runner.images.%s must be pinned by digest (registry/repo@sha256:...), never a tag" $name) }}
+            {{- end }}
+            {{- end }}
+            # Operator-built runner images a task may choose (runner.images), name -> digest-pinned image.
+            - name: BOOTH_PIPELINE_RUNNER_IMAGES
+              value: {{ toJson . | quote }}
+            {{- end }}
             # ADR 0119: the Spark runner (runner.spark).
             - name: BOOTH_PIPELINE_SPARK_ENABLED
               value: {{ .Values.runner.spark.enabled | quote }}

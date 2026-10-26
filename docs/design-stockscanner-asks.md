@@ -369,3 +369,17 @@ Changes from the note above, found while building it. Each PR adds its own.
 - **A missing secret** fails that task without retries; its downstream tasks don't run, and independent tasks do.
 - **The run view** shows, on each task, the secret names its latest attempt got (`task_runs.secrets`).
 
+**PR 3, runner images per task:**
+- **The protocol check** is a new authenticated `GET /v1/protocol` on the runner service. It returns the protocol
+  revision (2: skip results and `env`; 1 is everything before) and the release. It's asked only for a task on an
+  operator image, and the revision must match exactly: older and newer are both refused, saying to rebuild from
+  this release. An image too old to have the endpoint answers 404 and is refused the same way. Asking doesn't use
+  up a one-shot pod.
+- **The pip init container runs the chosen image too,** so requirements on top install with the image's own
+  interpreter. Credential sidecars keep their images.
+- **Not for Spark tasks:** their pod runs only the module's Spark client. Refused at save.
+- **An image removed from the chart after save** fails the task at start, before any Job, naming it. The builder
+  keeps showing it, marked "no longer configured".
+- **Rendering refuses a tag** (only a digest), or a name that isn't lower-case letters, digits and `-`. Startup
+  refuses them too.
+

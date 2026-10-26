@@ -176,6 +176,7 @@ def _make_op(
                 spark=config.spark.model_dump(by_alias=True, mode="json") if config.spark is not None else None,
                 trigger=trigger,
                 env=env,
+                runner_image=config.runner_image or "",
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskSkipped as e:

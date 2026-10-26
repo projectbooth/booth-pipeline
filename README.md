@@ -68,6 +68,24 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Runner images** — a task whose packages are large (pandas, yfinance) can run on an image the operator built
+  with them already installed, instead of installing them on every attempt. The operator lists such images in the
+  chart's `runner.images`, by name and pinned by digest, and a base task chooses one by name (**Runner image** in its
+  settings; checked at save). The task's pod and its pip init container then run that image; the task's own
+  requirements still install on top. Build the image from **this release's** image, so its runner service and
+  harness match:
+
+  ```dockerfile
+  FROM ghcr.io/projectbooth/booth-pipeline:<this release>
+  USER root
+  RUN pip install --no-cache-dir yfinance==1.7.0
+  USER 65532:65532
+  ```
+
+  Before a task starts on such an image, the module asks its runner service which protocol revision it speaks; an
+  image built from an older or newer release fails the task saying to rebuild it, rather than misreading a skip or a
+  secret. Rebuild the images with each booth-pipeline upgrade. An image removed from `runner.images` after a task chose
+  it fails that task at start, naming it. Not for Spark tasks, nor for tasks run in-process (local development).
 - **Task secrets** (ADR 0128) — an outside key, such as an API key, that a workspace owner sets on the **Secrets**
   page (names only ever come back; editors see the names, viewers nothing). A base Python task declares the ones it
   needs, `secrets: [{name, env}]`, and gets each as that environment variable in its own process, read fresh at each

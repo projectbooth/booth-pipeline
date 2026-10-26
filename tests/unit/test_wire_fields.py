@@ -27,6 +27,7 @@ from .servers import serve_asgi
 LOCAL = {
     "TaskAccess.refresh": "a callable that mints with the module's credential; it stays in the API pod, which PUTs fresh tokens instead",
     "TaskAccess.role": "only the API pod uses it, to choose each credential sidecar's --access; the task's token already carries the role",
+    "TaskInvocation.runner_image": "the Job runner swaps the pod's image by it; the pod is already that image by the time it is called",
 }
 
 

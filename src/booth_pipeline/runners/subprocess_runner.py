@@ -119,6 +119,8 @@ class SubprocessRunner:
     def run(self, inv: TaskInvocation, log: TaskLog, cancel: Cancellation) -> Any:
         if cancel.canceled:
             raise TaskCanceled()
+        if inv.runner_image:
+            raise TaskFailed(f"this task runs on runner image {inv.runner_image!r}, which only a task run as a Kubernetes Job can use; this install runs tasks in its own process")
         workdir = tempfile.mkdtemp(prefix="booth-task-", dir=self._workdir_root)
         try:
             return self._run_in(workdir, inv, log, cancel)

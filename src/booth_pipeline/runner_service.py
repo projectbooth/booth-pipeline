@@ -17,6 +17,12 @@ Protocol (internal; authenticated with a per-task bearer secret, ADR 0096):
   ``ctx.skip`` ends with ``{"t":"result","output":null,"skipped":"<reason>"}``.
   ``{"t":"ping"}`` is keep-alive. **Closing the connection cancels the task** (the process tree is killed).
 * ``PUT /v1/run/{run_id}/{task_key}/token`` — replace that running task's platform token.
+* ``GET /v1/protocol`` — ``{"protocol": N, "version": ...}``: which revision of this protocol the image
+  speaks. Asked before a task that runs on an operator's own runner image (``runner.images``), whose
+  runner service may be older or newer than this module; a mismatch fails the task with how to fix it.
+
+Protocol revisions: 1 is everything before the endpoint existed; 2 adds a skip as a result
+(``"skipped"``) and the task's secrets (``env``).
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from .runners.base import (
+    RUNNER_PROTOCOL,
     Cancellation,
     TaskAccess,
     TaskCanceled,
@@ -52,6 +59,8 @@ from .runners.base import (
 from .runners.subprocess_runner import SubprocessRunner
 
 log = logging.getLogger(__name__)
+
+PROTOCOL = RUNNER_PROTOCOL  # the revision of the protocol above this image speaks
 
 PING_SECONDS = 15
 MAX_BODY_BYTES = 64 * 1024 * 1024
@@ -109,6 +118,7 @@ def create_runner_app(
     max_concurrent: int = 16,
     on_task_done: Callable[[], None] | None = None,
     on_task_start: Callable[[], None] | None = None,
+    protocol: int | None = PROTOCOL,
 ) -> FastAPI:
     """``on_task_start`` is called when an authenticated task is accepted; ``on_task_done`` once its
     stream has ended for any reason (result, failure, or the caller hanging up). A one-task Job pod
@@ -138,6 +148,15 @@ def create_runner_app(
     @app.exception_handler(HTTPException)
     async def _http(_: Request, e: HTTPException):
         return JSONResponse({"error": str(e.detail)}, status_code=e.status_code)
+
+    if protocol is not None:  # None: a runner from before this endpoint existed (tests)
+
+        @app.get("/v1/protocol")
+        async def protocol_revision():
+            from . import __version__
+
+            # Never counts as a task: asking doesn't use up a one-shot pod.
+            return {"protocol": protocol, "version": __version__}
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

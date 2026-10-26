@@ -6,7 +6,9 @@ operator values drives every module. Module-specific ones are ``BOOTH_PIPELINE_*
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass, field
 
 
@@ -30,6 +32,23 @@ def _int(name: str, default: int, lo: int = 0) -> int:
     if n < lo:
         raise ConfigError(f"{name} must be >= {lo}, got {n}")
     return n
+
+
+def _json_object(name: str) -> dict[str, str]:
+    v = os.environ.get(name, "").strip()
+    if not v:
+        return {}
+    try:
+        obj = json.loads(v)
+    except ValueError:
+        raise ConfigError(f"{name} must be a JSON object, got {v[:80]!r}") from None
+    if not isinstance(obj, dict):
+        raise ConfigError(f"{name} must be a JSON object")
+    return obj
+
+
+# A runner.images name: what a task stores and the builder offers.
+RUNNER_IMAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 @dataclass(frozen=True)
@@ -109,6 +128,10 @@ class Config:
     secrets_key_dir: str = "/etc/booth/task-secrets-key"
     secrets_key_id: str = ""
 
+    # runner.images: operator-built runner images a task may choose, name -> image pinned by digest. A
+    # task Job's pod then runs that image (built FROM this module's image, plus packages) instead.
+    runner_images: dict[str, str] = field(default_factory=dict)
+
     @classmethod
     def from_env(cls) -> Config:
         dev_memory = _bool("BOOTH_PIPELINE_DEV_MEMORY")
@@ -148,6 +171,7 @@ class Config:
             events_max_ack_pending=_int("BOOTH_PIPELINE_EVENTS_MAX_ACK_PENDING", 1000, 1),
             secrets_key_dir=os.environ.get("BOOTH_PIPELINE_SECRETS_KEY_DIR", "/etc/booth/task-secrets-key"),
             secrets_key_id=os.environ.get("BOOTH_PIPELINE_SECRETS_KEY_ID", ""),
+            runner_images=_json_object("BOOTH_PIPELINE_RUNNER_IMAGES"),
             runner_env_passthrough=tuple(
                 x.strip() for x in os.environ.get("BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH", "").split(",") if x.strip()
             ),
@@ -219,6 +243,11 @@ class Config:
                 SecretBox.from_dir(self.secrets_key_dir, self.secrets_key_id)
             except SecretsError as e:
                 raise ConfigError(f"task secrets key: {e}") from None
+        for name, image in self.runner_images.items():
+            if not isinstance(name, str) or not RUNNER_IMAGE_NAME_RE.match(name):
+                raise ConfigError(f"runner.images: {name!r} is not a usable name (lower-case letters, digits and '-', up to 63)")
+            if not isinstance(image, str) or not re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", image):
+                raise ConfigError(f"runner.images.{name} must be pinned by digest (registry/repo@sha256:<64 hex>), never a tag: {image!r}")
         if not self.dev_memory and not self.database_dsn:
             raise ConfigError(
                 "BOOTH_PIPELINE_DATABASE_DSN is required (core provisions it as the "

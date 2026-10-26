@@ -142,6 +142,14 @@ runner:
     # folder for its s3.empty_folder_cleanup_delay (2m by default), so a write in errorifexists mode
     # retried sooner fails as "path already exists". Keep it above that delay.
     retryMinDelaySeconds: 150
+  # Operator-built runner images a task may choose instead of this module's own: name -> image, pinned
+  # by digest (a tag is refused). Build each FROM this release's booth-pipeline image plus packages, so
+  # its runner service and harness match; a task on an image from another release fails at start,
+  # saying to rebuild it (runner protocol check). The task's pod and its pip init container run it;
+  # a task's own requirements still install on top. Pulled with the module image's pullPolicy.
+  #   images:
+  #     stocks-py: ghcr.io/you/stocks-runner@sha256:<64 hex>
+  images: {}
   # ADR 0115 (docs/design-task-requirements.md): a task may list Python requirements, installed into
   # its own pod at the start of every attempt by a `pip` init container that holds no token, bearer or
   # credentials, into a volume the task then imports from. Nothing is cached between attempts.

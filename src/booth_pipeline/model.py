@@ -299,6 +299,9 @@ class TaskConfig(Wire):
     # ADR 0128: the workspace task secrets this task is given, by name, as environment variables. Base
     # Python tasks only; checked in validate_task_config.
     secrets: list[TaskSecretRef] = Field(default_factory=list)
+    # The operator's runner image this task's pod runs (a name from the chart's runner.images), or None
+    # for the module's own. Base tasks only; checked in validate_task_config against what is configured.
+    runner_image: str | None = None
 
     @model_validator(mode="after")
     def _spark_always_has_platform_access(self) -> TaskConfig:
@@ -334,7 +337,7 @@ def check_params(v: dict[str, Any], what: str) -> dict[str, Any]:
     return v
 
 
-def validate_task_config(config: TaskConfig, available_runners: set[str] | None = None) -> None:
+def validate_task_config(config: TaskConfig, available_runners: set[str] | None = None, runner_images: set[str] | frozenset[str] | None = None) -> None:
     """Everything about a ``TaskConfig``'s validity that pydantic's own field constraints (params
     size, timeout bounds, the ``code`` union's own shape) don't already enforce. Pure: no I/O, so
     it runs identically whether called live or at save time — the same shape as
@@ -359,6 +362,12 @@ def validate_task_config(config: TaskConfig, available_runners: set[str] | None 
         check_requirements(config.requirements)
     if config.secrets:
         check_task_secrets(config)
+    if config.runner_image is not None:
+        if config.runner == SPARK_RUNNER:
+            raise ModelError("a Spark task's pod runs only booth-pipeline's Spark client; it can't choose a runner image", "runnerImage")
+        if runner_images is not None and config.runner_image not in runner_images:
+            offered = f"available: {', '.join(sorted(runner_images))}" if runner_images else "this install has none (an operator sets runner.images)"
+            raise ModelError(f"runner image {config.runner_image!r} is not configured on this install; {offered}", "runnerImage")
 
 
 def check_task_secrets(config: TaskConfig) -> None:

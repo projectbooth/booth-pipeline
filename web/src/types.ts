@@ -60,6 +60,8 @@ export interface TaskConfig {
   spark?: SparkOptions | null;
   /** ADR 0128: workspace task secrets this task gets as environment variables. Base Python tasks only. */
   secrets?: TaskSecretRef[];
+  /** An operator-built runner image (a name from GET /config's runnerImages), or null for the module's own. */
+  runnerImage?: string | null;
 }
 
 /** ADR 0128: a task's use of a workspace secret, by name, as the environment variable `env`. */
@@ -412,6 +414,8 @@ export interface ModuleConfig {
   spark?: { retryMinDelaySeconds: number } | null;
   /** ADR 0123: whether an event trigger can be turned on here. Absent from a backend without event triggers. */
   eventTriggers?: { available: boolean };
+  /** The chart's runner.images a task may choose, by name. Absent from an older backend. */
+  runnerImages?: string[];
 }
 
 export interface RunnerInfo {

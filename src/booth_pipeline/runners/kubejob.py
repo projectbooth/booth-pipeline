@@ -88,8 +88,12 @@ class KubernetesJobRunner:
         transport: httpx.BaseTransport | None = None,
         lakehouse_transport: httpx.BaseTransport | None = None,
         pip_route: str = "",
+        images: dict[str, str] | None = None,
     ) -> None:
         _check_template(job_template, task_port)
+        # runner.images: name -> image pinned by digest. A task naming one runs its pod (and its pip
+        # init container) on that image instead of the module's own.
+        self._images = dict(images or {})
         self._kube = kube
         self._template = job_template
         self._slots = threading.BoundedSemaphore(max_concurrent)
@@ -137,6 +141,10 @@ class KubernetesJobRunner:
             if not self._pip_timeout:
                 raise TaskFailed("this task has Python requirements, but the task Job template has no pip init container (ADR 0115)")
             log_.line("system", f"installing {len(inv.requirements)} Python requirement(s) before the task starts: {', '.join(inv.requirements)}")
+        if inv.runner_image:
+            if inv.runner_image not in self._images:
+                raise TaskFailed(f"runner image {inv.runner_image!r} is not configured on this install any more (runner.images); choose another for this task")
+            log_.line("system", f"runner image {inv.runner_image}: {self._images[inv.runner_image]}")
         warehouse = self._warehouse(inv, log_)
         try:
             job = self._kube.create_job(self._job(name, inv, warehouse))
@@ -150,7 +158,7 @@ class KubernetesJobRunner:
             ip = self._wait_ready(name, cancel, self._start_timeout + (self._pip_timeout if inv.requirements else 0))
             log_.line("system", f"task pod ready in {time.monotonic() - t0:.1f}s")
             host = f"[{ip}]" if ":" in ip else ip
-            remote = RemoteRunner(f"http://{host}:{self._port}", bearer, refresh_seconds=self._refresh, transport=self._transport)
+            remote = RemoteRunner(f"http://{host}:{self._port}", bearer, refresh_seconds=self._refresh, transport=self._transport, image=inv.runner_image)
             try:
                 return remote.run(inv, log_, cancel)
             finally:
@@ -206,6 +214,14 @@ class KubernetesJobRunner:
         # exactly as before packages existed.
         _personalize_pip(pod, inv)
         _personalize_sidecars(pod, inv, warehouse)
+        if inv.runner_image:
+            # The task container and, if it stays, the pip init container: requirements install on top of
+            # the image with the image's own interpreter. Credential sidecars keep theirs.
+            image = self._images[inv.runner_image]
+            pod["containers"][0]["image"] = image
+            pip = _init_container(pod, PIP_CONTAINER)
+            if pip is not None:
+                pip["image"] = image
         for v in pod["volumes"]:
             if v["name"] == AUTH_VOLUME:
                 # Default file mode on purpose: a 0400 file is root-owned and unreadable by the
