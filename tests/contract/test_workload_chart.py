@@ -534,3 +534,32 @@ def test_a_named_key_secret_is_mounted_into_the_api_pod_only():
     assert "booth-pipeline-secrets-key" not in json.dumps(task_job(items))
     # The chart never creates the key: the operator does.
     assert not [d for d in items if d["kind"] == "Secret" and d["metadata"]["name"] == "booth-pipeline-secrets-key"]
+
+
+# ---- runner images per task ---------------------------------------------------------------------
+
+DIGEST = "ghcr.io/you/stocks-runner@sha256:" + "a" * 64
+
+
+def test_no_runner_images_by_default(api):
+    assert "BOOTH_PIPELINE_RUNNER_IMAGES" not in {e["name"] for e in pod(api)["containers"][0].get("env", [])}
+
+
+def test_runner_images_reach_the_api_pod_as_a_name_to_digest_map():
+    api = by_kind(docs("--set", f"runner.images.stocks-py={DIGEST}"), "Deployment")
+    env = {e["name"]: e.get("value") for e in pod(api)["containers"][0]["env"]}
+    assert json.loads(env["BOOTH_PIPELINE_RUNNER_IMAGES"]) == {"stocks-py": DIGEST}
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        ("runner.images.stocks-py=ghcr.io/you/stocks-runner:1.0", "must be pinned by digest"),
+        (f"runner.images.Stocks={DIGEST}", "not a usable name"),
+    ],
+)
+def test_an_unpinned_or_badly_named_runner_image_is_refused_at_render(setting, message):
+    from .test_manifest import CHART
+
+    out = helm("template", "t", str(CHART), *REQUIRED, "--set", setting)
+    assert out.returncode != 0 and message in out.stderr

@@ -157,6 +157,7 @@ def create_app(
                 start_timeout_seconds=cfg.task_start_timeout_seconds,
                 name_prefix=cfg.task_name_prefix,
                 pip_route=cfg.pip_route,
+                images=cfg.runner_images,
             )
         else:
             log.warning("BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset: tasks run in subprocesses of THIS process (local dev and tests only; see docs/decisions/0018)")
@@ -182,6 +183,7 @@ def create_app(
     service = PipelineService(store, registry, catalog, manager, storage, accounts or (ServiceAccountsClient(cfg.core_url) if cfg.core_url else None))
     service.projects = projects or (ProjectsClient(cfg.core_url) if cfg.core_url else None)
     service.secret_box = secret_box
+    service.runner_images = frozenset(cfg.runner_images)
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
     # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
     manager.on_run_finished = scheduler.wake

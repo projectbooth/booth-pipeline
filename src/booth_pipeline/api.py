@@ -244,6 +244,8 @@ def config(request: Request, _: Identity = Depends(require_read)) -> dict[str, A
         },
         "catalogConfigured": svc(request).catalog.configured,
         "pip": pip_status(cfg),
+        # The chart's runner.images a task may choose (names; the images themselves are the operator's).
+        "runnerImages": sorted(cfg.runner_images),
         # ADR 0123: whether an event trigger can be turned on here (this module holds a bus credential).
         "eventTriggers": {"available": request.app.state.event_bus.configured, "bus": request.app.state.event_bus.state()},
         # ADR 0119: the Spark runner's settings the builder explains, when this install has it.

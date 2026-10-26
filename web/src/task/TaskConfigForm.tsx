@@ -19,6 +19,7 @@ import { Banner, Button, Field, NumberInput, inputClass, monoClass } from "../ui
  *  "code.catalog.entryId", not "code.entryId"). */
 export const KNOWN_CONFIG_ERROR_FIELDS = new Set([
   "runner",
+  "runnerImage",
   "timeoutSeconds",
   "params",
   "retry.maxRetries",
@@ -40,6 +41,8 @@ export interface TaskConfigFormProps {
   error?: { message: string; field: string | null };
   /** Whether this install can install packages (ADR 0115); null/undefined while unknown. */
   pip?: PipStatus | null;
+  /** The install's runner.images, by name. The field shows only when there are some (or the task has one). */
+  runnerImages?: string[];
   /** ADR 0119: booth-spark's limits for this caller, and the install's retry floor for Spark tasks. */
   sparkLimits?: SparkLimits | null;
   sparkRetryFloorSeconds?: number | null;
@@ -53,7 +56,7 @@ function isPython(config: TaskConfig): boolean {
   return !lang || lang === "python";
 }
 
-export function TaskConfigForm({ config, runners, api, readOnly, error, pip, sparkLimits, sparkRetryFloorSeconds, onChange }: TaskConfigFormProps) {
+export function TaskConfigForm({ config, runners, api, readOnly, error, pip, runnerImages = [], sparkLimits, sparkRetryFloorSeconds, onChange }: TaskConfigFormProps) {
   const [paramsDraft, setParamsDraft] = useState(() => JSON.stringify(config.params, null, 2));
   const [paramsError, setParamsError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
@@ -250,6 +253,32 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, spa
             <NumberInput {...p} min={1} max={86400} value={config.timeoutSeconds} onChange={(n) => onChange({ ...config, timeoutSeconds: n })} />
           )}
         </Field>
+
+        {!onSpark && (runnerImages.length > 0 || config.runnerImage) && (
+          <Field
+            id="task-runner-image"
+            label="Runner image"
+            error={fieldError("runnerImage")}
+            help="An image your operator built with packages already installed, so they aren't installed on every run. Python packages below still install on top."
+          >
+            {(p) => (
+              <select
+                {...p}
+                className={`${inputClass} w-auto`}
+                value={config.runnerImage ?? ""}
+                onChange={(e) => onChange({ ...config, runnerImage: e.target.value === "" ? null : e.target.value })}
+              >
+                <option value="">booth-pipeline's own (default)</option>
+                {[...new Set([...runnerImages, ...(config.runnerImage ? [config.runnerImage] : [])])].map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                    {runnerImages.includes(name) ? "" : " (no longer configured)"}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+        )}
 
         {((isPython(config) && !onSpark) || requirements.length > 0) && (
           <RequirementsField

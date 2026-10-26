@@ -49,6 +49,8 @@ export class FakeBackend {
   eventTriggerStatus = new Map<string, Record<string, unknown>>();
   /** ADR 0128: the workspace's task secrets, name -> value (only the fake knows a value). null: not set up (503). */
   secrets: Map<string, { value: string; updatedBy: string; updatedAt: string }> | null = new Map();
+  /** GET /config's runnerImages: the chart's runner.images by name. */
+  runnerImages: string[] = [];
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
@@ -242,7 +244,14 @@ export class FakeBackend {
     }
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
     if (method === "GET" && path === "/config")
-      return this.json({ limits: {}, catalogConfigured: true, pip: this.pip, spark: { retryMinDelaySeconds: 150 }, eventTriggers: { available: this.eventTriggersAvailable } });
+      return this.json({
+        limits: {},
+        catalogConfigured: true,
+        pip: this.pip,
+        spark: { retryMinDelaySeconds: 150 },
+        eventTriggers: { available: this.eventTriggersAvailable },
+        runnerImages: this.runnerImages,
+      });
     if ((m = path.match(/^\/pipelines\/([^/]+)\/event-trigger$/)) && method === "GET") {
       const s = this.eventTriggerStatus.get(m[1]);
       return this.json({

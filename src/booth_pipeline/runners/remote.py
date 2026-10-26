@@ -22,7 +22,17 @@ from typing import Any
 
 import httpx
 
-from .base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskLog, TaskSkipped
+from .base import (
+    RUNNER_PROTOCOL,
+    Cancellation,
+    TaskCanceled,
+    TaskFailed,
+    TaskInvocation,
+    TaskLog,
+    TaskSkipped,
+)
+
+REBUILD = "rebuild it FROM this release's booth-pipeline image, or remove it from runner.images"
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +69,11 @@ class RemoteRunner:
         secret: str,
         refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
         transport: httpx.BaseTransport | None = None,
+        image: str = "",
     ) -> None:
+        """``image``: set for a pod running an operator's own runner image (runner.images, named so in
+        messages). Its runner service may be from another release, so its protocol is checked first."""
+        self._image = image
         self._url = url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {secret}"}
         self._refresh = refresh_seconds
@@ -69,9 +83,32 @@ class RemoteRunner:
     def close(self) -> None:
         self._http.close()
 
+    def check_protocol(self) -> None:
+        """Refuse, with how to fix it, a runner image whose runner service doesn't speak this module's
+        protocol revision: an old one would run a skip or a secret wrongly, not fail."""
+        what = f"the runner image {self._image!r}" if self._image else "the task's runner"
+        try:
+            r = self._http.get(f"{self._url}/v1/protocol", headers=self._headers, timeout=10.0)
+        except httpx.HTTPError as e:
+            raise TaskFailed(f"could not ask {what} which protocol it speaks: {e.__class__.__name__}") from None
+        if r.status_code == 404:
+            raise TaskFailed(f"{what} is older than this booth-pipeline (its runner service doesn't report its protocol; this release speaks {RUNNER_PROTOCOL}): {REBUILD}")
+        if r.status_code != 200:
+            raise TaskFailed(f"{what} answered HTTP {r.status_code} when asked its protocol")
+        try:
+            body = r.json()
+            got, version = int(body["protocol"]), str(body.get("version", "?"))
+        except (ValueError, KeyError, TypeError):
+            raise TaskFailed(f"{what} gave an unreadable answer when asked its protocol") from None
+        if got != RUNNER_PROTOCOL:
+            age = "older" if got < RUNNER_PROTOCOL else "newer"
+            raise TaskFailed(f"{what} is {age} than this booth-pipeline (built from {version}, runner protocol {got}; this release speaks {RUNNER_PROTOCOL}): {REBUILD}")
+
     def run(self, inv: TaskInvocation, log_: TaskLog, cancel: Cancellation) -> Any:
         if cancel.canceled:
             raise TaskCanceled()
+        if self._image:
+            self.check_protocol()
         body: dict[str, Any] = {
             "runId": inv.run_id,
             "taskKey": inv.task_key,

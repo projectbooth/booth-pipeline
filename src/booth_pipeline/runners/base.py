@@ -14,6 +14,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+# The runner service protocol revision this module speaks (runner_service.py's docstring lists them).
+# Bump it with any change a runner image built from an older or newer booth-pipeline would get wrong.
+RUNNER_PROTOCOL = 2
+
 
 class TaskFailed(Exception):
     """The task's code failed (non-zero exit, exception, unserialisable output, timeout).
@@ -85,6 +89,9 @@ class TaskInvocation:
     # ADR 0128: the task's declared secrets, environment variable -> value, for the task's own process
     # only: never written to invocation.json, never given to the pip init container, never in a repr.
     env: dict[str, str] = field(default_factory=dict, repr=False)
+    # runner.images: the operator's image this task's pod runs (by its name in that map), or "" for the
+    # module's own. Only the Job runner reads it; it never leaves the API/scheduler pod.
+    runner_image: str = ""
 
 
 class TaskLog(Protocol):

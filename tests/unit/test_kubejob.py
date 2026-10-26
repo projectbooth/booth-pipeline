@@ -26,7 +26,14 @@ import pytest
 
 from booth_pipeline.kube import KubeClient
 from booth_pipeline.runner_service import create_runner_app
-from booth_pipeline.runners.base import Cancellation, TaskAccess, TaskCanceled, TaskFailed, TaskInvocation
+from booth_pipeline.runners.base import (
+    RUNNER_PROTOCOL,
+    Cancellation,
+    TaskAccess,
+    TaskCanceled,
+    TaskFailed,
+    TaskInvocation,
+)
 from booth_pipeline.runners.kubejob import KEY_LABEL, RUN_LABEL, TASK_JOB_LABEL, KubernetesJobRunner
 from booth_pipeline.runners.remote import RemoteRunner
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
@@ -90,6 +97,8 @@ class FakeCluster:
         self.pod_problem: dict | None = None  # e.g. a waiting reason, or "never-ready"
         self.pod_status: dict | None = None  # the pod's whole status instead of starting it (e.g. an init container failed)
         self.fail_create_job: str | None = None
+        # What the pods' runner service reports as its protocol; None: an image from before the endpoint.
+        self.runner_protocol: int | None = RUNNER_PROTOCOL
 
     # -- the API server ----------------------------------------------------------------------
 
@@ -160,7 +169,7 @@ class FakeCluster:
             pod["status"]["containerStatuses"] = [{"name": "task", "state": {"waiting": self.pod_problem}}]
             return
         stack = ExitStack()
-        url = stack.enter_context(serve_asgi(create_runner_app(secret["stringData"]["token"], SubprocessRunner(), max_concurrent=1)))
+        url = stack.enter_context(serve_asgi(create_runner_app(secret["stringData"]["token"], SubprocessRunner(), max_concurrent=1, protocol=self.runner_protocol)))
         with self.lock:
             ip = f"10.244.0.{self.next_ip}"
             self.next_ip += 1
