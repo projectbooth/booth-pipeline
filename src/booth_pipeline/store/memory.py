@@ -28,6 +28,7 @@ from ..records import (
     TaskDraft,
     TaskEntity,
     TaskRun,
+    TaskSecret,
     TaskVersionRecord,
 )
 from ..schedule import next_fire_trigger
@@ -52,6 +53,7 @@ class MemoryStore:
         self._task_drafts: dict[str, TaskDraft] = {}
         self._runs: dict[str, Run] = {}
         self._task_runs: dict[str, dict[str, TaskRun]] = {}
+        self._task_secrets: dict[tuple[str, str], TaskSecret] = {}
         self._logs: dict[str, list[LogLine]] = {}
         # ADR 0123
         self._trigger_state: dict[str, EventTriggerState] = {}
@@ -497,6 +499,27 @@ class MemoryStore:
         with self._lock:
             if task_run.run_id in self._task_runs:
                 self._task_runs[task_run.run_id][task_run.task_key] = copy.deepcopy(task_run)
+
+    # ---- task secrets (ADR 0128) ----
+    def list_task_secrets(self, workspace):
+        with self._lock:
+            return copy.deepcopy(sorted((s for (ws, _), s in self._task_secrets.items() if ws == workspace), key=lambda s: s.name))
+
+    def get_task_secret(self, workspace, name):
+        with self._lock:
+            return copy.deepcopy(self._task_secrets.get((workspace, name)))
+
+    def put_task_secret(self, secret):
+        with self._lock:
+            self._task_secrets[(secret.workspace, secret.name)] = copy.deepcopy(secret)
+
+    def delete_task_secret(self, workspace, name):
+        with self._lock:
+            return self._task_secrets.pop((workspace, name), None) is not None
+
+    def task_secrets_sealed_with_other_keys(self, key_id):
+        with self._lock:
+            return copy.deepcopy([s for s in self._task_secrets.values() if s.key_id != key_id])
 
     # ---- logs ----
     def append_logs(self, lines):

@@ -35,6 +35,7 @@ from .service import Forbidden, NotFound, PipelineBusy, PipelineService, Unavail
 from .service_accounts import ServiceAccountsClient
 from .storage_client import StorageClient
 from .store.base import Conflict, InUse, Store
+from .task_secrets import SecretBox, reseal
 from .workload import WorkloadMinter
 
 log = logging.getLogger(__name__)
@@ -136,8 +137,17 @@ def create_app(
     runner: Runner | None = None,
     accounts: ServiceAccountsClient | None = None,
     projects: ProjectsClient | None = None,
+    secret_box: SecretBox | None = None,
 ) -> FastAPI:
     store = store or build_store(cfg)
+    # ADR 0128: the task secrets key, mounted into this pod only (config.validate refuses it beside
+    # in-process tasks). None: task secrets are off.
+    secret_box = secret_box if secret_box is not None else SecretBox.from_dir(cfg.secrets_key_dir, cfg.secrets_key_id)
+    if secret_box is not None:
+        try:
+            reseal(store, secret_box)
+        except Exception:  # noqa: BLE001 - re-sealing after a rotation can wait for the next start
+            log.exception("task secrets: could not re-seal values sealed with an older key")
     if runner is None:
         if cfg.task_job_template:
             # The deployed path (ADR 0096): one Kubernetes Job — its own pod — per task attempt.
@@ -168,9 +178,10 @@ def create_app(
         )
     registry = RunnerRegistry(runners)
     worker_id = f"{platform.node()}-{uuid4().hex[:8]}"
-    manager = RunManager(store, registry, cfg, worker_id, minter)
+    manager = RunManager(store, registry, cfg, worker_id, minter, secret_box)
     service = PipelineService(store, registry, catalog, manager, storage, accounts or (ServiceAccountsClient(cfg.core_url) if cfg.core_url else None))
     service.projects = projects or (ProjectsClient(cfg.core_url) if cfg.core_url else None)
+    service.secret_box = secret_box
     scheduler = Scheduler(store, service, manager, cfg.scheduler_interval_seconds)
     # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
     manager.on_run_finished = scheduler.wake

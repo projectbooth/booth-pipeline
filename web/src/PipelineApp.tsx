@@ -9,6 +9,7 @@ import { PipelineDetail } from "./views/pipeline/PipelineDetail";
 import { PipelineList } from "./views/PipelineList";
 import { RunDetail } from "./views/RunDetail";
 import { TaskDetail } from "./views/task/TaskDetail";
+import { SecretsPage } from "./views/SecretsPage";
 import { TaskList } from "./views/TaskList";
 
 /**
@@ -39,9 +40,11 @@ export interface PipelineAppProps {
   onNavigate?: (path: string) => void;
 }
 
-const SECTIONS: { section: Section; label: string; route: Route }[] = [
+const SECTIONS: { section: Section; label: string; route: Route; writersOnly?: boolean }[] = [
   { section: "pipelines", label: "Pipelines", route: { name: "pipelines" } },
   { section: "tasks", label: "Tasks", route: { name: "tasks" } },
+  // ADR 0128: names for editors (who declare them on tasks), values set by owners; viewers see nothing.
+  { section: "secrets", label: "Secrets", route: { name: "secrets" }, writersOnly: true },
 ];
 
 /**
@@ -103,7 +106,7 @@ export function PipelineApp({ workspace, role, theme, getAccessToken, basePath =
   return (
     <div data-theme={theme} className="flex flex-col gap-6 text-slate-900 dark:text-slate-100">
       <nav aria-label="Pipeline sections" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
-        {SECTIONS.map((s) => (
+        {SECTIONS.filter((s) => !s.writersOnly || v.canWrite).map((s) => (
           <Link
             key={s.section}
             href={v.href(s.route)}
@@ -164,5 +167,7 @@ function renderRoute(route: Route, v: ViewCtx) {
       return <TaskDetail key={route.id} v={v} taskId={route.id} tab={route.tab ?? "code"} version={route.version} />;
     case "run":
       return <RunDetail key={route.id} v={v} runId={route.id} initialTask={route.task} />;
+    case "secrets":
+      return <SecretsPage v={v} />;
   }
 }

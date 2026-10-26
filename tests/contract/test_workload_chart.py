@@ -510,3 +510,27 @@ def test_the_spark_runners_settings_reach_the_api_pod():
 def test_the_default_retry_floor_is_above_seaweedfs_empty_folder_delay():
     assert int(api_env(docs())["BOOTH_PIPELINE_SPARK_RETRY_MIN_DELAY_SECONDS"]) > 120
 
+
+
+# ---- task secrets (ADR 0128) ------------------------------------------------------------------
+
+
+def test_the_task_secrets_key_is_off_by_default_and_never_in_a_task_pod(chart, api, task):
+    assert "booth-pipeline-secrets-key" not in secret_names(api)
+    env = {e["name"] for e in pod(api)["containers"][0].get("env", [])}
+    assert "BOOTH_PIPELINE_SECRETS_KEY_DIR" not in env
+
+
+def test_a_named_key_secret_is_mounted_into_the_api_pod_only():
+    items = docs("--set", "taskSecrets.keySecretName=booth-pipeline-secrets-key", "--set", "taskSecrets.keyId=k2")
+    api = by_kind(items, "Deployment")
+    assert "booth-pipeline-secrets-key" in secret_names(api)
+    env = {e["name"]: e.get("value") for e in pod(api)["containers"][0]["env"]}
+    assert env["BOOTH_PIPELINE_SECRETS_KEY_DIR"] == "/etc/booth/task-secrets-key"
+    assert env["BOOTH_PIPELINE_SECRETS_KEY_ID"] == "k2"
+    (vol,) = [v for v in pod(api)["volumes"] if v["name"] == "task-secrets-key"]
+    assert vol["secret"].get("optional") is not True  # named but missing: the pod waits
+    assert "booth-pipeline-secrets-key" not in secret_names(task_job(items))
+    assert "booth-pipeline-secrets-key" not in json.dumps(task_job(items))
+    # The chart never creates the key: the operator does.
+    assert not [d for d in items if d["kind"] == "Secret" and d["metadata"]["name"] == "booth-pipeline-secrets-key"]

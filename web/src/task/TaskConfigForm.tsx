@@ -3,6 +3,7 @@ import type { ApiContext } from "../api/client";
 import type { Backoff, PipStatus, RunnerInfo, TaskConfig } from "../types";
 import { CodePicker } from "./CodePicker";
 import { isRequirementsField, RequirementsField } from "./RequirementsField";
+import { isSecretsField, SecretsField } from "./SecretsField";
 import { SparkOptionsForm, type SparkLimits } from "./SparkOptionsForm";
 import { StoragePicker } from "./StoragePicker";
 import { Banner, Button, Field, NumberInput, inputClass, monoClass } from "../ui/primitives";
@@ -76,9 +77,10 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, spa
   // silently dropped just because it doesn't map to an input here.
   const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
   const isSparkField = (f: string | null | undefined) => f === "spark" || !!f?.startsWith("spark.");
-  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field) || isSparkField(error.field)));
+  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field) || isSecretsField(error.field) || isSparkField(error.field)));
   const onSpark = config.runner === "spark";
   const requirements = config.requirements ?? [];
+  const secrets = config.secrets ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -256,6 +258,10 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, spa
             error={isRequirementsField(error?.field) ? error?.message : undefined}
             onChange={(r) => onChange({ ...config, requirements: r })}
           />
+        )}
+
+        {((isPython(config) && !onSpark) || secrets.length > 0) && (
+          <SecretsField api={api} value={secrets} error={isSecretsField(error?.field) ? (error ?? undefined) : undefined} onChange={(next) => onChange({ ...config, secrets: next })} />
         )}
 
         <Field id="task-params" label="Parameters (JSON)" error={paramsError ?? fieldError("params")} help="Available to the task as ctx.params.">

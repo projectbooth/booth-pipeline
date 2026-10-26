@@ -94,6 +94,11 @@ class RemoteRunner:
                 "catalogUrl": inv.access.catalog_url,
             },
         }
+        if inv.env:
+            # ADR 0128: the task's secrets, only when it has some, so a task without any still runs on a
+            # runner image from before them. Plaintext HTTP inside the cluster, as the platform token
+            # already travels; the task NetworkPolicy admits only this pod.
+            body["env"] = inv.env
         done = threading.Event()
         stream_box: dict[str, httpx.Response] = {}
 

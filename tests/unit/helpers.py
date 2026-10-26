@@ -67,6 +67,10 @@ class ListRecorder:
         with self._lock:
             self.events.append(("started", key, attempt))
 
+    def task_secrets(self, key: str, attempt: int, values: dict[str, str]) -> None:
+        with self._lock:
+            self.events.append(("secrets", key, attempt, sorted(values)))
+
     def task_attempt_finished(self, key: str, attempt: int, status: str, error: str | None) -> None:
         with self._lock:
             self.events.append((status, key, attempt, error))
@@ -90,7 +94,7 @@ class ListRecorder:
             self.events.append(("system", message))
 
     def statuses(self, key: str) -> list[str]:
-        return [e[0] for e in self.events if len(e) > 1 and e[1] == key and e[0] not in ("system", "output")]
+        return [e[0] for e in self.events if len(e) > 1 and e[1] == key and e[0] not in ("system", "output", "secrets")]
 
     def log_text(self, key: str) -> list[str]:
         return [m for k, _a, _s, m in self.lines if k == key]

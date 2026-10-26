@@ -85,6 +85,9 @@ class RunBody(BaseModel):
     spark: dict[str, Any] | None = None
     # ADR 0123: ctx.trigger. Absent from an older caller.
     trigger: dict[str, Any] | None = None
+    # ADR 0128: the task's secrets, set in its process's environment and nowhere else. Never logged:
+    # nothing in this service logs a request body.
+    env: dict[str, str] = {}
 
 
 class TokenBody(BaseModel):
@@ -169,6 +172,7 @@ def create_runner_app(
             requirements=tuple(body.requirements),
             spark=body.spark,
             trigger=body.trigger,
+            env=body.env,
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()

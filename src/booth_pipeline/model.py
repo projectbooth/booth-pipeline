@@ -44,6 +44,15 @@ MAX_TIMEOUT_SECONDS = 24 * 3600
 DEFAULT_TIMEOUT_SECONDS = 3600
 # ADR 0115: a task's Python requirements (as booth-streamlit's requirements.txt: 16 KiB).
 MAX_REQUIREMENTS = 100
+# ADR 0128: how many task secrets one task may declare, and the environment variables it may not take
+# (the runner's own, Python's, the credential sidecar's, and the ones that change how processes run).
+MAX_TASK_SECRETS = 20
+SECRET_ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+RESERVED_ENV = frozenset(
+    {"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "DATABASE_URL", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "LANG", "TZ", "USER", "SHELL", "PWD", "SYSTEMROOT"}
+)  # fmt: skip
+RESERVED_ENV_PREFIXES = ("BOOTH_", "PYTHON", "LD_", "AWS_", "PIP_", "LC_", "SSL_", "DYLD_")
 MAX_REQUIREMENT_CHARS = 200
 MAX_REQUIREMENTS_BYTES = 16 * 1024
 
@@ -232,6 +241,14 @@ class SparkDataAccess(Wire):
     storage: list[SparkStorageLocation] = Field(default_factory=list, max_length=4)
 
 
+class TaskSecretRef(Wire):
+    """ADR 0128: a workspace task secret this task is given, as the environment variable ``env`` in its
+    own process. Only the name is stored with the task (and exported); the value stays in the workspace."""
+
+    name: str
+    env: str
+
+
 class SparkOptions(Wire):
     """What a Spark task asks booth-spark for (its ``/v1`` ApplicationSpec, less the code, which is
     the task's own snapshotted source, and less ``maxDuration``, which is the task's timeout). The
@@ -279,6 +296,9 @@ class TaskConfig(Wire):
     requirements: list[str] = Field(default_factory=list)
     # ADR 0119: required when runner is "spark", refused otherwise.
     spark: SparkOptions | None = None
+    # ADR 0128: the workspace task secrets this task is given, by name, as environment variables. Base
+    # Python tasks only; checked in validate_task_config.
+    secrets: list[TaskSecretRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _spark_always_has_platform_access(self) -> TaskConfig:
@@ -337,6 +357,33 @@ def validate_task_config(config: TaskConfig, available_runners: set[str] | None 
         if code_language(config.code) != "python":
             raise ModelError("only a Python task can install packages", "requirements")
         check_requirements(config.requirements)
+    if config.secrets:
+        check_task_secrets(config)
+
+
+def check_task_secrets(config: TaskConfig) -> None:
+    """ADR 0128 Amendment 1: base Python tasks only (a Spark task's code is submitted to booth-spark and
+    stored there, so a value in it would leave this module), names a workspace secret can have, and
+    environment variables that don't collide with each other or with what the runner sets."""
+    from .task_secrets import NAME_RE
+
+    if config.runner == SPARK_RUNNER:
+        raise ModelError("task secrets are for base tasks only: a Spark task's code is submitted to booth-spark and kept there", "secrets")
+    if code_language(config.code) != "python":
+        raise ModelError("only a Python task can be given secrets", "secrets")
+    if len(config.secrets) > MAX_TASK_SECRETS:
+        raise ModelError(f"at most {MAX_TASK_SECRETS} secrets", "secrets")
+    seen: set[str] = set()
+    for i, ref in enumerate(config.secrets):
+        if not NAME_RE.match(ref.name):
+            raise ModelError("a secret name is a letter, then up to 63 letters, digits, '_' or '-'", f"secrets[{i}].name")
+        if not SECRET_ENV_RE.match(ref.env):
+            raise ModelError("an environment variable name is upper case letters, digits and '_', not starting with a digit", f"secrets[{i}].env")
+        if ref.env in RESERVED_ENV or ref.env.startswith(RESERVED_ENV_PREFIXES):
+            raise ModelError(f"{ref.env} is set by the runner or changes how the task's process runs; choose another name", f"secrets[{i}].env")
+        if ref.env in seen:
+            raise ModelError(f"{ref.env} is given twice", f"secrets[{i}].env")
+        seen.add(ref.env)
 
 
 def validate_spark_task(config: TaskConfig) -> None:

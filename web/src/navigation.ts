@@ -23,12 +23,13 @@ export type Route =
   | { name: "pipeline"; id: string; tab?: PipelineTab; version?: number }
   | { name: "tasks" }
   | { name: "task"; id: string; tab?: TaskTab; version?: number }
-  | { name: "run"; id: string; task?: string };
+  | { name: "run"; id: string; task?: string }
+  | { name: "secrets" };
 
-export type Section = "pipelines" | "tasks";
+export type Section = "pipelines" | "tasks" | "secrets";
 
 export function sectionOf(route: Route): Section {
-  return route.name === "task" || route.name === "tasks" ? "tasks" : "pipelines";
+  return route.name === "task" || route.name === "tasks" ? "tasks" : route.name === "secrets" ? "secrets" : "pipelines";
 }
 
 const isNum = (s: string | undefined): s is string => s !== undefined && /^\d+$/.test(s);
@@ -59,6 +60,9 @@ export function parseRoute(pathname: string, search: string, basePath: string = 
     case "runs":
       if (id && parts.length === 2) return { name: "run", id, task: query.get("task") ?? undefined };
       break;
+    case "secrets":
+      if (!id) return { name: "secrets" };
+      break;
   }
   return { name: "pipelines" };
 }
@@ -84,6 +88,8 @@ export function routePath(route: Route, basePath: string = DEFAULT_BASE_PATH): s
     }
     case "run":
       return `${basePath}/runs/${e(route.id)}${route.task ? `?task=${e(route.task)}` : ""}`;
+    case "secrets":
+      return `${basePath}/secrets`;
   }
 }
 

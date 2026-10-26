@@ -27,6 +27,7 @@ import type {
   TaskVersion,
   TaskVersionSummary,
   ValidateResult,
+  TaskSecret,
 } from "../types";
 
 // This component is mounted by booth-design's shell, so its requests resolve against the shell's
@@ -159,6 +160,11 @@ export const api = {
   /** booth-core's project registry (ADR 0124), read as the user. An array, or an `items` page. */
   projects: (c: ApiContext) => request<Project[] | { items: Project[] }>(c, CORE, "/api/projects").then((r) => (Array.isArray(r) ? r : r.items)),
   deleteTask: (c: ApiContext, id: string) => request<void>(c, PIPELINE, `/tasks/${e(id)}`, { method: "DELETE" }),
+
+  // ADR 0128: workspace task secrets. Names only ever come back; a value goes one way.
+  listSecrets: (c: ApiContext) => request<{ items: TaskSecret[] }>(c, PIPELINE, "/secrets").then((r) => r.items),
+  setSecret: (c: ApiContext, name: string, value: string) => request<TaskSecret>(c, PIPELINE, `/secrets/${e(name)}`, json("PUT", { value })),
+  deleteSecret: (c: ApiContext, name: string) => request<void>(c, PIPELINE, `/secrets/${e(name)}`, { method: "DELETE" }),
   listTaskVersions: (c: ApiContext, id: string) => request<Page<TaskVersionSummary>>(c, PIPELINE, `/tasks/${e(id)}/versions?limit=200`),
   getTaskVersion: (c: ApiContext, id: string, version: number | "latest") =>
     request<TaskVersion>(c, PIPELINE, `/tasks/${e(id)}/versions/${version}`),

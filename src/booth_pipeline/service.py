@@ -50,6 +50,7 @@ from .records import (
     TaskDraft,
     TaskEntity,
     TaskRun,
+    TaskSecret,
     TaskVersionRecord,
 )
 from .resolve import resolve_task_configs, resolve_task_ref
@@ -88,6 +89,7 @@ class _NullRecorder:
     def task_started(self, key, attempt): ...
     def task_attempt_finished(self, key, attempt, status, error): ...
     def task_output(self, key, attempt, output): ...
+    def task_secrets(self, key, attempt, values): ...
     def task_log(self, key, attempt): ...
     def system(self, message): ...
 
@@ -107,6 +109,8 @@ class PipelineService:
     # ADR 0123: whether this module holds an event-bus credential, without which no event trigger fires. A
     # callable (the app's EventBus.configured, read each time: the Secret may arrive later) or a fixed bool.
     event_bus: Any = False
+    # ADR 0128: seals task secrets; None when no key is mounted (task secrets are then off).
+    secret_box: Any = None
 
     # ---- pipelines ----
     def create_pipeline(
@@ -637,6 +641,43 @@ class PipelineService:
         run = self._need(self.store.request_cancel(ident.workspace, run_id), "run")
         self.manager.cancel(run_id)
         return run
+
+    # ---- task secrets (ADR 0128) ----
+    def _secrets_box(self):
+        if self.secret_box is None:
+            raise Unavailable("task secrets are not set up on this install: an operator creates the key Secret and sets the chart's taskSecrets.keySecretName")
+        return self.secret_box
+
+    def list_task_secrets(self, ident: Identity) -> list[TaskSecret]:
+        """Names and when they changed, for editors and owners (who declare them on tasks). Never a value."""
+        if not ident.can_write:
+            raise Forbidden("only editors and owners see the workspace's task secrets")
+        self._secrets_box()
+        return self.store.list_task_secrets(ident.workspace)
+
+    def set_task_secret(self, ident: Identity, name: str, value: str) -> TaskSecret:
+        """Create or replace. Workspace owners only; the value is sealed at once and never returned."""
+        from .task_secrets import NAME_RE, check_value
+
+        if ident.role != "owner":
+            raise Forbidden("only a workspace owner sets task secrets")
+        box = self._secrets_box()
+        if not NAME_RE.match(name):
+            raise ModelError("a secret name is a letter, then up to 63 letters, digits, '_' or '-'", "name")
+        problem = check_value(value)
+        if problem:
+            raise ModelError(problem, "value")
+        sealed = box.seal(ident.workspace, name, value)
+        row = TaskSecret(ident.workspace, name, sealed.ciphertext, sealed.nonce, sealed.key_id, ident.display_name, datetime.now(UTC))
+        self.store.put_task_secret(row)
+        return row
+
+    def delete_task_secret(self, ident: Identity, name: str) -> None:
+        if ident.role != "owner":
+            raise Forbidden("only a workspace owner deletes task secrets")
+        self._secrets_box()
+        if not self.store.delete_task_secret(ident.workspace, name):
+            raise NotFound(f"secret {name} is not set in this workspace")
 
     def logs(self, ident: Identity, run_id: str, task_key: str | None, after_seq: int, limit: int) -> list[LogLine]:
         self._need(self.store.get_run(ident.workspace, run_id), "run")

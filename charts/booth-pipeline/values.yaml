@@ -178,6 +178,18 @@ workloadIdentity:
   enabled: true
 
 # ADR 0123: pipelines triggered by events (a file created in booth-storage, a write through booth-api).
+# Task secrets (ADR 0128): owner-set outside keys, handed to the tasks that declare them. Values are
+# sealed in the module's database; the key that seals them is a Kubernetes Secret YOU create (it never
+# comes from this chart), mounted into the API/scheduler pod only, one data key per key id:
+#   kubectl -n <ns> create secret generic booth-pipeline-secrets-key --from-literal=k1="$(openssl rand -base64 32)"
+# Empty keySecretName: task secrets are off. Losing the key makes every stored secret unreadable (each
+# must be re-entered). To rotate, add a new key id to the Secret, set keyId to it and restart: values
+# are re-sealed with it at startup, and the old key can then be removed.
+taskSecrets:
+  keySecretName: ""
+  # Which key seals new values. May be left empty while the Secret holds exactly one key.
+  keyId: ""
+
 # Declares `events.subscribe` on the manifest, so core grants a bus credential and the API pod reads
 # the shared JetStream consumer `booth-pipeline-triggers`. Disabled: no credential, and the Schedule
 # tab says event triggers aren't available.

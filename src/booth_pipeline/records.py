@@ -213,6 +213,21 @@ class TaskRun:
     # What the successful attempt returned, as the run keeps it (runs.kept_output): {"value": ...}, or
     # {"omitted": "tooLarge"|"unstorable", "bytes": n}. None until an attempt succeeds.
     output: dict[str, Any] | None = None
+    # ADR 0128: the names of the task secrets the latest attempt was given (never their values).
+    secrets: list[str] | None = None
+
+
+@dataclass
+class TaskSecret:
+    """A workspace's task secret as stored (ADR 0128): sealed, never the value (task_secrets.py)."""
+
+    workspace: str
+    name: str
+    ciphertext: bytes
+    nonce: bytes
+    key_id: str
+    updated_by: str
+    updated_at: datetime
 
 
 @dataclass

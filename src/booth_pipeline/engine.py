@@ -53,8 +53,9 @@ from dagster import (
 
 from .model import PipelineSpec, TaskConfig, TaskRef, code_language, topological_order
 from .model import RetryPolicy as SpecRetry
-from .runners.base import Cancellation, TaskCanceled, TaskInvocation, TaskSkipped
+from .runners.base import Cancellation, TaskCanceled, TaskFailed, TaskInvocation, TaskSkipped
 from .runners.registry import RunnerRegistry
+from .task_secrets import Redactor, SecretSource, TaskSecretError
 from .workload import AccessProvider, MintNotConfigured, MintRefused
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,11 @@ class RunRecorder(Protocol):
         """What a successful attempt returned; reported just before it is ``succeeded``."""
         ...
 
+    def task_secrets(self, key: str, attempt: int, values: dict[str, str]) -> None:
+        """ADR 0128: the secrets (name -> value) this attempt is about to be given, before it starts, so
+        the recorder can redact them from everything the run stores and record their names."""
+        ...
+
     def task_log(self, key: str, attempt: int) -> Any:
         """A ``TaskLog`` for one attempt's stdout/stderr/system lines."""
         ...
@@ -125,6 +131,7 @@ def _make_op(
     reasons: dict[str, str],
     trigger: dict[str, Any] | None = None,
     skips: dict[str, str] | None = None,
+    secrets: SecretSource | None = None,
 ) -> OpDefinition:
     retry = config.retry
     max_retries = retry.max_retries if retry else 0
@@ -136,7 +143,17 @@ def _make_op(
         upstream = {dep: inputs[input_name(dep)] for dep in ref.depends_on}
         recorder.task_started(ref.key, attempt)
         tlog = recorder.task_log(ref.key, attempt)
+        redact = Redactor()
         try:
+            # ADR 0128: opened at each attempt's start, so a replaced value reaches the next attempt.
+            env: dict[str, str] = {}
+            if config.secrets:
+                if secrets is None:
+                    raise TaskSecretError("task secrets are not set up on this install (an operator sets the chart's taskSecrets.keySecretName)")
+                values = secrets.values([s.name for s in config.secrets])
+                redact.add(values)
+                recorder.task_secrets(ref.key, attempt, values)
+                env = {s.env: values[s.name] for s in config.secrets}
             # Only a task that opted in mints anything (ADR 0056, docs/decisions/0007): a task that
             # never touches storage or the catalog must not be blocked by an identity it doesn't use.
             grant = None
@@ -158,6 +175,7 @@ def _make_op(
                 requirements=tuple(config.requirements),
                 spark=config.spark.model_dump(by_alias=True, mode="json") if config.spark is not None else None,
                 trigger=trigger,
+                env=env,
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskSkipped as e:
@@ -170,6 +188,13 @@ def _make_op(
             recorder.task_attempt_finished(ref.key, attempt, "canceled", "canceled")
             # allow_retries=False: a canceled task must not be re-run by its retry policy.
             raise Failure(description="canceled", allow_retries=False) from None
+        except TaskSecretError as e:
+            # ADR 0128: a missing or unreadable secret fails this task only, and isn't retried: an owner
+            # has to set it. The run's other tasks that don't depend on this one still run.
+            message = str(e)
+            reasons[ref.key] = message
+            recorder.task_attempt_finished(ref.key, attempt, "failed", message)
+            raise Failure(description=message, allow_retries=False) from None
         except (MintRefused, MintNotConfigured) as e:
             # An expected outcome, not a crash: core said this run may not have an identity (its
             # owner has not signed in recently enough, ADR 0058). Say so plainly, and do NOT retry —
@@ -180,7 +205,7 @@ def _make_op(
             raise Failure(description=message, allow_retries=False) from None
         except Exception as e:  # noqa: BLE001 - any failure, incl. a runner bug, is a task failure
             will_retry = attempt <= max_retries and not cancel.canceled
-            message = str(e) or e.__class__.__name__
+            message = redact.text(str(e) or e.__class__.__name__)
             reasons[ref.key] = message
             recorder.task_attempt_finished(ref.key, attempt, "retrying" if will_retry else "failed", message)
             if will_retry and retry:
@@ -194,6 +219,9 @@ def _make_op(
                 if floor > 0:
                     recorder.system(f"task {ref.key!r} waits at least {floor:g}s before its retry (its Spark application ran; SeaweedFS keeps an emptied folder about 2 minutes)")
                     _wait(floor, cancel)
+            if redact and message != (str(e) or e.__class__.__name__):
+                # Dagster logs a failed step's error in this pod's own log: never with a secret in it.
+                raise TaskFailed(message) from None
             raise  # re-raised so Dagster's retry policy sees it (fact 1 above)
         recorder.task_output(ref.key, attempt, output)
         recorder.task_attempt_finished(ref.key, attempt, "succeeded", None)
@@ -222,6 +250,7 @@ def compile_job(
     reasons: dict[str, str] | None = None,
     trigger: dict[str, Any] | None = None,
     skips: dict[str, str] | None = None,
+    secrets: SecretSource | None = None,
 ) -> JobDefinition:
     """Compile the spec into a Dagster ``JobDefinition``.
 
@@ -236,7 +265,7 @@ def compile_job(
     order = topological_order(spec)
     by_key = spec.by_key()
     r = reasons if reasons is not None else {}
-    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r, trigger, skips) for k in order]
+    ops = [_make_op(by_key[k], configs[k], run_id, registry, recorder, cancel, access, r, trigger, skips, secrets) for k in order]
     deps: dict[str, dict[str, DependencyDefinition]] = {}
     for k in order:
         t = by_key[k]
@@ -261,6 +290,7 @@ def execute(
     cancel: Cancellation,
     access: AccessProvider | None = None,
     trigger: dict[str, Any] | None = None,
+    secrets: SecretSource | None = None,
 ) -> EngineResult:
     """Run the pipeline to completion (blocking). Never raises for a task failure — that is a
     result, not an exception."""
@@ -268,7 +298,7 @@ def execute(
     skips: dict[str, str] = {}
     job = compile_job(
         spec, configs, run_id=run_id, registry=registry, recorder=recorder, cancel=cancel,
-        name=f"run_{run_id}", access=access, reasons=reasons, trigger=trigger, skips=skips,
+        name=f"run_{run_id}", access=access, reasons=reasons, trigger=trigger, skips=skips, secrets=secrets,
     )
     # A fresh in-memory instance per run: nothing is shared between runs, nothing persists in
     # Dagster (our store is the record). Dagster's own console logging is quieted to warnings —

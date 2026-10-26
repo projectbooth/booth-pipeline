@@ -57,7 +57,7 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
 - **Task code** — define `run(ctx)`; `ctx.inputs[<upstream key>]` are upstream return values, `ctx.params`, `ctx.log`,
   `ctx.attempt`, `ctx.trigger` (how the run started; below); the JSON return value (≤ 1 MiB) is the output, and the run keeps up to 64 KiB of it to show editors
   and owners on the run page (viewers don't see outputs, as with a Spark driver log). `print` goes to the task log. A plain script with no
-  `run` is executed top to bottom. **Do not put secrets in params** (stored in the spec in clear). A task that turns on
+  `run` is executed top to bottom. **Do not put secrets in params** (stored in the spec in clear): use task secrets (below). A task that turns on
   *Platform access* also gets `ctx.storage` (`backends/list/read/read_text/write/delete`) and `ctx.catalog`
   (`datasets/dataset/register_dataset`), acting as the run — see [0007](docs/decisions/0007-workload-identity-adoption.md).
   With `boothDatabase.url` and `core.url` set, such a task also gets `DATABASE_URL` for its workspace's
@@ -68,6 +68,19 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Task secrets** (ADR 0128) — an outside key, such as an API key, that a workspace owner sets on the **Secrets**
+  page (names only ever come back; editors see the names, viewers nothing). A base Python task declares the ones it
+  needs, `secrets: [{name, env}]`, and gets each as that environment variable in its own process, read fresh at each
+  attempt. Nothing else receives them: not other tasks, not `invocation.json`, not the pip init container, not a
+  Kubernetes object. Values must be at least 8 characters, one line. What the run stores, its log lines, task and run
+  errors and kept outputs, has each value replaced by `[secret NAME]`; that can't catch a value split across two log
+  lines, a transformed value (base64, URL-encoded), or anything the task sends over the network, so whoever can edit a
+  task that declares a secret can read it. Exports carry the names only. A secret the workspace hasn't set fails that
+  task ("secret NAME is not set in this workspace"), without retries; the run's other tasks still run. Spark tasks
+  can't use secrets (their code is stored in booth-spark). **Setup:** values are sealed (AES-256-GCM) in this module's
+  database with a key the operator creates as a Kubernetes Secret and names in `taskSecrets.keySecretName`; see
+  `values.yaml`. It is mounted into the API/scheduler pod only, and the module refuses to start with it if tasks would
+  run in that pod. Lose the key and every secret must be entered again. Check that your cluster encrypts Secrets at rest.
 - **Skipping** — `ctx.skip("reason")` (base and Spark tasks) ends the task *skipped*: nothing to do this time.
   It isn't retried, its downstream tasks don't run, and the run ends **skipped** (amber; "skipped by <task>:
   <reason>"), not failed, unless another task failed. Skipped runs aren't counted in the success rate, and an event

@@ -34,6 +34,7 @@ from ..records import (
     TaskDraft,
     TaskEntity,
     TaskRun,
+    TaskSecret,
     TaskVersionRecord,
 )
 from ..schedule import next_fire_trigger
@@ -704,18 +705,56 @@ class PostgresStore:
     def list_task_runs(self, run_id):
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM task_runs WHERE run_id=%s ORDER BY task_key", (run_id,)).fetchall()
-        return [TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"], r["external"], r["output"]) for r in rows]
+        return [
+            TaskRun(r["run_id"], r["task_key"], r["status"], r["attempts"], r["started_at"], r["finished_at"], r["error"], r["external"], r["output"], r["secrets"])
+            for r in rows
+        ]
 
     def update_task_run(self, t):
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s, external=%s, output=%s WHERE run_id=%s AND task_key=%s",
+                "UPDATE task_runs SET status=%s, attempts=%s, started_at=%s, finished_at=%s, error=%s, external=%s, output=%s, secrets=%s"
+                " WHERE run_id=%s AND task_key=%s",
                 (
                     t.status, t.attempts, t.started_at, t.finished_at, t.error,
                     Jsonb(t.external) if t.external is not None else None, Jsonb(t.output) if t.output is not None else None,
+                    Jsonb(t.secrets) if t.secrets is not None else None,
                     t.run_id, t.task_key,
                 ),  # fmt: skip
             )
+
+    # ---- task secrets (ADR 0128) ----
+    @staticmethod
+    def _secret(r: dict[str, Any]) -> TaskSecret:
+        return TaskSecret(r["workspace"], r["name"], bytes(r["ciphertext"]), bytes(r["nonce"]), r["key_id"], r["updated_by"], r["updated_at"])
+
+    def list_task_secrets(self, workspace):
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT * FROM task_secrets WHERE workspace=%s ORDER BY name", (workspace,)).fetchall()
+        return [self._secret(r) for r in rows]
+
+    def get_task_secret(self, workspace, name):
+        with self._pool.connection() as conn:
+            r = conn.execute("SELECT * FROM task_secrets WHERE workspace=%s AND name=%s", (workspace, name)).fetchone()
+        return self._secret(r) if r else None
+
+    def put_task_secret(self, secret):
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO task_secrets (workspace, name, ciphertext, nonce, key_id, updated_by, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT (workspace, name) DO UPDATE SET ciphertext=EXCLUDED.ciphertext, nonce=EXCLUDED.nonce, key_id=EXCLUDED.key_id,"
+                " updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at",
+                (secret.workspace, secret.name, secret.ciphertext, secret.nonce, secret.key_id, secret.updated_by, secret.updated_at),
+            )
+
+    def delete_task_secret(self, workspace, name):
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM task_secrets WHERE workspace=%s AND name=%s", (workspace, name)).rowcount > 0
+
+    def task_secrets_sealed_with_other_keys(self, key_id):
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT * FROM task_secrets WHERE key_id <> %s ORDER BY workspace, name", (key_id,)).fetchall()
+        return [self._secret(r) for r in rows]
 
     # ---- logs ----
     def append_logs(self, lines):

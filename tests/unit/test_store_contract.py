@@ -530,3 +530,33 @@ def test_a_run_created_finished_has_its_tasks_skipped_and_never_blocks_the_pipel
     assert (got.status, got.error, got.finished_at) == (RUN_SKIPPED, "previous run still active", T0)
     assert {t.task_key: t.status for t in store.list_task_runs(dropped.id)} == {"a": "skipped", "b": "skipped"}
     assert store.count_active_runs(WS, p.id) == 1
+
+
+# ---- task secrets (ADR 0128) ------------------------------------------------------------------
+
+
+def test_task_secrets_are_kept_sealed_per_workspace_and_listed_by_name(store):
+    from booth_pipeline.records import TaskSecret
+
+    a = TaskSecret(WS, "polygon", b"\x00ct-1", b"n" * 12, "k1", "olga", T0)
+    b = TaskSecret(WS, "FMP", b"ct-2\xff", b"m" * 12, "k2", "olga", T0)
+    store.put_task_secret(a)
+    store.put_task_secret(b)
+    store.put_task_secret(TaskSecret(OTHER, "FMP", b"x", b"y" * 12, "k1", "otto", T0))
+    assert [s.name for s in store.list_task_secrets(WS)] == ["FMP", "polygon"]
+    got = store.get_task_secret(WS, "polygon")
+    assert (got.ciphertext, got.nonce, got.key_id, got.updated_by, got.updated_at) == (b"\x00ct-1", b"n" * 12, "k1", "olga", T0)
+    store.put_task_secret(TaskSecret(WS, "polygon", b"ct-3", b"o" * 12, "k2", "eddie", T0 + timedelta(minutes=1)))  # replaced
+    assert store.get_task_secret(WS, "polygon").ciphertext == b"ct-3" and len(store.list_task_secrets(WS)) == 2
+    assert sorted((s.workspace, s.name) for s in store.task_secrets_sealed_with_other_keys("k2")) == [(OTHER, "FMP")]
+    assert store.delete_task_secret(WS, "FMP") is True and store.delete_task_secret(WS, "FMP") is False
+    assert store.get_task_secret(WS, "FMP") is None and store.get_task_secret(OTHER, "FMP") is not None
+
+
+def test_a_task_run_keeps_the_names_of_the_secrets_it_was_given(store):
+    _, r = make_run(store)
+    tr = next(t for t in store.list_task_runs(r.id) if t.task_key == "a")
+    assert tr.secrets is None
+    tr.secrets = ["FMP", "polygon"]
+    store.update_task_run(tr)
+    assert {t.task_key: t.secrets for t in store.list_task_runs(r.id)} == {"a": ["FMP", "polygon"], "b": None}

@@ -10,6 +10,7 @@ import { errorMessage, useInterval, useLoad } from "../hooks";
 import { isActive, runStart } from "../runs";
 import type { Pipeline, PipelineVersion, RunDetail as Run, TaskRef, TaskStatus } from "../types";
 import {
+  Badge,
   Banner,
   Button,
   Link,
@@ -213,12 +214,20 @@ function RunPage({ v, run, reload, initialTask }: { v: ViewCtx; run: Run; reload
                         Spark · {t.external.state} · {t.external.id.slice(0, 8)}
                       </a>
                     )}
+                    {t.secrets && t.secrets.length > 0 && (
+                      <Badge tone="slate" title="Task secrets this attempt was given (ADR 0128); their values are never shown">
+                        Secrets: {t.secrets.join(", ")}
+                      </Badge>
+                    )}
                   </div>
                 </td>
                 <td className={`${tdClass} font-mono text-xs`}>{t.attempts}</td>
                 <td className={`${tdClass} whitespace-nowrap font-mono text-xs`}>{t.startedAt ? formatStamp(t.startedAt) : "—"}</td>
                 <td className={`${tdClass} whitespace-nowrap font-mono text-xs`}>{formatDuration(t.startedAt, t.finishedAt, now)}</td>
-                <td className={`${tdClass} max-w-xs truncate text-xs text-red-700 dark:text-red-400`} title={t.error ?? undefined}>
+                <td
+                  className={`${tdClass} max-w-xs truncate text-xs ${t.status === "skipped" ? "text-amber-800 dark:text-amber-300" : "text-red-700 dark:text-red-400"}`}
+                  title={t.error ?? undefined}
+                >
                   {t.error ?? ""}
                 </td>
                 <td className={`${tdClass} text-right`}>

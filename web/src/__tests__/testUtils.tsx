@@ -47,6 +47,8 @@ export class FakeBackend {
   /** ADR 0123: GET /config's eventTriggers, and GET /pipelines/{id}/event-trigger by pipeline id. */
   eventTriggersAvailable = true;
   eventTriggerStatus = new Map<string, Record<string, unknown>>();
+  /** ADR 0128: the workspace's task secrets, name -> value (only the fake knows a value). null: not set up (503). */
+  secrets: Map<string, { value: string; updatedBy: string; updatedAt: string }> | null = new Map();
   storageObjects: Record<string, string[]> = { b1: ["tasks/a.py", "tasks/b.sql"] };
   /** GET /config's `pip` (ADR 0115): whether this install can install a task's packages. */
   pip: PipStatus = { available: true, route: "index" };
@@ -223,6 +225,21 @@ export class FakeBackend {
     }
 
     let m: RegExpMatchArray | null;
+    if (path === "/secrets" || path.startsWith("/secrets/")) {
+      if (this.secrets === null) return this.json({ error: "task secrets are not set up on this install" }, 503);
+      if (method === "GET" && path === "/secrets") {
+        const items = [...this.secrets.entries()].sort(([a], [z]) => a.localeCompare(z)).map(([name, s]) => ({ name, updatedBy: s.updatedBy, updatedAt: s.updatedAt }));
+        return this.json({ items });
+      }
+      const name = decodeURIComponent(path.slice("/secrets/".length));
+      if (method === "PUT") {
+        if ((body?.value ?? "").length < 8) return this.json({ error: "a secret must be at least 8 characters", field: "value" }, 422);
+        const s = { value: body.value as string, updatedBy: "olga", updatedAt: "2026-10-26T12:00:00+00:00" };
+        this.secrets.set(name, s);
+        return this.json({ name, updatedBy: s.updatedBy, updatedAt: s.updatedAt });
+      }
+      if (method === "DELETE") return this.secrets.delete(name) ? this.json(null, 204) : this.json({ error: "not set" }, 404);
+    }
     if (method === "GET" && path === "/runners") return this.json({ items: this.runners });
     if (method === "GET" && path === "/config")
       return this.json({ limits: {}, catalogConfigured: true, pip: this.pip, spark: { retryMinDelaySeconds: 150 }, eventTriggers: { available: this.eventTriggersAvailable } });

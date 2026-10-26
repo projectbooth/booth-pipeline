@@ -346,3 +346,26 @@ Changes from the note above, found while building it. Each PR adds its own.
   `except Exception` doesn't catch it.
 - **`execution.maxWorkers`** goes to 12, not the note's 8, for StockScanner's dozen quarter-hour pipelines. The
   database pool now grows with it (maxWorkers + 8 per replica, at least 10).
+
+**PR 2, task secrets:**
+- **The key Secret's shape.** One data key per key id, each holding 32 random bytes in base64
+  (`--from-literal=k1="$(openssl rand -base64 32)"`). The chart values are `taskSecrets.keySecretName` (empty means
+  off) and `taskSecrets.keyId`, which names the sealing key when the Secret holds more than one. It's mounted at
+  `/etc/booth/task-secrets-key`, in the API pod only.
+- **Rotation is automatic once keys are in place.** At startup, values sealed with any other mounted key are
+  re-sealed with the current one. Values whose key is gone are left and counted in a warning; they must be
+  re-entered.
+- **Editors can list the names,** so they can declare them on tasks. Viewers can't. Only owners set, replace or
+  delete.
+- **Values must be one line,** with no surrounding whitespace, and at most 8 KiB, beyond the note's 8-character
+  minimum.
+- **Python base tasks only.** A SQL task is refused as well as a Spark one, because it has no environment to read.
+  Environment variables the runner sets, or that change how the process runs, are refused at save (`PATH`,
+  `BOOTH_*`, `PYTHON*`, `AWS_*`, `DATABASE_URL` and the like).
+- **The run request carries `env` only when a task has secrets,** so a task without any still runs on a runner
+  image from before this change.
+- **One more redaction point.** A failure message carrying a value is redacted before Dagster logs it in the API
+  pod's own log.
+- **A missing secret** fails that task without retries; its downstream tasks don't run, and independent tasks do.
+- **The run view** shows, on each task, the secret names its latest attempt got (`task_runs.secrets`).
+
