@@ -12,6 +12,7 @@ from booth_pipeline.records import (
     RUN_FAILED,
     RUN_QUEUED,
     RUN_RUNNING,
+    RUN_SKIPPED,
     RUN_SUCCEEDED,
     TASK_FAILED,
     TASK_RUNNING,
@@ -502,3 +503,30 @@ def test_a_task_runs_external_record_and_hiding_a_log_stream(store):
     assert [ln.seq for ln in store.list_logs(run.id, None, 0, 100)] == [1, 2, 3, 4]
     assert [ln.seq for ln in store.list_logs(run.id, None, 0, 100, ("spark",))] == [1, 3]
     assert [ln.seq for ln in store.list_logs(run.id, "a", 1, 100, ("spark",))] == [3]
+
+
+
+def test_a_skipped_run_is_terminal_filterable_and_keeps_its_scheduled_slot(store):
+    p = store.create_pipeline(WS, "capture", "", "a")
+    r = new_run(p)
+    r.trigger, r.scheduled_for = "schedule", T0 + timedelta(minutes=15)
+    store.create_run(r, ["a"])
+    assert store.get_run(WS, r.id).scheduled_for == T0 + timedelta(minutes=15)
+    assert store.finish_run(r.id, RUN_SKIPPED, "skipped by a: market closed", T0) is True
+    assert store.finish_run(r.id, RUN_FAILED, "late", T0) is False  # terminal
+    assert store.count_active_runs(WS, p.id) == 0
+    assert [x.id for x in store.list_runs(WS, p.id, RUN_SKIPPED, 10, 0).items] == [r.id]
+
+
+def test_a_run_created_finished_has_its_tasks_skipped_and_never_blocks_the_pipeline(store):
+    """A dropped scheduled fire: recorded as a skipped run whose tasks never run."""
+    p = store.create_pipeline(WS, "capture", "", "a")
+    store.create_run(new_run(p, RUN_RUNNING), ["a"], exclusive=True)
+    dropped = new_run(p, RUN_SKIPPED)
+    dropped.started_at = dropped.finished_at = T0
+    dropped.error = "previous run still active"
+    store.create_run(dropped, ["a", "b"])  # not exclusive: it never runs
+    got = store.get_run(WS, dropped.id)
+    assert (got.status, got.error, got.finished_at) == (RUN_SKIPPED, "previous run still active", T0)
+    assert {t.task_key: t.status for t in store.list_task_runs(dropped.id)} == {"a": "skipped", "b": "skipped"}
+    assert store.count_active_runs(WS, p.id) == 1

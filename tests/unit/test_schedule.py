@@ -26,3 +26,20 @@ def test_schedule_is_evaluated_in_its_own_timezone_across_dst():
 def test_naive_datetimes_are_refused():
     with pytest.raises(ValueError):
         next_fire("* * * * *", "UTC", datetime(2026, 1, 1))
+
+
+
+def test_a_coalesced_fire_is_for_the_most_recent_missed_slot():
+    from datetime import timedelta
+
+    from booth_pipeline.model import CronTrigger, IntervalTrigger
+    from booth_pipeline.schedule import latest_slot
+
+    quarter = CronTrigger(cron="*/15 * * * *", timezone="America/Toronto")
+    first = datetime(2026, 10, 28, 13, 0, tzinfo=UTC)
+    assert latest_slot(quarter, first, first + timedelta(seconds=4)) == first  # on time: its own slot
+    assert latest_slot(quarter, first, datetime(2026, 10, 28, 14, 7, tzinfo=UTC)) == datetime(2026, 10, 28, 14, 0, tzinfo=UTC)
+    assert latest_slot(quarter, first, datetime(2026, 10, 28, 14, 15, tzinfo=UTC)) == datetime(2026, 10, 28, 14, 15, tzinfo=UTC)
+    assert latest_slot(quarter, first, first - timedelta(minutes=1)) == first  # not yet due: unchanged
+    every30 = IntervalTrigger(seconds=30)
+    assert latest_slot(every30, first, first + timedelta(seconds=95)) == first + timedelta(seconds=90)

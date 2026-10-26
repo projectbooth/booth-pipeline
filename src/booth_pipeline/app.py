@@ -118,7 +118,9 @@ def build_store(cfg: Config) -> Store:
     info = conninfo_to_dict(cfg.database_dsn)
     where = f"connecting to PostgreSQL at {info.get('host', '?')}:{info.get('port', 5432)}"
     dbwait.retry(where, lambda: psycopg.connect(cfg.database_dsn, connect_timeout=5).close())
-    store = PostgresStore(cfg.database_dsn)
+    # Each running run borrows connections briefly (task state, logs, heartbeat, cancel checks) beside the
+    # API's own requests, so the pool grows with the worker count.
+    store = PostgresStore(cfg.database_dsn, max_size=max(10, cfg.max_workers + 8))
     store.migrate()
     return store
 

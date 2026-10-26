@@ -14,7 +14,7 @@ import pytest
 
 from booth_pipeline.engine import compile_job, execute
 from booth_pipeline.model import ModelError, PipelineSpec, TaskConfig
-from booth_pipeline.runners.base import Cancellation, TaskFailed, TaskInvocation
+from booth_pipeline.runners.base import Cancellation, TaskFailed, TaskInvocation, TaskSkipped
 from booth_pipeline.runners.registry import RunnerRegistry
 from booth_pipeline.runners.subprocess_runner import SubprocessRunner
 
@@ -46,6 +46,8 @@ class Scripted:
         step = steps[inv.attempt - 1] if inv.attempt - 1 < len(steps) else "ok"
         if step == "fail":
             raise TaskFailed(f"{inv.task_key} failed on attempt {inv.attempt}")
+        if step == "skip":
+            raise TaskSkipped(f"{inv.task_key} has nothing to do")
         return f"out:{inv.task_key}"
 
 
@@ -270,3 +272,66 @@ def test_op_compute_functions_are_generators_or_dagster_ignores_retry_policies()
     for op in job.graph.nodes:
         assert inspect.isgeneratorfunction(op.definition.compute_fn), op.name
         assert op.definition.retry_policy is not None
+
+
+# ---- ctx.skip -------------------------------------------------------------------------------
+
+
+def test_ctx_skip_ends_the_task_skipped_its_downstream_never_runs_and_the_run_is_skipped():
+    skip = "def run(ctx):\n    print('market closed')\n    ctx.skip('market closed')\n    print('never')\n"
+    s, c = build(node("a"), node("b", ["a"], source=skip), node("c", ["b"]))
+    res, rec = run(s, c)
+    assert (res.success, res.canceled, res.skipped) == (False, False, True)
+    assert res.error == "skipped by b: market closed"
+    assert rec.statuses("b") == ["started", "skipped"]
+    assert ("skipped", "b", 1, "market closed") in rec.events
+    assert rec.statuses("c") == []  # never started; the recorder settles it as skipped
+    assert rec.log_text("b") == ["market closed"]
+
+
+def test_a_task_cannot_swallow_its_own_skip_with_except_exception():
+    skip = "def run(ctx):\n    try:\n        ctx.skip('nothing new')\n    except Exception:\n        return 'swallowed'\n"
+    res, rec = run(*build(node("a", source=skip)))
+    assert res.skipped and rec.statuses("a") == ["started", "skipped"]
+
+
+def test_a_skip_is_never_retried():
+    runner = Scripted({"a": ["skip"]})
+    s, c = build(node("a", retry={"maxRetries": 3, "delaySeconds": 0}))
+    res, _ = run(s, c, RunnerRegistry([runner]))
+    assert res.skipped and runner.calls == [("a", 1)]
+
+
+def test_an_independent_branch_still_runs_beside_a_skip():
+    runner = Scripted({"b": ["skip"]})
+    s, c = build(node("a"), node("b", ["a"]), node("c", ["a"]), node("d", ["b"]))
+    res, _ = run(s, c, RunnerRegistry([runner]))
+    assert res.skipped
+    assert [k for k, _ in runner.calls] == ["a", "b", "c"]  # d is downstream of the skip; c is not
+
+
+def test_a_failure_beside_a_skip_fails_the_run():
+    runner = Scripted({"b": ["skip"], "c": ["fail"]})
+    s, c = build(node("a"), node("b", ["a"]), node("c", ["a"]))
+    res, _ = run(s, c, RunnerRegistry([runner]))
+    assert not res.success and not res.skipped and "c" in (res.error or "")
+
+
+def test_returning_none_is_still_a_success_not_a_skip():
+    res, _ = run(*build(node("a", source="def run(ctx):\n    return None\n")))
+    assert res.success and not res.skipped
+
+
+def test_ctx_trigger_scheduled_for_reaches_the_task():
+    src = "def run(ctx):\n    print(ctx.trigger.type, ctx.trigger.scheduled_for, ctx.trigger.scheduledFor)\n"
+    s, c = build(node("a", source=src))
+    rec = ListRecorder()
+    trigger = {"type": "schedule", "events": [], "count": 0, "missedEvents": False, "scheduledFor": "2026-10-28T13:15:00+00:00"}
+    res = execute(s, c, run_id="r1", registry=REAL, recorder=rec, cancel=Cancellation(), trigger=trigger)
+    assert res.success
+    assert rec.log_text("a") == ["schedule 2026-10-28T13:15:00+00:00 2026-10-28T13:15:00+00:00"]
+
+
+def test_a_manual_runs_scheduled_for_is_none():
+    res, rec = run(*build(node("a", source="def run(ctx):\n    print(ctx.trigger.scheduled_for)\n")))
+    assert res.success and rec.log_text("a") == ["None"]

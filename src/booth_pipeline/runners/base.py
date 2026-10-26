@@ -26,6 +26,15 @@ class TaskCanceled(Exception):
     """The run was canceled while this task was executing. Never retried."""
 
 
+class TaskSkipped(Exception):
+    """The task called ``ctx.skip(reason)``: nothing to do this time. Not a failure, never retried;
+    its downstream tasks don't run and the run ends ``skipped``."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class TaskAccess:
     """What a task that opted in to platform access is handed (ADR 0056/0057).
@@ -72,6 +81,7 @@ class TaskInvocation:
     # ADR 0123: how the run started, ``ctx.trigger`` ({type, events, count, missedEvents}); None is a
     # caller from before it existed, seen by the task as a manual run with no events.
     trigger: dict[str, Any] | None = None
+    # (ctx.trigger.scheduledFor is part of `trigger`: a scheduled run's slot, ISO 8601 UTC.)
 
 
 class TaskLog(Protocol):
@@ -100,7 +110,7 @@ class Runner(Protocol):
     def run(self, inv: TaskInvocation, log: TaskLog, cancel: Cancellation) -> Any:
         """Execute and return the task's JSON-serialisable output (``None`` if it returns nothing).
 
-        Raises ``TaskFailed`` or ``TaskCanceled``; any other exception is a runner bug and is
+        Raises ``TaskFailed``, ``TaskCanceled`` or ``TaskSkipped``; any other exception is a runner bug and is
         treated as a failure too.
         """
         ...

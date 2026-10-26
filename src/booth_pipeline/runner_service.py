@@ -13,7 +13,8 @@ or /proc).
 Protocol (internal; authenticated with a per-task bearer secret, ADR 0096):
 
 * ``POST /v1/run`` — body is one task invocation; the response is NDJSON, streamed while the task
-  runs: ``{"t":"log",...}`` lines, then exactly one ``{"t":"result",...}`` or ``{"t":"error",...}``.
+  runs: ``{"t":"log",...}`` lines, then exactly one ``{"t":"result",...}`` or ``{"t":"error",...}``. A task that called
+  ``ctx.skip`` ends with ``{"t":"result","output":null,"skipped":"<reason>"}``.
   ``{"t":"ping"}`` is keep-alive. **Closing the connection cancels the task** (the process tree is killed).
 * ``PUT /v1/run/{run_id}/{task_key}/token`` — replace that running task's platform token.
 """
@@ -39,7 +40,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from .runners.base import Cancellation, TaskAccess, TaskCanceled, TaskFailed, TaskInvocation, TaskLog
+from .runners.base import (
+    Cancellation,
+    TaskAccess,
+    TaskCanceled,
+    TaskFailed,
+    TaskInvocation,
+    TaskLog,
+    TaskSkipped,
+)
 from .runners.subprocess_runner import SubprocessRunner
 
 log = logging.getLogger(__name__)
@@ -168,6 +177,8 @@ def create_runner_app(
             try:
                 output = runner.run(inv, _QueueLog(events), cancel)
                 events.put({"t": "result", "output": output})
+            except TaskSkipped as e:
+                events.put({"t": "result", "output": None, "skipped": e.reason})
             except TaskCanceled:
                 events.put({"t": "error", "kind": "canceled", "message": "canceled"})
             except TaskFailed as e:

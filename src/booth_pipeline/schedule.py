@@ -54,3 +54,20 @@ def next_fire_trigger(trigger: CronTrigger | IntervalTrigger, after: datetime) -
     if after.tzinfo is None:
         raise ValueError("after must be timezone-aware")
     return after + timedelta(seconds=trigger.seconds)
+
+
+def latest_slot(trigger: CronTrigger | IntervalTrigger, first_due: datetime, now: datetime) -> datetime:
+    """The most recent slot due by ``now``, when ``first_due`` (a claimed ``next_run_at``) is the oldest
+    slot not yet run. Missed slots coalesce into one run (ADR 0065), and that run is for this slot: the
+    latest one, not the oldest. Normally there is one due slot and this is ``first_due`` itself."""
+    from .model import CronTrigger
+
+    if first_due >= now:
+        return first_due
+    if isinstance(trigger, CronTrigger):
+        tz = ZoneInfo(trigger.timezone)
+        # get_prev is strictly before its start; cron has one-minute granularity, so +1 s includes `now`.
+        prev = croniter(trigger.cron, (now + timedelta(seconds=1)).astimezone(tz)).get_prev(datetime).astimezone(UTC)
+        return max(first_due, prev)
+    missed = int((now - first_due).total_seconds() // trigger.seconds)
+    return first_due + timedelta(seconds=missed * trigger.seconds)

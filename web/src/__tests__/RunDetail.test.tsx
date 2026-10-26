@@ -104,4 +104,33 @@ describe("Run detail", () => {
     await screen.findByRole("log", { name: "Logs for task train" });
     expect(screen.queryByRole("region", { name: /Output of/ })).not.toBeInTheDocument();
   });
+
+  it("shows a skipped run in amber as a warning, not an error, with the slot it was scheduled for", async () => {
+    const p = b.addPipeline("capture", [b.ref("check"), { ...b.ref("save", ["check"]), position: { x: 300, y: 0 } }]);
+    const r = b.addRun(p.id, "skipped", "2026-10-28T13:15:04+00:00", {
+      trigger: "schedule",
+      triggeredBy: "schedule",
+      error: "skipped by check: market closed",
+      scheduledFor: "2026-10-28T13:15:00+00:00",
+      tasks: [
+        { taskKey: "check", status: "skipped", attempts: 1, startedAt: "2026-10-28T13:15:05+00:00", finishedAt: "2026-10-28T13:15:06+00:00", error: "market closed" },
+        { taskKey: "save", status: "skipped", attempts: 0, startedAt: null, finishedAt: null, error: null },
+      ],
+    });
+    renderApp(b, { path: `/pipeline/runs/${r.id}` });
+    await screen.findByRole("heading", { name: `Run ${r.id.slice(0, 8)}` });
+    expect(screen.getAllByText("Skipped").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument(); // not shown as an error
+    expect(screen.getByText("Skipped: skipped by check: market closed")).toBeInTheDocument();
+    const summary = screen.getByLabelText("Run summary");
+    expect(within(summary).getByText("Scheduled for")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("task-node-save")).toHaveAttribute("data-status", "skipped"));
+  });
+
+  it("shows no Scheduled for on a manual run", async () => {
+    const { r } = seededRun();
+    renderApp(b, { path: `/pipeline/runs/${r.id}` });
+    await screen.findByRole("heading", { name: `Run ${r.id.slice(0, 8)}` });
+    expect(within(screen.getByLabelText("Run summary")).queryByText("Scheduled for")).not.toBeInTheDocument();
+  });
 });

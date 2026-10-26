@@ -91,7 +91,7 @@ def wait_runs(token: str, pid: str, n: int, timeout: float, settle: float = 0) -
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         rs = runs(token, pid)
-        if len(rs) >= n and all(r["status"] in ("succeeded", "failed", "canceled") for r in rs):
+        if len(rs) >= n and all(r["status"] in ("succeeded", "failed", "canceled", "skipped") for r in rs):
             break
         time.sleep(1)
     if settle:

@@ -14,8 +14,12 @@ from .model import EventTrigger, PipelineSpec, TaskConfig, Trigger
 
 # Run and task-run lifecycle. Terminal states never change again.
 RUN_QUEUED, RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED = "queued", "running", "succeeded", "failed", "canceled"
+# Not a failure: a task called ctx.skip (nothing to do this time), or a scheduled fire found the previous
+# run still active and was dropped (recorded so a missed slot is visible).
+RUN_SKIPPED = "skipped"
 RUN_ACTIVE = (RUN_QUEUED, RUN_RUNNING)
-RUN_TERMINAL = (RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED)
+RUN_TERMINAL = (RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELED, RUN_SKIPPED)
+RUN_STATUSES = RUN_ACTIVE + RUN_TERMINAL
 
 TASK_PENDING, TASK_RUNNING, TASK_RETRYING, TASK_SUCCEEDED, TASK_FAILED, TASK_SKIPPED, TASK_CANCELED = (
     "pending",
@@ -190,6 +194,9 @@ class Run:
     owner_name: str = ""
     # ADR 0123: for an event-fired run, what fired it: {events: [...first 100], count, missedEvents}.
     trigger_events: dict[str, Any] | None = None
+    # A scheduled run's slot: the claimed next_run_at, however late the run started. Missed slots are
+    # coalesced (ADR 0065), so after downtime this is the most recent missed slot; the others never run.
+    scheduled_for: datetime | None = None
 
 
 @dataclass

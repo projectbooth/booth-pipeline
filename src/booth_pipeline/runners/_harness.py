@@ -11,6 +11,8 @@ Contract for task code (documented in the README):
 * write a plain script with no ``run`` — it is executed top to bottom and its output is ``None``.
 
 ``print`` goes to the task's stdout log, ``ctx.log`` (a standard ``logging.Logger``) to stderr.
+``ctx.skip(reason)`` ends the task as *skipped* (nothing to do this time): its downstream tasks don't
+run and the run ends skipped, not failed.
 """
 
 import json
@@ -33,6 +35,14 @@ class PlatformError(Exception):
     def __init__(self, message, status=0):
         super().__init__(message)
         self.status = status
+
+
+class TaskSkipped(BaseException):
+    """Raised by ``ctx.skip``. A BaseException, so a task's own ``except Exception`` doesn't swallow it."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _NoAccess:
@@ -194,6 +204,9 @@ class Trigger:
         self.events = list(t.get("events") or [])
         self.count = int(t.get("count") or 0)
         self.missed_events = bool(t.get("missedEvents"))
+        # A scheduled run's slot (ISO 8601 UTC), even when it started late; None for other runs.
+        self.scheduled_for = t.get("scheduledFor")
+        self.scheduledFor = self.scheduled_for
 
 
 class Context:
@@ -215,6 +228,10 @@ class Context:
         self.s3 = S3()
         logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(message)s")
         self.log = logging.getLogger("task." + self.task_key)
+
+    def skip(self, reason=""):
+        """End this task as skipped: nothing to do this time. Not a failure, and never retried."""
+        raise TaskSkipped(str(reason or "skipped by the task"))
 
 
 def _add_site(path: str) -> None:
@@ -241,9 +258,13 @@ def main() -> int:
     try:
         namespace = runpy.run_path(os.path.join(workdir, "task.py"), run_name="__booth_task__")
         run = namespace.get("run")
-        output = run(ctx) if callable(run) else None
         try:
-            encoded = json.dumps({"output": output})
+            output = run(ctx) if callable(run) else None
+            result = {"output": output}
+        except TaskSkipped as e:
+            result = {"output": None, "skipped": e.reason[:1000]}
+        try:
+            encoded = json.dumps(result)
         except (TypeError, ValueError) as e:
             print("task output is not JSON-serialisable: " + str(e), file=sys.stderr)
             return 3

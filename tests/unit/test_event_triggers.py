@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from booth_pipeline import triggers
 from booth_pipeline.event_bus import TriggerIngest
 from booth_pipeline.model import EventTrigger
-from booth_pipeline.records import RUN_SUCCEEDED, Pipeline, Run
+from booth_pipeline.records import RUN_SKIPPED, RUN_SUCCEEDED, Pipeline, Run
 from booth_pipeline.store.base import Busy
 from booth_pipeline.triggers import BadEvent, TriggerEvent, matches, own_run_id, parse_event
 
@@ -383,3 +383,13 @@ def test_the_bus_client_can_sign_in_with_a_credential_file(tmp_path):
         asyncio.run(go())
     assert not isinstance(e.value, ModuleNotFoundError), e.value
 
+
+
+
+def test_a_skipped_run_releases_a_queue_one_follow_up_as_a_succeeded_one_does(store):
+    p, bus = pipeline(store), Bus(store)
+    running = active_run(store, p)
+    assert bus.send(file_event(), at(1)) == {p.id: "queued"}
+    store.finish_run(running.id, RUN_SKIPPED, "skipped by a: nothing new", at(5))
+    (follow_up,) = bus.fire(at(5))
+    assert follow_up.trigger_events["count"] == 1

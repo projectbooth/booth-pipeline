@@ -75,7 +75,7 @@ class Scheduler:
         now = now or datetime.now(UTC)
         started: list[str] = []
         for pipeline in self._store.claim_due_pipelines(now, CLAIM_BATCH):
-            run = self._service.start_scheduled(pipeline)
+            run = self._service.start_scheduled(pipeline, now)
             if run:
                 started.append(run.id)
         for pipeline, fired in self._store.claim_due_event_triggers(now, CLAIM_BATCH):

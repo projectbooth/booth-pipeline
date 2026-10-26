@@ -68,6 +68,18 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Skipping** — `ctx.skip("reason")` (base and Spark tasks) ends the task *skipped*: nothing to do this time.
+  It isn't retried, its downstream tasks don't run, and the run ends **skipped** (amber; "skipped by <task>:
+  <reason>"), not failed, unless another task failed. Skipped runs aren't counted in the success rate, and an event
+  trigger's `queue_one` follow-up is released by a skipped run as by a succeeded one. A task's own `except Exception`
+  doesn't catch the skip.
+- **Scheduled time** — a scheduled run records the slot it was for, `scheduledFor` on the run (shown on the run
+  page) and `ctx.trigger.scheduled_for` (also `ctx.trigger.scheduledFor`; ISO 8601 UTC; `None` for other runs). A
+  run that starts late still knows which slot it is for. **Missed slots are not replayed:** after downtime (or a
+  scheduler that fell behind), all the missed slots of a pipeline coalesce into **one** run, whose `scheduledFor` is
+  the **most recent** missed slot; the earlier ones never run and aren't recorded. **A slot that finds the previous
+  run still active** (and concurrent runs aren't allowed) doesn't run either, but is recorded as a **skipped** run
+  ("previous run still active") with that slot, so a dropped minute is visible in the run list.
 - **Who a run acts as** (ADR 0058, ADR 0119 amendment 3, ADR 0120). A scheduled run acts as the pipeline's
   *owner*: whoever first saved a schedule onto it, until an editor **takes it over** or a workspace owner gives it to
   a **service account** (`svc:<workspace>:<name>`). A Run-now run acts as whoever pressed the button. Its tasks
