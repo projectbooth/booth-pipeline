@@ -103,6 +103,12 @@ spec:
             - name: BOOTH_PIPELINE_EVENTS_MAX_ACK_PENDING
               value: {{ .Values.eventTriggers.maxAckPending | quote }}
             {{- end }}
+            {{- if .Values.taskSecrets.keySecretName }}
+            - name: BOOTH_PIPELINE_SECRETS_KEY_DIR
+              value: /etc/booth/task-secrets-key
+            - name: BOOTH_PIPELINE_SECRETS_KEY_ID
+              value: {{ .Values.taskSecrets.keyId | quote }}
+            {{- end }}
             - name: BOOTH_PIPELINE_MAX_WORKERS
               value: {{ .Values.execution.maxWorkers | quote }}
             - name: BOOTH_PIPELINE_SCHEDULER_INTERVAL_SECONDS
@@ -148,6 +154,13 @@ spec:
               mountPath: /etc/booth/event-bus
               readOnly: true
             {{- end }}
+            {{- if .Values.taskSecrets.keySecretName }}
+            # ADR 0128: the key that opens every workspace's task secrets. This pod only, never a task
+            # pod (config.py refuses to start with it if tasks would run here).
+            - name: task-secrets-key
+              mountPath: /etc/booth/task-secrets-key
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
@@ -170,4 +183,11 @@ spec:
             # and the Schedule tab says the bus is unavailable meanwhile.
             secretName: booth-event-bus-credentials
             optional: true
+        {{- end }}
+        {{- if .Values.taskSecrets.keySecretName }}
+        - name: task-secrets-key
+          secret:
+            # Operator-created. Not `optional`: named but missing, the pod waits rather than starting with
+            # task secrets that can't be opened.
+            secretName: {{ .Values.taskSecrets.keySecretName | quote }}
         {{- end }}

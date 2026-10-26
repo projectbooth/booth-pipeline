@@ -26,6 +26,7 @@ from ..records import (
     TaskDraft,
     TaskEntity,
     TaskRun,
+    TaskSecret,
     TaskVersionRecord,
 )
 from ..triggers import TriggerEvent
@@ -227,6 +228,21 @@ class Store(Protocol):
 
     def list_task_runs(self, run_id: str) -> list[TaskRun]: ...
     def update_task_run(self, task_run: TaskRun) -> None: ...
+
+    # ---- task secrets (ADR 0128) ----
+    def list_task_secrets(self, workspace: str) -> list[TaskSecret]:
+        """By name."""
+        ...
+
+    def get_task_secret(self, workspace: str, name: str) -> TaskSecret | None: ...
+    def put_task_secret(self, secret: TaskSecret) -> None:
+        """Creates or replaces."""
+        ...
+
+    def delete_task_secret(self, workspace: str, name: str) -> bool: ...
+    def task_secrets_sealed_with_other_keys(self, key_id: str) -> list[TaskSecret]:
+        """Every workspace's secrets not sealed with ``key_id``: what a key rotation re-seals."""
+        ...
 
     # ---- logs ----
     def append_logs(self, lines: list[LogLine]) -> None: ...

@@ -28,6 +28,7 @@ from .records import (
     TaskDraft,
     TaskEntity,
     TaskRun,
+    TaskSecret,
     TaskVersionRecord,
 )
 from .runners.kubejob import NO_PIP_ROUTE, PIP_ROUTES
@@ -39,6 +40,7 @@ from .schemas import (
     PipelineUpdate,
     TaskCreate,
     TaskDraftSave,
+    TaskSecretValue,
     TaskUpdate,
     TaskVersionCreate,
     ValidateRequest,
@@ -194,6 +196,8 @@ def task_run_json(t: TaskRun, ident: Identity | None = None) -> dict[str, Any]:
         "error": t.error,
         # ADR 0119: a Spark task's application ({kind, id, state, reason}); null otherwise.
         "external": t.external,
+        # ADR 0128: the names of the secrets the latest attempt was given; never values.
+        "secrets": t.secrets or [],
     }
     # What the task returned (runs.kept_output), for editors and owners only: like a Spark driver log, an
     # output can carry whatever the code put in it. Absent for viewers; null until an attempt succeeds.
@@ -350,6 +354,30 @@ def set_owner(request: Request, pipeline_id: str, body: PipelineOwnerUpdate, ide
     """Take over (``"me"``), or, as a workspace owner, give the pipeline to a service account
     (``svc:<workspace>:<name>``). Never to another person (owners.py)."""
     return pipeline_json(svc(request).set_owner(ident, pipeline_id, body.owner), ident)
+
+
+# ---- task secrets (ADR 0128) ------------------------------------------------------------------
+
+
+def task_secret_json(s: TaskSecret) -> dict[str, Any]:
+    # Never the value, nor anything sealed: names and when they changed.
+    return {"name": s.name, "updatedBy": s.updated_by, "updatedAt": _iso(s.updated_at)}
+
+
+@router.get("/secrets")
+def list_task_secrets(request: Request, ident: Identity = Depends(require_write)):
+    return {"items": [task_secret_json(s) for s in svc(request).list_task_secrets(ident)]}
+
+
+@router.put("/secrets/{name}")
+def set_task_secret(request: Request, name: str, body: TaskSecretValue, ident: Identity = Depends(require_write)):
+    return task_secret_json(svc(request).set_task_secret(ident, name, body.value))
+
+
+@router.delete("/secrets/{name}", status_code=204)
+def delete_task_secret(request: Request, name: str, ident: Identity = Depends(require_write)):
+    svc(request).delete_task_secret(ident, name)
+    return Response(status_code=204)
 
 
 @router.get("/service-accounts/uses")

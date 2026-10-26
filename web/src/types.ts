@@ -58,6 +58,21 @@ export interface TaskConfig {
   requirements?: string[];
   /** ADR 0119: what a Spark task (runner "spark") asks booth-spark for. Absent before 0.2.0. */
   spark?: SparkOptions | null;
+  /** ADR 0128: workspace task secrets this task gets as environment variables. Base Python tasks only. */
+  secrets?: TaskSecretRef[];
+}
+
+/** ADR 0128: a task's use of a workspace secret, by name, as the environment variable `env`. */
+export interface TaskSecretRef {
+  name: string;
+  env: string;
+}
+
+/** ADR 0128: a workspace task secret as the API lists it. Never its value. */
+export interface TaskSecret {
+  name: string;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface SparkStorageLocation {
@@ -347,6 +362,8 @@ export interface TaskRun {
   /** What the successful attempt returned. Editors and owners only (absent for viewers); null until an
    *  attempt succeeds, and for runs from before outputs were kept. */
   output?: TaskOutput | null;
+  /** ADR 0128: the names of the secrets the latest attempt was given. */
+  secrets?: string[];
 }
 
 /** A task's output as the run keeps it: the value, or why it wasn't kept (it still reached its downstream tasks). */

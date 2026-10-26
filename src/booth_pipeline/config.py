@@ -103,6 +103,12 @@ class Config:
     events_ack_wait_seconds: int = 30
     events_max_ack_pending: int = 1000
 
+    # Task secrets (ADR 0128): the operator-created Kubernetes Secret holding the sealing key(s), one file
+    # per key id (task_secrets.py). Mounted into this pod only. Absent: task secrets are off. With several
+    # keys, secrets_key_id names the one that seals new values.
+    secrets_key_dir: str = "/etc/booth/task-secrets-key"
+    secrets_key_id: str = ""
+
     @classmethod
     def from_env(cls) -> Config:
         dev_memory = _bool("BOOTH_PIPELINE_DEV_MEMORY")
@@ -140,6 +146,8 @@ class Config:
             event_bus_url_override=os.environ.get("BOOTH_PIPELINE_EVENTS_URL", ""),
             events_ack_wait_seconds=_int("BOOTH_PIPELINE_EVENTS_ACK_WAIT_SECONDS", 30, 1),
             events_max_ack_pending=_int("BOOTH_PIPELINE_EVENTS_MAX_ACK_PENDING", 1000, 1),
+            secrets_key_dir=os.environ.get("BOOTH_PIPELINE_SECRETS_KEY_DIR", "/etc/booth/task-secrets-key"),
+            secrets_key_id=os.environ.get("BOOTH_PIPELINE_SECRETS_KEY_ID", ""),
             runner_env_passthrough=tuple(
                 x.strip() for x in os.environ.get("BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH", "").split(",") if x.strip()
             ),
@@ -171,6 +179,12 @@ class Config:
         f = Path(self.event_bus_dir, "nats.creds")
         return str(f) if f.is_file() else ""
 
+    def has_secrets_key(self) -> bool:
+        from pathlib import Path
+
+        d = Path(self.secrets_key_dir)
+        return d.is_dir() and any(f.is_file() and not f.name.startswith(".") for f in d.iterdir())
+
     def has_minting_credential(self) -> bool:
         from pathlib import Path
 
@@ -192,6 +206,19 @@ class Config:
                 f"an event-bus credential is mounted at {self.event_bus_dir} but BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset, "
                 "so tasks would run in the same pod and could read it. Run tasks as Jobs, or do not give it the credential"
             )
+        if self.has_secrets_key():
+            if not self.task_job_template:
+                # ADR 0128: the key opens every workspace's task secrets; the same rule as the credentials above.
+                raise ConfigError(
+                    f"a task secrets key is mounted at {self.secrets_key_dir} but BOOTH_PIPELINE_TASK_JOB_TEMPLATE is unset, "
+                    "so tasks would run in the same pod and could read it (ADR 0128). Run tasks as Jobs, or do not mount the key"
+                )
+            from .task_secrets import SecretBox, SecretsError
+
+            try:
+                SecretBox.from_dir(self.secrets_key_dir, self.secrets_key_id)
+            except SecretsError as e:
+                raise ConfigError(f"task secrets key: {e}") from None
         if not self.dev_memory and not self.database_dsn:
             raise ConfigError(
                 "BOOTH_PIPELINE_DATABASE_DSN is required (core provisions it as the "

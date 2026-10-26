@@ -40,5 +40,7 @@ def store(request):
         return
     s = request.getfixturevalue("pg_store")
     with s._pool.connection() as conn:
-        conn.execute("TRUNCATE run_logs, task_runs, runs, event_trigger_state, trigger_events_seen, trigger_bus, pipeline_versions, pipelines, task_versions, tasks")
+        conn.execute(
+            "TRUNCATE run_logs, task_runs, runs, event_trigger_state, trigger_events_seen, trigger_bus, pipeline_versions, pipelines, task_versions, tasks, task_secrets"
+        )
     yield s

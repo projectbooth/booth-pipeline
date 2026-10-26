@@ -82,6 +82,9 @@ class TaskInvocation:
     # caller from before it existed, seen by the task as a manual run with no events.
     trigger: dict[str, Any] | None = None
     # (ctx.trigger.scheduledFor is part of `trigger`: a scheduled run's slot, ISO 8601 UTC.)
+    # ADR 0128: the task's declared secrets, environment variable -> value, for the task's own process
+    # only: never written to invocation.json, never given to the pip init container, never in a repr.
+    env: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 class TaskLog(Protocol):

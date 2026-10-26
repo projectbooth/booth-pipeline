@@ -21,6 +21,7 @@ dependencies = [
   "pyyaml>=6",         # a pipeline version's YAML export (ADR 0071 phase 4)
   "packaging>=24",     # parsing a task's Python requirements at save (ADR 0115)
   "nats-py[nkeys]>=2.9",  # event triggers' JetStream consumer (ADR 0123); nkeys signs in with core's .creds
+  "cryptography>=42",  # task secrets: AES-256-GCM (ADR 0128); was already here through pyjwt[crypto]
 ]
 
 [project.optional-dependencies]

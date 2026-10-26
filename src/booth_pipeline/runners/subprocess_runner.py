@@ -90,6 +90,9 @@ class SubprocessRunner:
 
     def _env(self, inv: TaskInvocation, workdir: str) -> dict[str, str]:
         env = {k: os.environ[k] for k in (*_BASE_ENV_KEYS, *self._passthrough) if k in os.environ}
+        # ADR 0128: the task's secrets, before everything the runner sets, so none of those can be
+        # displaced (the names are also refused at save, model.RESERVED_ENV).
+        env.update(inv.env)
         env.update(self._task_env)
         if inv.requirements and self._site_dir:
             # The harness runs under `python -I`, which ignores PYTHONPATH, so it adds BOOTH_SITE_DIR

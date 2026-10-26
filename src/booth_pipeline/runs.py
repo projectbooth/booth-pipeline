@@ -42,6 +42,7 @@ from .resolve import resolve_task_configs
 from .runners.base import Cancellation
 from .runners.registry import RunnerRegistry
 from .store.base import Store
+from .task_secrets import Redactor, SecretBox, SecretSource
 from .workload import AccessProvider, MintRefused, MintUnavailable, WorkloadMinter
 
 log = logging.getLogger(__name__)
@@ -89,9 +90,14 @@ class StoreRecorder:
         self._interval = flush_interval
         self._flusher = threading.Thread(target=self._flush_loop, name=f"logflush-{run_id[:8]}", daemon=True)
         self._flusher.start()
+        # ADR 0128: every secret value this run's tasks were given, taken out of everything it stores
+        # (log lines, task and run errors, kept outputs) as [secret NAME].
+        self.redactor = Redactor()
 
     # ---- logging ----
     def _emit(self, task_key: str | None, attempt: int, stream: str, message: str) -> None:
+        if self.redactor:  # the one path every log line takes, the Spark driver-log copy included
+            message = self.redactor.text(message)
         with self._lock:
             if stream != "system" and self._seq >= self._max:
                 self._dropped += 1
@@ -156,18 +162,26 @@ class StoreRecorder:
     def task_output(self, key: str, attempt: int, output) -> None:
         # Saved with the "succeeded" that follows.
         with self._lock:
-            self._tasks[key].output = kept_output(output)
+            self._tasks[key].output = kept_output(self.redactor.value(output))
+
+    def task_secrets(self, key: str, attempt: int, values: dict[str, str]) -> None:
+        self.redactor.add(values)
+        with self._lock:
+            t = self._tasks[key]
+            t.secrets = sorted(values)
+        self._save(t)
 
     def task_started(self, key: str, attempt: int) -> None:
         with self._lock:
             t = self._tasks[key]
-            t.status, t.attempts, t.error, t.finished_at, t.output = TASK_RUNNING, attempt, None, None, None
+            t.status, t.attempts, t.error, t.finished_at, t.output, t.secrets = TASK_RUNNING, attempt, None, None, None, None
             t.started_at = t.started_at or _now()
         self._save(t)
         self._emit(key, attempt, "system", f"task {key!r} started (attempt {attempt})")
 
     def task_attempt_finished(self, key: str, attempt: int, status: str, error: str | None) -> None:
         state = {"succeeded": TASK_SUCCEEDED, "failed": TASK_FAILED, "retrying": TASK_RETRYING, "canceled": TASK_CANCELED, "skipped": TASK_SKIPPED}[status]
+        error = self.redactor.maybe(error)
         with self._lock:
             t = self._tasks[key]
             t.status, t.error = state, error
@@ -196,8 +210,11 @@ class RunManager:
     # Between attempts to reach core when authorizing a scheduled run (5 s, then 10 s). Tests shorten it.
     authorize_wait_seconds = 5.0
 
-    def __init__(self, store: Store, registry: RunnerRegistry, cfg: Config, worker_id: str, minter: WorkloadMinter | None = None) -> None:
+    def __init__(
+        self, store: Store, registry: RunnerRegistry, cfg: Config, worker_id: str, minter: WorkloadMinter | None = None, secret_box: SecretBox | None = None
+    ) -> None:
         self._store = store
+        self._secret_box = secret_box
         self._registry = registry
         self._cfg = cfg
         self._minter = minter
@@ -297,7 +314,7 @@ class RunManager:
             else:
                 result = engine.execute(
                     version.spec, configs, run_id=run.id, registry=self._registry, recorder=recorder, cancel=cancel, access=access,
-                    trigger=run_trigger(run),
+                    trigger=run_trigger(run), secrets=SecretSource(store, self._secret_box, run.workspace),
                 )
                 status = RUN_SUCCEEDED if result.success else (RUN_CANCELED if result.canceled else RUN_SKIPPED if result.skipped else RUN_FAILED)
                 error = None if result.success else result.error
@@ -310,6 +327,7 @@ class RunManager:
             with self._lock:
                 self._cancels.pop(run.id, None)
 
+        error = recorder.redactor.maybe(error)
         recorder.settle_unfinished(status)
         recorder.system(f"run {status} after {time.monotonic() - started:.1f}s" + (f": {error}" if error else ""))
         recorder.close()  # flush every log line BEFORE the terminal status is visible

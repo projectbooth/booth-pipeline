@@ -63,6 +63,13 @@ class PipelineScheduleUpdate(Wire):
     event_trigger: EventTrigger | None = None
 
 
+class TaskSecretValue(Wire):
+    """ADR 0128: a task secret's new value. Checked in the service (task_secrets.check_value), never by a
+    pydantic constraint, so no error message can echo it."""
+
+    value: str
+
+
 class PipelineOwnerUpdate(Wire):
     """Who the pipeline's scheduled runs act as: ``"me"`` (Take over) or ``svc:<workspace>:<name>``."""
 

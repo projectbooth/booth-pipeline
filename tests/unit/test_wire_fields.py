@@ -47,6 +47,8 @@ def _value(tp: Any, name: str, n: int, where: str) -> Any:
         return f"sample-{name}"
     if tp is int:
         return n
+    if origin is dict and typing.get_args(tp) == (str, str):
+        return {name.upper().replace(".", "_").replace("-", "_"): f"sample-{name}"}
     if origin is dict:
         return {name: [n, "nested"]}
     if origin is tuple and typing.get_args(tp) == (str, ...):
