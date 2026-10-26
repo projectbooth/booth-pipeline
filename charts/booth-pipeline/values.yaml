@@ -218,6 +218,13 @@ execution:
   maxWorkers: 12
   schedulerIntervalSeconds: 15
   maxLogLinesPerRun: 50000
+  # Run retention. Unset (the default): every run, its task runs and its logs are kept forever. Set
+  # days: finished runs older than that are deleted nightly at hourUtc, with their task runs and log
+  # lines, in short batches (never an active run). A minute pipeline makes about 525,000 runs and
+  # several GB of logs a year, in core's shared PostgreSQL; 30 to 90 days is a reasonable start.
+  retention:
+    days: null
+    hourUtc: 8
   # Environment variable NAMES a task's subprocess may inherit from this pod (e.g. HTTPS_PROXY).
   # By default it inherits none: a task never sees the database DSN or any other module setting.
   runnerEnvPassthrough: []

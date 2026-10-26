@@ -454,6 +454,18 @@ class MemoryStore:
             if r and r.status in RUN_ACTIVE:
                 r.heartbeat_at = now
 
+    def prune_runs(self, before, limit):
+        with self._lock:
+            old = sorted(
+                (r for r in self._runs.values() if r.status in RUN_TERMINAL and r.finished_at is not None and r.finished_at < before),
+                key=lambda r: (r.finished_at, r.id),
+            )[:limit]
+            for r in old:
+                del self._runs[r.id]
+                self._task_runs.pop(r.id, None)
+                self._logs.pop(r.id, None)
+            return len(old)
+
     def finish_run(self, run_id, status, error, now):
         with self._lock:
             r = self._runs.get(run_id)

@@ -68,6 +68,13 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Run retention** — by default every run, task run and log line is kept. Set the chart's
+  `execution.retention.days` and finished runs older than that (by when they finished) are deleted every night at
+  `execution.retention.hourUtc` (08:00 UTC by default), with their task runs and logs; queued and running runs never
+  are. It deletes in batches of 500 runs, each its own short transaction that skips rows another replica is pruning
+  and gives up on a lock it can't get within 5 seconds, with a pause between batches and at most 30 minutes a night;
+  a larger backlog (turning it on over years of history) is finished on the following nights. It runs beside the
+  scheduler, never in its way. The Runs tab's counts and success rate then cover only what is kept.
 - **Runner images** — a task whose packages are large (pandas, yfinance) can run on an image the operator built
   with them already installed, instead of installing them on every attempt. The operator lists such images in the
   chart's `runner.images`, by name and pinned by digest, and a base task chooses one by name (**Runner image** in its
