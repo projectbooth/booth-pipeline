@@ -563,3 +563,13 @@ def test_an_unpinned_or_badly_named_runner_image_is_refused_at_render(setting, m
 
     out = helm("template", "t", str(CHART), *REQUIRED, "--set", setting)
     assert out.returncode != 0 and message in out.stderr
+
+
+# ---- run retention ------------------------------------------------------------------------------
+
+
+def test_retention_is_off_by_default_and_set_when_days_are(api):
+    assert "BOOTH_PIPELINE_RETENTION_DAYS" not in {e["name"] for e in pod(api)["containers"][0].get("env", [])}
+    on = by_kind(docs("--set", "execution.retention.days=30"), "Deployment")
+    env = {e["name"]: e.get("value") for e in pod(on)["containers"][0]["env"]}
+    assert env["BOOTH_PIPELINE_RETENTION_DAYS"] == "30" and env["BOOTH_PIPELINE_RETENTION_HOUR_UTC"] == "8"

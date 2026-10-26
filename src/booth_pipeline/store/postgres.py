@@ -667,6 +667,19 @@ class PostgresStore:
         with self._pool.connection() as conn:
             conn.execute("UPDATE runs SET heartbeat_at=%s WHERE id=%s AND status = ANY(%s)", (now, run_id, list(RUN_ACTIVE)))
 
+    def prune_runs(self, before, limit):
+        with self._pool.connection() as conn, conn.transaction():
+            # Bounded: a LIMIT, rows another pruner holds are skipped rather than waited for, and a lock
+            # that can't be had at once ends this batch instead of queueing behind a long transaction.
+            conn.execute("SET LOCAL lock_timeout = '5s'")
+            conn.execute("SET LOCAL statement_timeout = '120s'")
+            return conn.execute(
+                "WITH doomed AS (SELECT id FROM runs WHERE finished_at < %s AND status = ANY(%s)"
+                " ORDER BY finished_at LIMIT %s FOR UPDATE SKIP LOCKED)"
+                " DELETE FROM runs r USING doomed WHERE r.id = doomed.id",
+                (before, list(RUN_TERMINAL), limit),
+            ).rowcount
+
     def finish_run(self, run_id, status, error, now):
         with self._pool.connection() as conn, conn.transaction():
             r = conn.execute(

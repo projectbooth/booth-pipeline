@@ -79,6 +79,10 @@ class Config:
     heartbeat_seconds: int = 10
     stale_after_seconds: int = 60
     queued_timeout_seconds: int = 900
+    # Run retention (retention.py): finished runs older than this many days are pruned nightly, at
+    # retention_hour_utc. 0: keep everything.
+    retention_days: int = 0
+    retention_hour_utc: int = 8
     max_log_lines_per_run: int = 50_000
     runner_python: str = ""
     runner_env_passthrough: tuple[str, ...] = field(default_factory=tuple)
@@ -151,6 +155,8 @@ class Config:
             heartbeat_seconds=_int("BOOTH_PIPELINE_HEARTBEAT_SECONDS", 10, 1),
             stale_after_seconds=_int("BOOTH_PIPELINE_STALE_AFTER_SECONDS", 60, 5),
             queued_timeout_seconds=_int("BOOTH_PIPELINE_QUEUED_TIMEOUT_SECONDS", 900, 30),
+            retention_days=_int("BOOTH_PIPELINE_RETENTION_DAYS", 0, 0),
+            retention_hour_utc=_int("BOOTH_PIPELINE_RETENTION_HOUR_UTC", 8, 0),
             max_log_lines_per_run=_int("BOOTH_PIPELINE_MAX_LOG_LINES_PER_RUN", 50_000, 100),
             runner_python=os.environ.get("BOOTH_PIPELINE_RUNNER_PYTHON", ""),
             task_job_template=os.environ.get("BOOTH_PIPELINE_TASK_JOB_TEMPLATE", ""),
@@ -259,5 +265,7 @@ class Config:
             raise ConfigError("BOOTH_OIDC_ISSUER_URL is required: every module verifies tokens itself")
         if self.oidc_require_audience and not self.oidc_client_id:
             raise ConfigError("BOOTH_OIDC_CLIENT_ID is required when BOOTH_OIDC_REQUIRE_AUDIENCE is true")
+        if not 0 <= self.retention_hour_utc <= 23:
+            raise ConfigError("BOOTH_PIPELINE_RETENTION_HOUR_UTC must be an hour, 0 to 23")
         if self.stale_after_seconds <= self.heartbeat_seconds * 2:
             raise ConfigError("BOOTH_PIPELINE_STALE_AFTER_SECONDS must exceed twice the heartbeat interval, or healthy runs get failed")

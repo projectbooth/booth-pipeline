@@ -24,6 +24,7 @@ from .config import Config
 from .event_bus import EventBus, TriggerIngest
 from .model import ModelError
 from .projects import ProjectsClient
+from .retention import RunPruner
 from .runners.base import Runner
 from .runners.kubejob import KubernetesJobRunner
 from .runners.registry import RunnerRegistry
@@ -188,12 +189,16 @@ def create_app(
     # ADR 0123: a run ending can make a queued follow-up due, and an event can make a fire due sooner.
     manager.on_run_finished = scheduler.wake
     event_bus = EventBus(cfg, store, TriggerIngest(store, scheduler.wake))
+    # execution.retention.days: off (0) keeps everything.
+    pruner = RunPruner(store, cfg.retention_days, cfg.retention_hour_utc) if cfg.retention_days > 0 else None
     service.event_bus = lambda: event_bus.configured
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if start_scheduler:
             scheduler.start()
+            if pruner is not None:
+                pruner.start()
             # Event triggers are optional (ADR 0123 revision 2026-10-22): the consumer starts on its own
             # thread and can't keep the pod from starting or the scheduler from running.
             try:
@@ -202,6 +207,8 @@ def create_app(
                 log.exception("event triggers: the consumer could not start; schedules are unaffected")
         yield
         event_bus.stop()
+        if pruner is not None:
+            pruner.stop()
         scheduler.stop()
         manager.shutdown()
         catalog.close()

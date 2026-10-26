@@ -128,6 +128,14 @@ spec:
               value: {{ .Values.execution.schedulerIntervalSeconds | quote }}
             - name: BOOTH_PIPELINE_MAX_LOG_LINES_PER_RUN
               value: {{ .Values.execution.maxLogLinesPerRun | quote }}
+            {{- with .Values.execution.retention }}
+            {{- if .days }}
+            - name: BOOTH_PIPELINE_RETENTION_DAYS
+              value: {{ .days | quote }}
+            - name: BOOTH_PIPELINE_RETENTION_HOUR_UTC
+              value: {{ .hourUtc | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.execution.runnerEnvPassthrough }}
             - name: BOOTH_PIPELINE_RUNNER_ENV_PASSTHROUGH
               value: {{ join "," .Values.execution.runnerEnvPassthrough | quote }}

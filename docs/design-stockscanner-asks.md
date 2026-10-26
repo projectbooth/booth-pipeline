@@ -383,3 +383,15 @@ Changes from the note above, found while building it. Each PR adds its own.
 - **Rendering refuses a tag** (only a digest), or a name that isn't lower-case letters, digits and `-`. Startup
   refuses them too.
 
+**PR 4, retention:**
+- **Its own thread,** started with the scheduler, rather than inside the scheduler loop. The first prune after
+  turning retention on can take many nights' budgets, and it must never delay a fire. It runs at
+  `execution.retention.hourUtc`, 08:00 UTC by default (03:00 or 04:00 in Toronto).
+- **The bounds:**
+  - 500 runs per transaction, oldest first by `finished_at`, using `FOR UPDATE SKIP LOCKED`;
+  - `lock_timeout` 5 s and `statement_timeout` 120 s per batch;
+  - a 0.5 s pause between batches, and a 30-minute budget per night.
+  Every replica prunes, and `SKIP LOCKED` splits the work.
+- **The cutoff is `finished_at`.** Queued and running runs are never pruned, however old.
+- **A new partial index** on `runs (finished_at)` (migration 0013), so a batch finds its rows without a scan.
+
