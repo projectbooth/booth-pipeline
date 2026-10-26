@@ -177,6 +177,7 @@ def _make_op(
                 trigger=trigger,
                 env=env,
                 runner_image=config.runner_image or "",
+                modules={m.name: m.source or "" for m in config.modules},
             )
             output = registry.get(config.runner).run(inv, tlog, cancel)
         except TaskSkipped as e:

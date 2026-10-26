@@ -241,6 +241,29 @@ class SparkDataAccess(Wire):
     storage: list[SparkStorageLocation] = Field(default_factory=list, max_length=4)
 
 
+class ModuleRef(Wire):
+    """A shared Python module from booth-catalog's code catalog, imported by this task as ``import <name>``.
+
+    Pinned and snapshotted at save exactly like ``CatalogCode`` (docs/decisions/0001): ``latest`` becomes
+    the concrete version and the source is copied in, so a run never calls the catalog and a new
+    version of the module never changes a saved task. At run time it is ``modules/<name>.py`` beside
+    the task's code, on ``sys.path``.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    entry_id: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=64)
+    # Filled by the service on save; ignored (and overwritten) if a client sends them.
+    entry_name: str | None = None
+    language: str | None = None
+    sha256: str | None = None
+    source: str | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.source is not None and self.sha256 is not None and self.version != "latest"
+
+
 class TaskSecretRef(Wire):
     """ADR 0128: a workspace task secret this task is given, as the environment variable ``env`` in its
     own process. Only the name is stored with the task (and exported); the value stays in the workspace."""
@@ -302,6 +325,8 @@ class TaskConfig(Wire):
     # The operator's runner image this task's pod runs (a name from the chart's runner.images), or None
     # for the module's own. Base tasks only; checked in validate_task_config against what is configured.
     runner_image: str | None = None
+    # Shared Python modules from the catalog, importable by name (ModuleRef). Python tasks only.
+    modules: list[ModuleRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _spark_always_has_platform_access(self) -> TaskConfig:
@@ -362,12 +387,54 @@ def validate_task_config(config: TaskConfig, available_runners: set[str] | None 
         check_requirements(config.requirements)
     if config.secrets:
         check_task_secrets(config)
+    if config.modules:
+        check_modules(config)
     if config.runner_image is not None:
         if config.runner == SPARK_RUNNER:
             raise ModelError("a Spark task's pod runs only booth-pipeline's Spark client; it can't choose a runner image", "runnerImage")
         if runner_images is not None and config.runner_image not in runner_images:
             offered = f"available: {', '.join(sorted(runner_images))}" if runner_images else "this install has none (an operator sets runner.images)"
             raise ModelError(f"runner image {config.runner_image!r} is not configured on this install; {offered}", "runnerImage")
+
+
+MAX_MODULES = 20
+MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def check_modules(config: TaskConfig) -> None:
+    """Shared modules: Python tasks only, at most ``MAX_MODULES``, each an importable name that shadows
+    nothing (the standard library, the task's own ``task`` module, another module of the task), and all
+    of their sources together within ``MAX_INLINE_SOURCE_BYTES``. A Spark task's modules travel inline
+    with its code, so there they also count against booth-spark's inline limit."""
+    import keyword
+    import sys
+
+    if code_language(config.code) != "python":
+        raise ModelError("only a Python task can import shared modules", "modules")
+    if len(config.modules) > MAX_MODULES:
+        raise ModelError(f"at most {MAX_MODULES} shared modules", "modules")
+    seen: set[str] = set()
+    for i, mod in enumerate(config.modules):
+        where = f"modules[{i}].name"
+        if not MODULE_NAME_RE.match(mod.name) or keyword.iskeyword(mod.name):
+            raise ModelError("a module name is what the task imports: letters, digits and '_', not starting with a digit", where)
+        if mod.name in sys.stdlib_module_names or mod.name in ("task", "pyspark") or mod.name.startswith("booth"):
+            raise ModelError(f"{mod.name!r} would shadow a module the task or Python itself needs; choose another name", where)
+        if mod.name in seen:
+            raise ModelError(f"{mod.name!r} is imported twice", where)
+        seen.add(mod.name)
+        if mod.language and mod.language != "python":
+            raise ModelError(f"catalog entry {mod.entry_id!r} is {mod.language!r}, not Python", f"modules[{i}].entryId")
+    total = sum(len((mod.source or "").encode("utf-8")) for mod in config.modules)
+    if total > MAX_INLINE_SOURCE_BYTES:
+        raise ModelError(f"a task's shared modules come to {total // 1024} KiB; together they are limited to {MAX_INLINE_SOURCE_BYTES // 1024} KiB", "modules")
+    if config.runner == SPARK_RUNNER:
+        own = len((config.code.source or "").encode("utf-8"))
+        if own + total > MAX_SPARK_INLINE_BYTES - 8 * 1024:
+            raise ModelError(
+                f"a Spark task's code and shared modules travel to booth-spark inline: together at most {(MAX_SPARK_INLINE_BYTES - 8 * 1024) // 1024} KiB",
+                "modules",
+            )
 
 
 def check_task_secrets(config: TaskConfig) -> None:

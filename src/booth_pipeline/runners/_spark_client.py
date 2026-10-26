@@ -74,6 +74,16 @@ class _Ctx:
 
 
 spark = _SparkSession.builder.getOrCreate()
+if _BOOTH.get("modules"):
+    # Shared modules from the catalog: importable in the driver, and shipped to the executors.
+    import os as _os, tempfile as _tempfile
+    _mods = _tempfile.mkdtemp(prefix="booth-modules-")
+    for _name, _src in _BOOTH["modules"].items():
+        _path = _os.path.join(_mods, _name + ".py")
+        with open(_path, "w", encoding="utf-8") as _f:
+            _f.write(_src)
+        spark.sparkContext.addPyFile(_path)
+    _sys.path.insert(0, _mods)
 ctx = _Ctx(spark)
 _sys.argv = ["task.py", *_BOOTH["args"]]
 _ns = {"__name__": "__booth_task__", "spark": spark, "ctx": ctx}
@@ -129,8 +139,9 @@ def spark_error(status: int, raw: bytes) -> str:
         return raw.decode("utf-8", errors="replace").strip()[:500] or f"HTTP {status}"
 
 
-def build_code(source: str, inv: dict, spark: dict) -> str:
+def build_code(source: str, inv: dict, spark: dict, modules: dict[str, str] | None = None) -> str:
     booth = {
+        "modules": modules or {},
         "params": inv.get("params") or {},
         "inputs": inv.get("inputs") or {},
         "runId": inv["runId"],
@@ -142,7 +153,7 @@ def build_code(source: str, inv: dict, spark: dict) -> str:
     code = PRELUDE % {"booth": repr(json.dumps(booth)), "source": repr(source), "max_output": MAX_OUTPUT, "marker": OUTPUT}
     if len(code.encode("utf-8")) > MAX_INLINE:
         raise Failed(
-            f"this task's code and inputs come to {len(code.encode('utf-8')) // 1024} KiB with the prelude, more than booth-spark's "
+            f"this task's code, shared modules and inputs come to {len(code.encode('utf-8')) // 1024} KiB with the prelude, more than booth-spark's "
             "256 KiB; pass large inputs through the lakehouse instead of ctx.inputs"
         )
     return code
@@ -247,7 +258,7 @@ def run(workdir: str, result_path: str, sleep=time.sleep) -> None:
     api = Spark(spark["url"], spark["workspace"], token_file)
     body = {
         "name": app_name(inv),
-        "main": {"inlinePython": build_code(source, inv, spark)},
+        "main": {"inlinePython": build_code(source, inv, spark, _read_modules(workdir))},
         "args": list(spark.get("args") or []),
         "conf": dict(spark.get("conf") or {}),
         "maxDuration": f"{int(inv['timeoutSeconds'])}s",
@@ -290,6 +301,19 @@ def run(workdir: str, result_path: str, sleep=time.sleep) -> None:
         raise Failed(f"spark application {app_id} succeeded, but its output line wasn't found in its log")
     with open(result_path, "w", encoding="utf-8") as f:
         json.dump(result, f)
+
+
+def _read_modules(workdir: str) -> dict[str, str]:
+    """The shared modules the runner wrote beside task.py (modules/<name>.py), to send along inline."""
+    d = os.path.join(workdir, "modules")
+    if not os.path.isdir(d):
+        return {}
+    out = {}
+    for f in sorted(os.listdir(d)):
+        if f.endswith(".py"):
+            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                out[f[:-3]] = fh.read()
+    return out
 
 
 def _drop_empty(d: dict) -> dict:

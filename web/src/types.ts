@@ -62,6 +62,20 @@ export interface TaskConfig {
   secrets?: TaskSecretRef[];
   /** An operator-built runner image (a name from GET /config's runnerImages), or null for the module's own. */
   runnerImage?: string | null;
+  /** Shared Python modules from the code catalog, imported by `name`. Pinned and snapshotted at save. */
+  modules?: ModuleRef[];
+}
+
+/** A shared module: catalog entry `entryId` at `version` ("latest" until saved), imported as `name`. The
+ *  rest is the server's snapshot, filled on save. */
+export interface ModuleRef {
+  name: string;
+  entryId: string;
+  version: string;
+  entryName?: string | null;
+  language?: string | null;
+  sha256?: string | null;
+  source?: string | null;
 }
 
 /** ADR 0128: a task's use of a workspace secret, by name, as the environment variable `env`. */

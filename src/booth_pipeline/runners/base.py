@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 # The runner service protocol revision this module speaks (runner_service.py's docstring lists them).
 # Bump it with any change a runner image built from an older or newer booth-pipeline would get wrong.
-RUNNER_PROTOCOL = 2
+RUNNER_PROTOCOL = 3
 
 
 class TaskFailed(Exception):
@@ -92,6 +92,9 @@ class TaskInvocation:
     # runner.images: the operator's image this task's pod runs (by its name in that map), or "" for the
     # module's own. Only the Job runner reads it; it never leaves the API/scheduler pod.
     runner_image: str = ""
+    # Shared modules from the catalog (model.ModuleRef): import name -> source, written as
+    # modules/<name>.py beside the task's code and put on sys.path.
+    modules: dict[str, str] = field(default_factory=dict)
 
 
 class TaskLog(Protocol):

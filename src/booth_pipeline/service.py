@@ -23,6 +23,7 @@ from .model import (
     EventTrigger,
     InlineCode,
     ModelError,
+    ModuleRef,
     PipelineSpec,
     StorageCode,
     TaskConfig,
@@ -481,7 +482,21 @@ class PipelineService:
                     f"the code at {field} is {code_language(code)!r}; the base runner supports: {', '.join(languages.available())}",
                     field,
                 )
-        return config.model_copy(update={"code": code})
+        return config.model_copy(update={"code": code, "modules": self._resolve_modules(ident, config, previous)})
+
+    def _resolve_modules(self, ident: Identity, config: TaskConfig, previous: TaskConfig | None) -> list[ModuleRef]:
+        """Shared modules, pinned and snapshotted like catalog code: a module this task's previous version
+        already holds (same entry and version) is reused as stored; anything else is fetched, so a
+        client can't label arbitrary source as a catalog module."""
+        known = {(m.entry_id, m.version): m for m in (previous.modules if previous else []) if m.resolved}
+        out: list[ModuleRef] = []
+        for i, mod in enumerate(config.modules):
+            snap = known.get((mod.entry_id, mod.version))
+            if snap is None:
+                got = self._fetch_catalog(ident, CatalogCode(entry_id=mod.entry_id, version=mod.version), f"modules[{i}].entryId")
+                snap = ModuleRef(name=mod.name, entry_id=got.entry_id, version=got.version, entry_name=got.name, language=got.language, sha256=got.sha256, source=got.source)
+            out.append(snap.model_copy(update={"name": mod.name}))
+        return out
 
     def _fetch_catalog(self, ident: Identity, ref: CatalogCode, field: str) -> CatalogCode:
         try:

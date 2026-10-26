@@ -68,6 +68,16 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   via `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. boto3 reads those itself; for DuckDB, call
   `ctx.s3.duckdb(con)` in a Python task, while a SQL task can query `s3://…` with no setup
   ([0019](docs/decisions/0019-adr-0095-credential-sidecar.md)).
+- **Shared modules** — Python code several tasks use (a market calendar, a ticker universe) lives once in the code
+  catalog and is imported by name: a Python task lists `modules: [{entryId, version, name}]` (**Shared modules** in
+  its settings) and its code does `import <name>`. Like the task's own catalog code, each is pinned and snapshotted
+  when the task is saved (`latest` becomes the concrete version and the source is copied in), so a run never calls
+  the catalog and a new version never changes a saved task; choose the newer version and save to move on. At run
+  time each is `modules/<name>.py` beside the task's code, on `sys.path` after the task's own folder; modules can
+  import each other. A Spark task's modules travel inline with its code and are shipped to the executors
+  (`addPyFile`). Rules: at most 20, 256 KiB together (for Spark, code and modules together within booth-spark's
+  inline limit), Python entries only, and a name that shadows nothing (not the standard library, `task`, `pyspark`
+  or `booth*`).
 - **Run retention** — by default every run, task run and log line is kept. Set the chart's
   `execution.retention.days` and finished runs older than that (by when they finished) are deleted every night at
   `execution.retention.hourUtc` (08:00 UTC by default), with their task runs and logs; queued and running runs never

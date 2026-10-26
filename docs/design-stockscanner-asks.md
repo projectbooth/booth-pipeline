@@ -395,3 +395,20 @@ Changes from the note above, found while building it. Each PR adds its own.
 - **The cutoff is `finished_at`.** Queued and running runs are never pruned, however old.
 - **A new partial index** on `runs (finished_at)` (migration 0013), so a batch finds its rows without a scan.
 
+**PR 5, shared modules:**
+- **The snapshot.** Each module stores what `CatalogCode` stores: `entryName`, `language`, `sha256` and `source`,
+  filled at save. A module the task's previous version already holds, with the same entry and version, is reused
+  without a catalog call. Anything else is fetched, so sources a client sends are ignored.
+- **The budget.** All modules' sources together are within 256 KiB (`MAX_INLINE_SOURCE_BYTES`), separate from the
+  task's own source. A Spark task's code and modules travel inline together, so for Spark they share booth-spark's
+  limit (248 KiB after the prelude's allowance).
+- **Names.** A module name must be importable (not a keyword) and shadow nothing: not the standard library
+  (`sys.stdlib_module_names`), not `task`, not `pyspark`, not `booth*`. Names must be unique, at most 20 modules,
+  and Python entries only.
+- **Import order.** `sys.path` is the task's folder, then `modules/`, then the task's own packages. Modules can
+  import each other.
+- **Spark.** The modules are embedded in the prelude, written to a temp folder in the driver, put on the driver's
+  path, and shipped to the executors with `addPyFile`, so a UDF can import them too.
+- **The run request carries `modules` only when a task has some.** That is runner protocol revision 3, so an
+  operator image built before this release is refused by PR 3's check.
+

@@ -22,7 +22,7 @@ Protocol (internal; authenticated with a per-task bearer secret, ADR 0096):
   runner service may be older or newer than this module; a mismatch fails the task with how to fix it.
 
 Protocol revisions: 1 is everything before the endpoint existed; 2 adds a skip as a result
-(``"skipped"``) and the task's secrets (``env``).
+(``"skipped"``) and the task's secrets (``env``); 3 adds shared modules (``modules``).
 """
 
 from __future__ import annotations
@@ -97,6 +97,8 @@ class RunBody(BaseModel):
     # ADR 0128: the task's secrets, set in its process's environment and nowhere else. Never logged:
     # nothing in this service logs a request body.
     env: dict[str, str] = {}
+    # Shared modules: import name -> source (model.ModuleRef). Protocol 3.
+    modules: dict[str, str] = {}
 
 
 class TokenBody(BaseModel):
@@ -192,6 +194,7 @@ def create_runner_app(
             spark=body.spark,
             trigger=body.trigger,
             env=body.env,
+            modules=body.modules,
         )
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         cancel = Cancellation()
