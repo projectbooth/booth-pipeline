@@ -93,6 +93,11 @@ class ListRecorder:
         with self._lock:
             self.events.append(("system", message))
 
+    @property
+    def outputs(self) -> dict[str, Any]:
+        """Each task's latest reported output."""
+        return {e[1]: e[3] for e in self.events if e[0] == "output"}
+
     def statuses(self, key: str) -> list[str]:
         return [e[0] for e in self.events if len(e) > 1 and e[1] == key and e[0] not in ("system", "output", "secrets")]
 

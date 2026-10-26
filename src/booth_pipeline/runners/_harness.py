@@ -255,6 +255,9 @@ def main() -> int:
     ctx = Context(payload)
     _add_site(os.environ.get("BOOTH_SITE_DIR", ""))
     sys.path.insert(0, workdir)
+    modules = os.path.join(workdir, "modules")
+    if os.path.isdir(modules):  # shared modules from the catalog: `import market_calendar`
+        sys.path.insert(1, modules)
     try:
         namespace = runpy.run_path(os.path.join(workdir, "task.py"), run_name="__booth_task__")
         run = namespace.get("run")

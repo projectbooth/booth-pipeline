@@ -3,6 +3,7 @@ import type { ApiContext } from "../api/client";
 import type { Backoff, PipStatus, RunnerInfo, TaskConfig } from "../types";
 import { CodePicker } from "./CodePicker";
 import { isRequirementsField, RequirementsField } from "./RequirementsField";
+import { isModulesField, ModulesField } from "./ModulesField";
 import { isSecretsField, SecretsField } from "./SecretsField";
 import { SparkOptionsForm, type SparkLimits } from "./SparkOptionsForm";
 import { StoragePicker } from "./StoragePicker";
@@ -80,10 +81,11 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, run
   // silently dropped just because it doesn't map to an input here.
   const fieldError = (f: string) => (error?.field === f ? error.message : undefined);
   const isSparkField = (f: string | null | undefined) => f === "spark" || !!f?.startsWith("spark.");
-  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field) || isSecretsField(error.field) || isSparkField(error.field)));
+  const showBanner = error && (!error.field || !(KNOWN_CONFIG_ERROR_FIELDS.has(error.field) || isRequirementsField(error.field) || isSecretsField(error.field) || isModulesField(error.field) || isSparkField(error.field)));
   const onSpark = config.runner === "spark";
   const requirements = config.requirements ?? [];
   const secrets = config.secrets ?? [];
+  const modules = config.modules ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -287,6 +289,10 @@ export function TaskConfigForm({ config, runners, api, readOnly, error, pip, run
             error={isRequirementsField(error?.field) ? error?.message : undefined}
             onChange={(r) => onChange({ ...config, requirements: r })}
           />
+        )}
+
+        {(isPython(config) || modules.length > 0) && (
+          <ModulesField api={api} value={modules} error={isModulesField(error?.field) ? (error ?? undefined) : undefined} onChange={(next) => onChange({ ...config, modules: next })} />
         )}
 
         {((isPython(config) && !onSpark) || secrets.length > 0) && (

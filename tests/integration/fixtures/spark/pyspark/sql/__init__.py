@@ -20,8 +20,19 @@ class _Builder:
         return SparkSession()
 
 
+class _SparkContext:
+    """Records the files shipped to executors (there are none here; the driver imports them itself)."""
+
+    def __init__(self) -> None:
+        self.py_files: list[str] = []
+
+    def addPyFile(self, path: str) -> None:  # noqa: N802 - pyspark's own spelling
+        self.py_files.append(path)
+
+
 class SparkSession:
     builder = _Builder()
+    sparkContext = _SparkContext()  # noqa: N815 - pyspark's own spelling
 
     def range(self, start, end=None):
         lo, hi = (0, start) if end is None else (start, end)

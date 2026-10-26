@@ -36,6 +36,7 @@ TOKEN_FILE = ".booth-platform-token"
 # A harness may write the task's failure reason here before exiting non-zero, so the task fails with
 # that message rather than "exited with code N" (the Spark client does: Spark's own reason).
 FAILURE_FILE = "failure.txt"
+MODULES_DIR = "modules"
 SPARK_CLIENT = Path(__file__).with_name("_spark_client.py")
 MAX_LOG_CHUNK = 8192
 
@@ -137,6 +138,11 @@ class SubprocessRunner:
         if inv.requirements:
             self._report_install(log)
         Path(workdir, handler.source_filename).write_text(inv.source, encoding="utf-8")
+        if inv.modules:
+            # Shared modules, beside the task's code; the harness (or the Spark client) puts them on the path.
+            Path(workdir, MODULES_DIR).mkdir()
+            for name, source in inv.modules.items():
+                Path(workdir, MODULES_DIR, f"{name}.py").write_text(source, encoding="utf-8")
         token_key = (inv.run_id, inv.task_key)
         access_meta = None
         if inv.access is not None:

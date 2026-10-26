@@ -131,6 +131,8 @@ class RemoteRunner:
                 "catalogUrl": inv.access.catalog_url,
             },
         }
+        if inv.modules:  # only when there are some, like env (runner protocol 3)
+            body["modules"] = inv.modules
         if inv.env:
             # ADR 0128: the task's secrets, only when it has some, so a task without any still runs on a
             # runner image from before them. Plaintext HTTP inside the cluster, as the platform token
