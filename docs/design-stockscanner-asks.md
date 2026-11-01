@@ -412,3 +412,10 @@ Changes from the note above, found while building it. Each PR adds its own.
 - **The run request carries `modules` only when a task has some.** That is runner protocol revision 3, so an
   operator image built before this release is refused by PR 3's check.
 
+**Release prep for 0.4.0:**
+- **Unused features aren't stored.** A task using no secrets, runner image or modules is stored and served with
+  exactly the keys 0.3.0 wrote, so it stays readable after a rollback to 0.3.0. A task that does use one still can't
+  be read by 0.3.0.
+- **The release workflow checks versions first.** `hack/check-release-version.sh` fails the release if the tag
+  disagrees with `pyproject.toml`, `__version__`, or the chart's `version` and `appVersion`.
+
