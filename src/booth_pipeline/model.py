@@ -30,7 +30,15 @@ import hashlib
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 # Bounds. Each exists so one request cannot make the service hold or execute something unbounded.
@@ -327,6 +335,17 @@ class TaskConfig(Wire):
     runner_image: str | None = None
     # Shared Python modules from the catalog, importable by name (ModuleRef). Python tasks only.
     modules: list[ModuleRef] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_features(self, handler: Any) -> dict[str, Any]:
+        # A task that doesn't use secrets, a runner image or modules is stored and served with exactly the
+        # keys 0.3.0 wrote: Wire refuses unknown fields, so storing `secrets: []` would make every task saved
+        # on this release unreadable after a rollback to 0.3.0. Absent keys read back as the defaults.
+        out = handler(self)
+        for key in ("secrets", "modules", "runner_image", "runnerImage"):
+            if key in out and not out[key]:
+                del out[key]
+        return out
 
     @model_validator(mode="after")
     def _spark_always_has_platform_access(self) -> TaskConfig:
