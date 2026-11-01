@@ -109,8 +109,9 @@ docs/decisions/    judgment calls the ADRs didn't settle — READ THESE
   attempt. Nothing else receives them: not other tasks, not `invocation.json`, not the pip init container, not a
   Kubernetes object. Values must be at least 8 characters, one line. What the run stores, its log lines, task and run
   errors and kept outputs, has each value replaced by `[secret NAME]`; that can't catch a value split across two log
-  lines, a transformed value (base64, URL-encoded), or anything the task sends over the network, so whoever can edit a
-  task that declares a secret can read it. Exports carry the names only. A secret the workspace hasn't set fails that
+  lines, a transformed value (base64, URL-encoded), or anything the task sends over the network, so any editor of the
+  workspace can read any workspace secret, by declaring it on a task and printing it encoded (ADR 0128 accepts this:
+  the control is who may author tasks). Exports carry the names only. A secret the workspace hasn't set fails that
   task ("secret NAME is not set in this workspace"), without retries; the run's other tasks still run. Spark tasks
   can't use secrets (their code is stored in booth-spark). **Setup:** values are sealed (AES-256-GCM) in this module's
   database with a key the operator creates as a Kubernetes Secret and names in `taskSecrets.keySecretName`; see

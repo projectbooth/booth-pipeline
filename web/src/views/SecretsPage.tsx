@@ -66,8 +66,8 @@ export function SecretsPage({ v }: { v: ViewCtx }) {
       />
       <Banner tone="info">
         A value is never shown again once saved, and is taken out of logs, errors and outputs as <code>[secret NAME]</code>. That can't catch a
-        value split across two log lines, a transformed value (base64, URL-encoded), or anything a task sends over the network: whoever can edit a
-        task that declares a secret can read it. Spark tasks can't use secrets.
+        value split across two log lines, a transformed value (base64, URL-encoded), or anything a task sends over the network. So any editor of
+        this workspace can read any secret here, by declaring it on a task and printing it encoded. Spark tasks can't use secrets.
       </Banner>
       {isOwner && editing !== null && (
         <SecretForm

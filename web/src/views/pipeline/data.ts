@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type ApiContext } from "../../api/client";
 import { errorMessage, useInterval } from "../../hooks";
-import { isActive } from "../../runs";
+import { isActive, latestRunFor } from "../../runs";
 import type { Pipeline, PipelineDraft, PipelineVersion, PipelineVersionSummary, RunDetail, TaskRef, TaskStatus } from "../../types";
 
 // Everything the pipeline detail page (S2) shows that isn't specific to one tab.
@@ -63,8 +63,7 @@ export function useLatestRun(ctx: ApiContext, pipelineId: string, pollMs = 2000)
   const reload = useCallback(async () => {
     const mine = ++generation.current;
     try {
-      const page = await api.listRuns(ctx, { pipelineId, limit: 1 });
-      const summary = page.items[0];
+      const summary = await latestRunFor(ctx, pipelineId);
       if (!summary) {
         if (mine === generation.current) setRun(null);
         return;

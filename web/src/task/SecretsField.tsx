@@ -48,7 +48,8 @@ export function SecretsField({ api: ctx, value, error, onChange }: SecretsFieldP
       <h3 className="text-xs font-medium text-slate-600 dark:text-slate-300">Secrets</h3>
       <p className="text-xs text-slate-500 dark:text-slate-400">
         Workspace secrets this task gets as environment variables, read with <code>os.environ[&quot;NAME&quot;]</code>. Values are set by a
-        workspace owner on the Secrets page and taken out of this task's logs, errors and output; anyone who can edit this task can still read them.
+        workspace owner on the Secrets page and taken out of this task's logs, errors and output. Any editor of this workspace can still read any
+        workspace secret, by declaring it on a task and printing it encoded.
       </p>
       {value.length > 0 && (
         <ul aria-label="Secrets this task gets" className="flex flex-col gap-2">

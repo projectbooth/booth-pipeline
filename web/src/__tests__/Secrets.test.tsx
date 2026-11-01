@@ -48,6 +48,7 @@ describe("Secrets page", () => {
     expect(b.called("PUT", "/secrets/FMP")[0].body).toEqual({ value: VALUE });
     expect(document.body.textContent).not.toContain(VALUE);
     expect(screen.getByText(/can't catch a value split across two log lines/)).toBeInTheDocument();
+    expect(screen.getByText(/any editor of this workspace can read any secret here, by declaring it on a task and printing it encoded/)).toBeInTheDocument();
     expect(screen.getByText(/If that key is lost, every secret here becomes unreadable/)).toBeInTheDocument();
   });
 
