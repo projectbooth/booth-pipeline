@@ -172,13 +172,12 @@ export function PipelineList({ v }: { v: ViewCtx }) {
 
   const load = useLoad(async () => {
     const page = await api.listPipelines(v.api, q, selectedProject);
-    const latest = await latestRunsFor(v.api, page.items.map((p) => p.id));
-    return { pipelines: page.items, latest };
+    const { latest, anyActive } = await latestRunsFor(v.api, page.items.map((p) => p.id));
+    return { pipelines: page.items, latest, anyActive };
   }, [v.api, q, selectedProject]);
 
   const data = load.state.status === "ready" ? load.state.data : null;
-  const anyActive = !!data && Object.values(data.latest).some(isActive);
-  useInterval(load.reload, 10_000, anyActive);
+  useInterval(load.reload, 10_000, !!data?.anyActive);
 
   const counts = useMemo(() => {
     const c: Record<Filter, number> = { all: 0, running: 0, failed: 0, succeeded: 0, skipped: 0, never: 0 };
